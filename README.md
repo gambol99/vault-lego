@@ -38,7 +38,7 @@ GLOBAL OPTIONS:
    --version, -v                        print the version
 ```
 
-#### ** Ingress Annotations**
+#### **Ingress Annotations**
 ----
 The following annotations are supported on the ingress resources.
 
@@ -48,7 +48,7 @@ The following annotations are supported on the ingress resources.
 |ingress.kubernetes.io/path|string|override the default vault pki backend path|
 |ingress.kubernetes.io/ttl|string|override the duration of the certificate e.g 10h|
 
-#### **Example***
+#### **Example**
 
 ```YAML
 apiVersion: extensions/v1beta1
