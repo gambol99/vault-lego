@@ -32,7 +32,7 @@ func main() {
 
 	app.Flags = []cli.Flag{
 		cli.StringFlag{
-			Name:   "host, h",
+			Name:   "host, H",
 			Usage:  "the url for the vault service i.e. https://vault.vault.svc.cluster.local `HOST`",
 			EnvVar: "VAULT_ADDR",
 		},
