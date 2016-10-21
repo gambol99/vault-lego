@@ -43,7 +43,7 @@ GLOBAL OPTIONS:
 The following annotations are supported on the ingress resources.
 
 |Name                 |type|  description|
-|---------------------------|------|
+|---------------------------|------|-----|
 |ingress.vault.io/tls|true or false|indicates if you wish to this ingress resource managed|
 |ingress.kubernetes.io/path|string|override the default vault pki backend path|
 |ingress.kubernetes.io/ttl|string|override the duration of the certificate e.g 10h|
