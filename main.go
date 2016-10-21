@@ -28,7 +28,7 @@ import (
 
 func main() {
 	app := cli.NewApp()
-	app.Author = "Rohith Jayawardene"
+	app.Author = author
 	app.Usage = "Requests certificates from vault on behalf of ingress resources"
 	app.Version = version
 

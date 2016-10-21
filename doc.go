@@ -24,6 +24,7 @@ import (
 var (
 	release = "v0.0.1"
 	gitsha  = "no gitsha provided"
+	author  = "Rohith Jayawardene"
 	version = release + " (git+sha: " + gitsha + ")"
 )
 
