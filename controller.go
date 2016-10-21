@@ -19,14 +19,13 @@ package main
 import (
 	"errors"
 	"fmt"
-	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/hashicorp/vault/api"
-	"k8s.io/kubernetes/pkg/apis/extensions"
 	client "k8s.io/kubernetes/pkg/client/unversioned"
+	"k8s.io/kubernetes/pkg/util/flowcontrol"
 )
 
 // controller is the handler for requests and renewals
@@ -39,149 +38,98 @@ type controller struct {
 	kc *client.Client
 	// the current list of ingress resources
 	resources atomic.Value
+	// the reconcile rate limiter
+	rate flowcontrol.RateLimiter
 }
 
 // newController creates a new controller for you
-func newController(config *Config) error {
+func newController(config *Config) (*controller, error) {
+	// step: configure the logger
+	logrus.SetLevel(logrus.InfoLevel)
+	if config.jsonLogging {
+		logrus.SetFormatter(&logrus.JSONFormatter{})
+	}
+	if config.verbose {
+		logrus.SetLevel(logrus.DebugLevel)
+	}
+	logrus.Infof("starting the vault-lego service, version: %s", version)
+
+	// step: check the service configuration
+	if err := isValidConfig(config); err != nil {
+		return nil, fmt.Errorf("configuration invalid, %s", err)
+	}
+
 	// step: create the vault client
 	vc, err := createVaultClient(config.vaultURL, config.vaultToken)
 	if err != nil {
-		return fmt.Errorf("unable to create vault client, reason %s", err)
+		return nil, fmt.Errorf("unable to create vault client, reason %s", err)
 	}
 
 	// step: create a kubernetes client
-	kc, err := createKubeClient()
+	kc, err := createKubeClient(config.kubeconfig, config.kubecontext)
 	if err != nil {
-		return fmt.Errorf("unable to create kubernetes client, reason %s", err)
+		return nil, fmt.Errorf("unable to create kubernetes client, reason %s", err)
 	}
 
-	// step: create a controller service
-	ctr := &controller{
+	return &controller{
 		vc:     vc,
 		kc:     kc,
 		config: config,
+	}, nil
+}
+
+// isValidConfig checks the configurtion options are vali
+func isValidConfig(config *Config) error {
+	if config.vaultURL == "" {
+		return errors.New("no vault host")
 	}
-	// step: start the reconcilation process
-	ctr.reconcile()
+	if config.vaultToken == "" {
+		return errors.New("no vault token")
+	}
+	if config.minCertTTL > config.defaultCertTTL {
+		return errors.New("minimum certificate ttl cannot be greater then default")
+	}
 
 	return nil
 }
 
 // reconcile is the main reconcilation method
-func (c *controller) reconcile() {
+func (c *controller) reconcile() error {
 	// step: create a ticker for reconcilation
 	ticker := time.NewTicker(c.config.reconcileTTL)
-	// step: create a ticker for the certificate renewal
 	renewal := time.NewTicker(1 * time.Hour)
+
 	// step: create a watch of the ingress resources
 	watcherCh, _ := c.createIngressWatcher()
+
+	// step: setup the ratelimiter for ingress
+	c.rate = flowcontrol.NewTokenBucketRateLimiter(0.1, 1)
 
 	for {
 		select {
 		// a time interval for checking config
 		case <-ticker.C:
-			c.reconcileIngress()
+			logrus.Debugf("reconcilation ticker has fired")
+			go c.reconcileIngress()
 		// a ingress resource updated or created
 		case <-watcherCh:
-			c.reconcileIngress()
+			logrus.Debugf("a change to ingress has occured")
+			go c.reconcileIngress()
 		case <-renewal.C:
 		}
 	}
 }
 
-// requestCertificate requests a certificate from vault
-func (c *controller) requestCertificate(ing *extensions.Ingress, cfg extensions.IngressTLS) (certificate, error) {
-	var cert certificate
-
-	// step: make a request for the certificate from vault
-	path := c.config.defaultPath
-	if override, found := ing.GetAnnotations()[AnnotationVaultPath]; found {
-		path = override
-	}
-	ttl := c.config.defaultCertTTL
-	if override, found := ing.GetAnnotations()[AnnotationVaultTTL]; found {
-		tm, err := time.ParseDuration(override)
-		if err == nil {
-			ttl = tm
-		}
-	}
-	// step: add some logging
-	logrus.WithFields(logrus.Fields{
-		"name":      ing.Name,
-		"namespace": ing.Namespace,
-		"path":      path,
-		"ttl":       ttl.String(),
-		"hosts":     strings.Join(cfg.Hosts, ","),
-		"secret":    cfg.SecretName,
-	}).Error("generating certificate for ingress resource")
-
-	// step: construct the request
-	request := map[string]interface{}{
-		"common_name": cfg.Hosts[0],
-		"format":      "pem",
-		"ttl":         ttl,
-	}
-	if len(cfg.Hosts) > 1 {
-		request["alt_name"] = strings.Join(cfg.Hosts[1:], ",")
-	}
-
-	// step: make the request to vault for the certificate
-	secret, err := c.vc.Logical().Write(path, request)
+// run is responsible for starting the reconcilation loop
+func (c *controller) run() error {
+	// step: get an initial list of resurces
+	resources, err := c.ingressList()
 	if err != nil {
-		return cert, err
+		return err
 	}
-	// check we have some data
-	if secret.Data == nil || len(secret.Data) <= 0 {
-		return cert, fmt.Errorf("invalid request from vault request, warning: %s", secret.Warnings)
-	}
-
-	cert.ca = secret.Data["issuing_ca"].(string)
-	cert.cert = secret.Data["certificate"].(string)
-	cert.key = secret.Data["private_key"].(string)
-
-	return cert, err
-}
-
-// isValidIngress is responsible for validating the ingress resource
-func isValidIngress(ing *extensions.Ingress) error {
-	if len(ing.Spec.TLS) <= 0 {
-		return errors.New("no tls settings")
-	}
-	for i, x := range ing.Spec.TLS {
-		if len(x.Hosts) <= 0 {
-			return fmt.Errorf("tls settings for item %d has not hosts", i)
-		}
-		if x.SecretName == "" {
-			return fmt.Errorf("tls settings for item: %d has no secret name defined", i)
-		}
-	}
+	c.resources.Store(resources)
+	// step: start the background processing
+	go c.reconcile()
 
 	return nil
-}
-
-// createVaultClient is responsible for creating a vault client
-func createVaultClient(host, token string) (*api.Client, error) {
-	// step: create the vault client
-	client, err := api.NewClient(&api.Config{Address: host})
-	if err != nil {
-		return nil, err
-	}
-	client.SetToken(token)
-
-	return client, nil
-}
-
-// createKubeClient is responsible for creating a kubernetes client
-func createKubeClient() (*client.Client, error) {
-	// step: create the client
-	kc, err := client.NewInCluster()
-	if err != nil {
-		return nil, err
-	}
-	// step: test by getting the version
-	if _, err := kc.ServerVersion(); err != nil {
-		return nil, err
-	}
-
-	return kc, nil
 }

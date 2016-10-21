@@ -19,6 +19,8 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/urfave/cli"
@@ -42,22 +44,42 @@ func main() {
 			EnvVar: "VAULT_TOKEN",
 		},
 		cli.StringFlag{
-			Name:   "namespace, n",
-			Usage:  "the namespace the service should be looking, by default all",
-			EnvVar: "NAMESPACE",
-			Value:  "",
-		},
-		cli.DurationFlag{
-			Name:   "default-certificate-ttl",
-			Usage:  "the default time-to-live of the certificate (can override by annontation) `TTL`",
-			EnvVar: "DEFAULT_CERTIFICATE_TTL",
-			Value:  48 * time.Hour,
-		},
-		cli.StringFlag{
 			Name:   "default-path, p",
 			Usage:  "the default vault path the pki exists on, e.g. pki/default/issue `PATH`",
 			EnvVar: "VAULT_PKI_PATH",
 			Value:  "pki/issue/default",
+		},
+		cli.StringFlag{
+			Name:   "kubeconfig",
+			Usage:  "the path to a kubectl configuration file `PATH`",
+			Value:  os.Getenv("HOME") + "/.kube/config",
+			EnvVar: "KUBE_CONFIG",
+		},
+		cli.StringFlag{
+			Name:   "kube-context",
+			Usage:  "the kubernetes context inside the kubeconfig file `CONTEXT`",
+			EnvVar: "KUBE_CONTEXT",
+		},
+		cli.StringFlag{
+			Name:   "namespace, n",
+			Usage:  "the namespace the service should be looking, by default all `NAMESPACE`",
+			EnvVar: "KUBE_NAMESPACE",
+		},
+		cli.DurationFlag{
+			Name:   "default-ttl",
+			Usage:  "the default time-to-live of the certificate (can override by annontation) `TTL`",
+			EnvVar: "VAULT_PKI_TTL",
+			Value:  48 * time.Hour,
+		},
+		cli.DurationFlag{
+			Name:   "minimum-ttl",
+			Usage:  "the minimum time-to-live on the certificate, ingress cannot request less then this",
+			EnvVar: "VAUILT_PKI_MIN_TTL",
+			Value:  24 * time.Hour,
+		},
+		cli.BoolTFlag{
+			Name:  "json-logging",
+			Usage: "whether to enable default json logging format, defaults to true",
 		},
 		cli.DurationFlag{
 			Name:   "reconcilation-interval",
@@ -65,22 +87,41 @@ func main() {
 			EnvVar: "RECONCILCATION_INTERVAL",
 			Value:  5 * time.Minute,
 		},
+		cli.BoolFlag{
+			Name:  "verbose",
+			Usage: "switch on verbose logging",
+		},
 	}
 	// the default action to perform
 	app.Action = func(cx *cli.Context) error {
 		config := &Config{
 			vaultURL:       cx.String("host"),
 			vaultToken:     cx.String("token"),
-			defaultCertTTL: cx.Duration("default-certificate-ttl"),
+			defaultCertTTL: cx.Duration("default-ttl"),
+			minCertTTL:     cx.Duration("minimum-ttl"),
 			defaultPath:    cx.String("default-path"),
+			kubeconfig:     cx.String("kubeconfig"),
+			kubecontext:    cx.String("kube-context"),
+			jsonLogging:    cx.Bool("json-logging"),
 			reconcileTTL:   cx.Duration("reconcilation-interval"),
 			verbose:        cx.Bool("verbose"),
 		}
 		// step: create the controller and run
-		if err := newController(config); err != nil {
+		service, err := newController(config)
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "[error] %s", err)
 			os.Exit(1)
 		}
+		// start the service
+		if err := service.run(); err != nil {
+			fmt.Fprintf(os.Stderr, "[error] %s", err)
+			os.Exit(1)
+		}
+
+		signalChannel := make(chan os.Signal)
+		signal.Notify(signalChannel, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+		<-signalChannel
+
 		return nil
 	}
 

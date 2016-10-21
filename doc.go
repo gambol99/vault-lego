@@ -44,12 +44,20 @@ type Config struct {
 	vaultToken string
 	// the namespace we should operate
 	namespace string
+	// the kubeconfig file
+	kubeconfig string
+	// the kube context
+	kubecontext string
+	// the minimum ttl
+	minCertTTL time.Duration
 	// the default ttl
 	defaultCertTTL time.Duration
 	// the default path
 	defaultPath string
 	// is the interval between reconcilation
 	reconcileTTL time.Duration
+	// json logging
+	jsonLogging bool
 	// the verbosity
 	verbose bool
 }
@@ -61,7 +69,7 @@ type ingressResource struct {
 
 // certificate is a wrapper for a requested cert
 type certificate struct {
-	ca   string
-	cert string
-	key  string
+	ca   []byte
+	cert []byte
+	key  []byte
 }

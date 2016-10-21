@@ -17,7 +17,11 @@ limitations under the License.
 package main
 
 import (
+	"errors"
+	"fmt"
 	"reflect"
+	"strings"
+	"time"
 
 	"github.com/Sirupsen/logrus"
 	"k8s.io/kubernetes/pkg/apis/extensions"
@@ -25,6 +29,9 @@ import (
 
 // reconcileIngress is responsible for processing the ingress resources
 func (c *controller) reconcileIngress() {
+	// step: rate limit us
+	c.rate.Accept()
+
 	// step: retrieve a list of ingress resources
 	list, err := c.ingressList()
 	if err != nil {
@@ -34,11 +41,12 @@ func (c *controller) reconcileIngress() {
 	// step: check if the ingress resources have changed
 	resources := c.resources.Load().(*extensions.IngressList)
 	if reflect.DeepEqual(resources, list) {
-		// nothing has changed we can continue
+		logrus.Debugf("nothing to do, the ingress resource have not changed")
 		return
 	}
+	// update the resources
+	c.resources.Store(list)
 
-	// step: iterate the list
 	for _, x := range list.Items {
 		// step: check if the ingress resource is vault enabled
 		enabled, found := x.GetAnnotations()[AnnotationVaultTLS]
@@ -50,8 +58,8 @@ func (c *controller) reconcileIngress() {
 			continue
 		}
 
-		// step: validate the ingress resource has be processed by us
-		if err := isValidIngress(&x); err != nil {
+		// step: validate the ingress resource is valid
+		if err := isIngressOK(&x); err != nil {
 			logrus.WithFields(logrus.Fields{
 				"name":      x.Name,
 				"namespace": x.Namespace,
@@ -60,36 +68,135 @@ func (c *controller) reconcileIngress() {
 			continue
 		}
 
-		// step: we iterate the tls configs and check the certificate exist
-		for index, j := range x.Spec.TLS {
-			message, err := func() (string, error) {
-				if found, err := c.hasSecret(j.SecretName, x.Namespace); err != nil {
-					return "unable to check for kubernetes secret", err
-				} else if found {
-					// check if the certificate is coming up for renewal
-
-					return "", nil
-				}
-
-				// step: we need to request a certificate from vault for this
-				cert, err := c.requestCertificate(&x, j)
+		// step: we iterate the tls configs and check the certificate exists
+		for _, tls := range x.Spec.TLS {
+			err := func() error {
+				// step: check if the secret already exists for this namespace?
+				found, err := c.hasSecret(tls.SecretName, x.Namespace)
 				if err != nil {
-					return "unable to generate certificate for resource", err
+					return err
 				}
-				// step: inject the certificate into the namespace
-				if err := c.addSecret(j.SecretName, x.Namespace, cert); err != nil {
-					return "unable to add kubernetes secret", err
+				if found {
+					// check if the certificate is coming up for renewal
+					expiring, err := c.checkCertificateExpiring(x.Name, x.Namespace, tls.SecretName)
+					if err != nil {
+						return err
+					}
+					// is is close or expired?
+					if !expiring {
+						logrus.WithFields(logrus.Fields{
+							"name":      x.Name,
+							"namespace": x.Namespace,
+							"hosts":     strings.Join(tls.Hosts, ","),
+							"secret":    tls.SecretName,
+						}).Debug("certificate not near or expired")
+
+						return nil
+					}
+					logrus.WithFields(logrus.Fields{
+						"name":      x.Name,
+						"namespace": x.Namespace,
+						"hosts":     strings.Join(tls.Hosts, ","),
+						"secret":    tls.SecretName,
+					}).Info("certificate is or has expired, attempting to renew")
 				}
-				return "", nil
+
+				// step: make a request for a certificate
+				if err := c.makeCertificateRequest(&x, &tls); err != nil {
+					return err
+				}
+				// step: spit out some logging
+				logrus.WithFields(logrus.Fields{
+					"name":      x.Name,
+					"namespace": x.Namespace,
+					"hosts":     strings.Join(tls.Hosts, ","),
+					"secret":    tls.SecretName,
+				}).Info("adding vault certifacte for ingress resource")
+
+				return nil
 			}()
 			if err != nil {
 				logrus.WithFields(logrus.Fields{
 					"name":      x.Name,
 					"namespace": x.Namespace,
-					"index":     index,
+					"secret":    tls.SecretName,
 					"error":     err.Error(),
-				}).Error(message)
+				}).Error("unable to process ingress tls config")
 			}
 		}
 	}
+}
+
+// makeCertificateRequest is responsible for making a request to the store for a certificate
+func (c *controller) makeCertificateRequest(ingress *extensions.Ingress, tls *extensions.IngressTLS) error {
+	// step: make a request for the certificate from vault
+	path := c.config.defaultPath
+	if override, found := ingress.GetAnnotations()[AnnotationVaultPath]; found {
+		path = override
+	}
+	ttl := c.config.defaultCertTTL
+	if override, found := ingress.GetAnnotations()[AnnotationVaultTTL]; found {
+		tm, err := time.ParseDuration(override)
+		if err == nil {
+			ttl = tm
+		}
+
+	}
+	logrus.WithFields(logrus.Fields{
+		"name":      ingress.Name,
+		"namespace": ingress.Namespace,
+		"path":      path,
+		"ttl":       ttl.String(),
+		"hosts":     strings.Join(tls.Hosts, ","),
+		"secret":    tls.SecretName,
+	}).Error("generating certificate for ingress resource")
+
+	// step: we need to request a certificate from vault for this
+	cert, err := c.generateCertificate(path, ttl, tls.Hosts)
+	if err != nil {
+		return err
+	}
+	// step: inject the certificate into the namespace
+	return c.addSecret(tls.SecretName, ingress.Namespace, cert)
+}
+
+// checkCertificateExpiring is responsible for checking if a certificate is about to expire
+func (c *controller) checkCertificateExpiring(name, namespace, secret string) (bool, error) {
+	// step: grab the secret from kubernetes
+	cert, err := c.getSecret(secret, namespace)
+	if err != nil {
+		return false, err
+	}
+
+	// step: spit out some logging
+	logrus.WithFields(logrus.Fields{
+		"name":      name,
+		"namespace": namespace,
+		"secret":    secret,
+	}).Debugf("checking if the certifacte is expiring")
+
+	// step: check if the certificate is expiring
+	expired, err := isCertificateExpiring(cert.cert, time.Duration(-6*time.Hour))
+	if err != nil {
+		return false, err
+	}
+
+	return expired, nil
+}
+
+// isIngressOK is responsible for validating the ingress resource
+func isIngressOK(ing *extensions.Ingress) error {
+	if len(ing.Spec.TLS) <= 0 {
+		return errors.New("no tls settings")
+	}
+	for i, x := range ing.Spec.TLS {
+		if len(x.Hosts) <= 0 {
+			return fmt.Errorf("tls settings for item %d has not hosts", i)
+		}
+		if x.SecretName == "" {
+			return fmt.Errorf("tls settings for item: %d has no secret name defined", i)
+		}
+	}
+
+	return nil
 }
