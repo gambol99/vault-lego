@@ -1,6 +1,7 @@
 env:
   global:
-    secure: RMH1gflcZARgBWEvhX1dBl3VY2ISUKp6/QWOf3IUe2hTGi2t4EZJ8n+VVsBqzNOAMuMxP2OU7DeNgYvy4EAprRFP/mRB6SqTDEEFKUmXhLeg10GsXlEPbCkB+8Nwyc8DNY4anAM2VS93QdtqAPTd4SELwDsi0g3O4N+A3yq0xZXke1nqnOMxEUa2/+FrYQT3gMr0xcBWCd2vBZ4Hywffuf4Bor1XOlZckfqqdETCeGPTYwOGwMc3uFAXsteryoMFLjPvnZrZGXfxXuu5sFG3BqQfS6Fsz1JBqKcreaUdyaGRxF9ppav6CSPvLF0P/reAfHrk2L2JQ2J/AF6j+Ew2BPOah7CSRM6uMZelpNHv97DS6H2uZ7IOPkbsnKk0h4C5x4FqSKrMGdJjjjC7fP2O/4Pc79wQn2aHTUVcnhfQmAL90xzDBJohpCVvABWK0S+dtmyAsPFLSQlwrWGCA/a/LysvsQg0Y133HbAKKba1FrFiOPytWfPWmdztOEDEf4RukT7DyBn4hdID7Mad/J3DvYR7/Jc5U7pX1QACK7KK2SffE+igGjlAqnu6TtfEmPNGkrMtHGmhk2m4NFdTSAvirCmBkE5cyGKkFipTHeU+YRQR87pYONZrXgaN2kM97mVUjUa4efbDo8EzkJq17fGJhXMHwrQHdP+muDcvpvOWF/Y=
+  - secure: RMH1gflcZARgBWEvhX1dBl3VY2ISUKp6/QWOf3IUe2hTGi2t4EZJ8n+VVsBqzNOAMuMxP2OU7DeNgYvy4EAprRFP/mRB6SqTDEEFKUmXhLeg10GsXlEPbCkB+8Nwyc8DNY4anAM2VS93QdtqAPTd4SELwDsi0g3O4N+A3yq0xZXke1nqnOMxEUa2/+FrYQT3gMr0xcBWCd2vBZ4Hywffuf4Bor1XOlZckfqqdETCeGPTYwOGwMc3uFAXsteryoMFLjPvnZrZGXfxXuu5sFG3BqQfS6Fsz1JBqKcreaUdyaGRxF9ppav6CSPvLF0P/reAfHrk2L2JQ2J/AF6j+Ew2BPOah7CSRM6uMZelpNHv97DS6H2uZ7IOPkbsnKk0h4C5x4FqSKrMGdJjjjC7fP2O/4Pc79wQn2aHTUVcnhfQmAL90xzDBJohpCVvABWK0S+dtmyAsPFLSQlwrWGCA/a/LysvsQg0Y133HbAKKba1FrFiOPytWfPWmdztOEDEf4RukT7DyBn4hdID7Mad/J3DvYR7/Jc5U7pX1QACK7KK2SffE+igGjlAqnu6TtfEmPNGkrMtHGmhk2m4NFdTSAvirCmBkE5cyGKkFipTHeU+YRQR87pYONZrXgaN2kM97mVUjUa4efbDo8EzkJq17fGJhXMHwrQHdP+muDcvpvOWF/Y=
+  - secure: Gcn1ggyZ96yeSAoBfMf5Gpkki4aCcDaJ0KcCnfLdvfs09iK174OUUgmNQPDJy53KlqzjBUcKCzKQ5BQde7O8LHuDF2yJLrUNqm4VRLPIdXt2dVkUWldwomk+RlMBbEhJdXuiqEMnpgpeGx0bU15xDlLA1w7sB7lNyaYVuOvr8abdhfinhO5vnT5XLeNTJ9byWU4lQbBThJmkLPtE6GTcuag04WuRcnNeV7tvnJb1R3m81i7mIUmTa2T3Xc2dpWX/IkGi8ROOcloEbQyMROyShGFVoMsGpTn9BlWaTt1RqXdlHSa8nJCiRSI2qOD9DnlD+g/xAIQbagUmh5N1nE4K+xKzkUXMfbAK3AkesnHI6unXSNA/e7C2Q8yyilP8sNcntzrkMoELxwGUCCfqbSp1wjMnPJw2zyzvuFKVlcneekPfmSHCJWNW4o/Y3qRAFaJSUYGhdf7KZ67hYEfr1CkjvrmpEbbNB/E8t1bMj6Fs6Yi++u2Y3CFj4fi3Pt8rGw2TcPb2q4fn3cr8gCri01mZz/UqdkKZegQgXwb7lhEmubmujgKM5ycbP+/1TnJ6Q0jisAaTcgcwb5lzenbM+euVdsRFqrZl8354aclbknw5bqVFTPngqzLRS/nKBqNqDI2iy6c6dmqRBS7csM0cCo84dME7qEYJQUM557YFVLylajw=
   - AUTHOR_EMAIL=gambol99@gmail.com
   - REGISTRY_USERNAME=gambol99+rebotbuilder
   - REGISTRY=quay.io
@@ -8,17 +9,17 @@ services:
 - docker
 language: go
 go:
-- 1.7.3
+- 1.7
 install:
 - go get github.com/Masterminds/glide
 script:
 - make test
 - if ([[ ${TRAVIS_BRANCH} == "master" ]] && [[ ${TRAVIS_PULL_REQUEST} != "true" ]]) || [[ -n ${TRAVIS_TAG} ]]; then
-    docker login -u ${REGISTRY_USERNAME} -p ${REGISTRY_TOKEN} -e ${AUTHOR_EMAIL} ${REGISTRY};
-    VERSION="latest" make docker-release;
+     docker login -u ${REGISTRY_USERNAME} -p ${REGISTRY_TOKEN} -e ${AUTHOR_EMAIL} ${REGISTRY};
+     VERSION="latest" make docker-release;
   fi
 before_deploy:
-- NAME=GOOS=linux GOARCH=amd64 godep go build -o bin/vault-lego-linux-amd64
+- NAME=GOOS=linux GOARCH=amd64 go build -o bin/vault-lego-linux-amd64
 after_deploy:
 - docker login -u ${REGISTRY_USERNAME} -p ${REGISTRY_TOKEN} -e ${AUTHOR_EMAIL} ${REGISTRY}
 - VERSION=$TRAVIS_TAG make docker-release
@@ -26,10 +27,8 @@ deploy:
   provider: releases
   skip_cleanup: true
   on:
-    go: 1.7
     repo: gambol99/vault-lego
     tags: true
-  file:
-  - bin/vault-lego-linux-amd64
   api_key:
-    secure: TG4WpG0gc6g9pjV5pxhl6U9EAnfBK+3VtkopZnJyeY+mhuNX2ZbRvPr5jsDlu3ujTsXyU0bwl1bziCfqMooa0rYCXG8l1hhLNHxxaISRDK24jIEX65t31/nZTyYdcte3nqmeJ9V6SnWZmLz296aTmjsl1qomdq1WiRq8+hrM+XVqEFbKmOonMFQKzsS6egnnAm8A/WIIGSwl6Po4Bxgyzv2kWmZ4ekSfU0uzBVcFCDRV2C/VWHvHX0k2G5hvJdwijOIiknNMyt2s70sHmvY8RKXzjNp68tLr1arOiHoOKwDtbsmFtTwOCCshaDWMgyHTp8L1a0n6yT7V6woxen/fit5ZuWSvnll2G5hjwnMjYbnDmyM9gY1KuWMyAvNgDd5hEX6dB6q9sojgCAd1FWXfg3BcMBoc5EV+OA0DXs5vEpxP98OccvIGeeqT7g2DIq5brQekHaIUV3YQUJA1lwWO1q/maOCbvyudMD10Ol9xAQNezE9ZbSb0FftCjpkHRJgJtL+1FIkiGhbQHJwHkHXHPDCy3DsQgcAJpX+j19ScI47ins9mvS6a8C4VVgX3+/roznhD43rt87ac2BTvYBDVXPKOiYHIbXVnSgirZnQT3cu1nJYbFNpU3G4mxTRAfHCix4VasoULybCdxBv9viKhQIWa2DnIhs665Iso8cGuEN8=
+    secure: "${GITHUB_TOKEN}"
+  file: bin/vault-lego-linux-amd64
