@@ -1,0 +1,19 @@
+package: github.com/gambol99/vault-lego
+import:
+- package: github.com/Sirupsen/logrus
+  version: ^0.10.0
+- package: github.com/hashicorp/vault
+  version: ^0.6.2
+  subpackages:
+  - api
+- package: github.com/urfave/cli
+  version: ^1.18.1
+- package: k8s.io/kubernetes
+  version: ^1.5.0-alpha.1
+  subpackages:
+  - pkg/api
+  - pkg/apis/extensions
+  - pkg/client/cache
+  - pkg/client/unversioned
+  - pkg/runtime
+  - pkg/watch

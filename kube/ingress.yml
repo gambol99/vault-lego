@@ -1,0 +1,20 @@
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  annotations:
+    ingress.vault.io/tls: "true"
+    ingress.vault.io/ttl: "10h"
+    ingress.vault.io/path: pki/default
+  name: clair
+spec:
+  rules:
+  - host: site.example.com
+    http:
+      paths:
+      - backend:
+          serviceName: clair
+          servicePort: 443
+  tls:
+  - hosts:
+    - site.example.com
+    secretName: tls
