@@ -1,3 +1,8 @@
+[![Build Status](https://travis-ci.org/gambol99/vault-lego.svg?branch=master)](https://travis-ci.org/gambol99/vault-lego)
+[![GoDoc](http://godoc.org/github.com/gambol99/vault-lego?status.png)](http://godoc.org/github.com/gambol99/vault-lego)
+[![Docker Repository on Quay](https://quay.io/repository/gambol99/vault-lego/status "Docker Repository on Quay")](https://quay.io/repository/gambol99/vault-lego)
+[![GitHub version](https://badge.fury.io/gh/gambol99%2Fvault-lego.svg)](https://badge.fury.io/gh/gambol99%2Fvault-lego)
+
 ## **Vault Lego**
 ----
 
@@ -45,8 +50,8 @@ The following annotations are supported on the ingress resources.
 |Name                 |type|  description|
 |---------------------------|------|-----|
 |ingress.vault.io/tls|true or false|indicates if you wish to this ingress resource managed|
-|ingress.kubernetes.io/path|string|override the default vault pki backend path|
-|ingress.kubernetes.io/ttl|string|override the duration of the certificate e.g 10h|
+|ingress.vault.io/path|string|override the default vault pki backend path|
+|ingress.vault.io/ttl|string|override the duration of the certificate e.g 10h|
 
 #### **Example**
 
