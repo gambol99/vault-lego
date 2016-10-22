@@ -53,7 +53,64 @@ The following annotations are supported on the ingress resources.
 |ingress.vault.io/path|string|override the default vault pki backend path|
 |ingress.vault.io/ttl|string|override the duration of the certificate e.g 10h|
 
-#### **Example**
+#### **Kubernetes Setup**
+
+Note, I am assuming you are using [service accounts](http://kubernetes.io/docs/user-guide/service-accounts/) and a [abac policy](http://kubernetes.io/docs/admin/authorization/).
+
+- **Create the service account**
+```shell
+[jest@starfury ~]$ cat service-account.yml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vault-lego
+
+[jest@starfury ~]$ kubectl --namespace=ingress apply -f service-account.yml
+```
+
+- **Update the authorization policy**
+
+Note: your probably was want to be more specific in the below policy, i.e. readonly to ingress resources and read-write on the all namespace secrets, but you get the gist.
+
+```JSON
+{"apiVersion":"abac.authorization.kubernetes.io/v1beta1","kind":"Policy", "spec": {"user":"system:serviceaccount:ingress:vault-lego","namespace":"*","resource":"*","apiGroup":"*"}}
+```
+
+- **Deploy the service**
+
+```shell
+[jest@starfury ~]$ cat deployment.yml
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  name: vault-lego
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        name: vault-lego
+    spec:
+      containers:
+      - name: vault-lego
+        image: quay.io/gambol99/vault-lego:latest
+        resources:
+          limits:
+            cpu: 100m
+            memory: 100Mi
+        env:
+        - name: VAULT_ADDR
+          value: "https://vault.vault.svc.cluster.local:8200"
+        - name: VAULT_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: vault-token
+              key: token
+
+[jest@starfury ~]$ kubectl --namespace=ingress apply -f deployment.yml
+```
+
+#### **Example Ingress Resource**
 
 ```YAML
 apiVersion: extensions/v1beta1
