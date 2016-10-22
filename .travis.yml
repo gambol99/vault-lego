@@ -1,9 +1,9 @@
 env:
   global:
-  - secure: RMH1gflcZARgBWEvhX1dBl3VY2ISUKp6/QWOf3IUe2hTGi2t4EZJ8n+VVsBqzNOAMuMxP2OU7DeNgYvy4EAprRFP/mRB6SqTDEEFKUmXhLeg10GsXlEPbCkB+8Nwyc8DNY4anAM2VS93QdtqAPTd4SELwDsi0g3O4N+A3yq0xZXke1nqnOMxEUa2/+FrYQT3gMr0xcBWCd2vBZ4Hywffuf4Bor1XOlZckfqqdETCeGPTYwOGwMc3uFAXsteryoMFLjPvnZrZGXfxXuu5sFG3BqQfS6Fsz1JBqKcreaUdyaGRxF9ppav6CSPvLF0P/reAfHrk2L2JQ2J/AF6j+Ew2BPOah7CSRM6uMZelpNHv97DS6H2uZ7IOPkbsnKk0h4C5x4FqSKrMGdJjjjC7fP2O/4Pc79wQn2aHTUVcnhfQmAL90xzDBJohpCVvABWK0S+dtmyAsPFLSQlwrWGCA/a/LysvsQg0Y133HbAKKba1FrFiOPytWfPWmdztOEDEf4RukT7DyBn4hdID7Mad/J3DvYR7/Jc5U7pX1QACK7KK2SffE+igGjlAqnu6TtfEmPNGkrMtHGmhk2m4NFdTSAvirCmBkE5cyGKkFipTHeU+YRQR87pYONZrXgaN2kM97mVUjUa4efbDo8EzkJq17fGJhXMHwrQHdP+muDcvpvOWF/Y=
   - AUTHOR_EMAIL=gambol99@gmail.com
   - REGISTRY_USERNAME=gambol99+rebotbuilder
   - REGISTRY=quay.io
+  - secure: bLPah5chMCs3QXz3lEZE/vlN+66tkEkgDRvfwVAa5vqdaNEIwJJVf5Jc2PBlFfhDpHnTC13HBKVtFeiHa7YFxoZce6wEFZkEJcUna8qZ+aE6gDXfUGV1E+wRYcZ8fWkaEr0KQ6qlVUw8gQvec/nWL7WjtQASQ3BosBZOnkUTCFFpFlesHmKooK+FwSHGHDk3580QJTB3YKDuCgTSLTrLdmt+j9XJTy0glzqxRAj2/cTK8Giq4ZCEHkfUog0YzUlK0AfQawbR0HJEhEuwlWEjAQQTtBVLJP62RNXjZzdCgRM3fW+AgI2OJcKK8bcqmleVjXMrASh310yd8Neq3SHZVu/WMOuIHVu7xG2ntXEPKxxQO/9iWSZwoiGC/HSX8MdFeeTz+bSoGe+BGAJTqyodHLmLRbfbtJRdzaa6i5onVkG7ZqumJXhNKnBrwzLz/k4yYSVz/TLilT5hyTyRLiOgjUTmO2iWVGRX5ECnFfiM3U85GPNZRGWyfYBlP7u48eF+EBvVmS/+rD/EjcRhgxCPVRnCPMnC4sLiqp7eChpRblWPXLWmcEXrt/ma1Gb4vwKoWCgndV+u10EOQSzJbyfs+aTNkl8iYtKOFlg3Vj7IvMNnu6lfeoVPIDXbYMlLO5NK0+sWgepn9N42LhVfFc+Smg2+7uTzEApds2J4jmQdrZE=
 services:
 - docker
 language: go
@@ -13,10 +13,9 @@ install:
 - go get github.com/Masterminds/glide
 script:
 - make test
-- if ([[ ${TRAVIS_BRANCH} == "master" ]] && [[ ${TRAVIS_PULL_REQUEST} != "true" ]]) || [[ -n ${TRAVIS_TAG} ]]; then
-     docker login -u ${REGISTRY_USERNAME} -p ${REGISTRY_TOKEN} -e ${AUTHOR_EMAIL} ${REGISTRY};
-     VERSION="latest" make docker-release;
-  fi
+- if ([[ ${TRAVIS_BRANCH} == "master" ]] && [[ ${TRAVIS_PULL_REQUEST} != "true" ]])
+  || [[ -n ${TRAVIS_TAG} ]]; then docker login -u ${REGISTRY_USERNAME} -p ${REGISTRY_TOKEN}
+  -e ${AUTHOR_EMAIL} ${REGISTRY}; VERSION="latest" make docker-release; fi
 before_deploy:
 - NAME=GOOS=linux GOARCH=amd64 go build -o bin/vault-lego-linux-amd64
 after_deploy:
