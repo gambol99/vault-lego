@@ -1,0 +1,26 @@
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  name: vault-lego
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        name: vault-lego
+    spec:
+      containers:
+      - name: vault-lego
+        image: quay.io/gambol99/vault-lego:latest
+        resources:
+          limits:
+            cpu: 100m
+            memory: 100Mi
+        env:
+        - name: VAULT_ADDR
+          value: "https://vault.vault.svc.cluster.local:8200"
+        - name: VAULT_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: vault-token
+              key: token
