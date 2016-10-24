@@ -67,6 +67,9 @@ func (c *controller) getSecret(name, namespace string) (certificate, error) {
 // addSecret is responsible for add the certificate secret to the namespace
 func (c *controller) addSecret(name, namespace string, cert certificate) error {
 	var err error
+
+	bundle := fmt.Sprintf("%s\n%s", string(cert.cert), string(cert.ca))
+
 	// step: create the secret
 	secret := &api.Secret{
 		Type: api.SecretTypeTLS,
@@ -75,7 +78,7 @@ func (c *controller) addSecret(name, namespace string, cert certificate) error {
 			Namespace: namespace,
 		},
 		Data: map[string][]byte{
-			api.TLSCertKey:       cert.cert,
+			api.TLSCertKey:       []byte(bundle),
 			api.TLSPrivateKeyKey: cert.key,
 		},
 	}

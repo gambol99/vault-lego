@@ -149,7 +149,7 @@ func (c *controller) makeCertificateRequest(ingress *extensions.Ingress, tls *ex
 		"ttl":       ttl.String(),
 		"hosts":     strings.Join(tls.Hosts, ","),
 		"secret":    tls.SecretName,
-	}).Error("generating certificate for ingress resource")
+	}).Info("generating certificate for ingress resource")
 
 	// step: we need to request a certificate from vault for this
 	cert, err := c.generateCertificate(path, ttl, tls.Hosts)
