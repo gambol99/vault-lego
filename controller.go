@@ -97,7 +97,6 @@ func isValidConfig(config *Config) error {
 func (c *controller) reconcile() error {
 	// step: create a ticker for reconcilation
 	ticker := time.NewTicker(c.config.reconcileTTL)
-	renewal := time.NewTicker(1 * time.Hour)
 
 	// step: create a watch of the ingress resources
 	watcherCh, _ := c.createIngressWatcher()
@@ -115,7 +114,6 @@ func (c *controller) reconcile() error {
 		case <-watcherCh:
 			logrus.Debugf("a change to ingress has occured")
 			go c.reconcileIngress()
-		case <-renewal.C:
 		}
 	}
 }
