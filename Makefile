@@ -1,5 +1,5 @@
 NAME=vault-lego
-AUTHOR=gambol99
+AUTHOR ?= gambol99
 AUTHOR_EMAIL=gambol99@gmail.com
 REGISTRY=quay.io
 GOVERSION=1.7.3

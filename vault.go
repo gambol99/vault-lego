@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Sirupsen/logrus"
 	"github.com/hashicorp/vault/api"
 )
 
@@ -85,6 +86,8 @@ func isCertificateExpiring(content []byte, threshold time.Duration) (bool, error
 
 // createVaultClient is responsible for creating a vault client
 func createVaultClient(host, token string) (*api.Client, error) {
+	logrus.Debugf("creating vault client, host: %s", host)
+
 	// the http client
 	hc := &http.Client{
 		Timeout: time.Duration(30) * time.Second,

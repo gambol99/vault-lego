@@ -74,7 +74,7 @@ func main() {
 		cli.DurationFlag{
 			Name:   "minimum-ttl",
 			Usage:  "the minimum time-to-live on the certificate, ingress cannot request less then this",
-			EnvVar: "VAUILT_PKI_MIN_TTL",
+			EnvVar: "VAULT_PKI_MIN_TTL",
 			Value:  24 * time.Hour,
 		},
 		cli.BoolTFlag{
