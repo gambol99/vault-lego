@@ -20,12 +20,12 @@ import (
 	"fmt"
 	"strings"
 
-	"k8s.io/kubernetes/pkg/api"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/kubernetes/pkg/apis/extensions"
-	thirdpartyresourceetcd "k8s.io/kubernetes/pkg/registry/extensions/thirdpartyresource/etcd"
+	extensionsclient "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/extensions/internalversion"
 	"k8s.io/kubernetes/pkg/registry/extensions/thirdpartyresourcedata"
-	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/util/sets"
 )
 
 // ResourceInterface is the interface for the parts of the master that know how to add/remove
@@ -47,8 +47,8 @@ const thirdpartyprefix = "/apis"
 // ThirdPartyController is a control loop that knows how to synchronize ThirdPartyResource objects with
 // RESTful resources which are present in the API server.
 type ThirdPartyController struct {
-	master                     ResourceInterface
-	thirdPartyResourceRegistry *thirdpartyresourceetcd.REST
+	master ResourceInterface
+	client extensionsclient.ThirdPartyResourcesGetter
 }
 
 // SyncOneResource synchronizes a single resource with RESTful resources on the master
@@ -68,7 +68,7 @@ func (t *ThirdPartyController) SyncOneResource(rsrc *extensions.ThirdPartyResour
 
 // Synchronize all resources with RESTful resources on the master
 func (t *ThirdPartyController) SyncResources() error {
-	list, err := t.thirdPartyResourceRegistry.List(api.NewDefaultContext(), nil)
+	list, err := t.client.ThirdPartyResources().List(metav1.ListOptions{})
 	if err != nil {
 		return err
 	}

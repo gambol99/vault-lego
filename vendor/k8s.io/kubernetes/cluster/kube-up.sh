@@ -32,7 +32,6 @@ fi
 
 source "${KUBE_ROOT}/cluster/kube-util.sh"
 
-
 if [ -z "${ZONE-}" ]; then
   echo "... Starting cluster using provider: ${KUBERNETES_PROVIDER}" >&2
 else
@@ -41,6 +40,8 @@ fi
 
 echo "... calling verify-prereqs" >&2
 verify-prereqs
+echo "... calling verify-kube-binaries" >&2
+verify-kube-binaries
 
 if [[ "${KUBE_STAGE_IMAGES:-}" == "true" ]]; then
   echo "... staging images" >&2

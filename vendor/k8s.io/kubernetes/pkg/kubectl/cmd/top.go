@@ -20,41 +20,34 @@ import (
 	"io"
 
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
+	"k8s.io/kubernetes/pkg/util/i18n"
 
-	"github.com/renstrom/dedent"
 	"github.com/spf13/cobra"
+	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 )
 
 // TopOptions contains all the options for running the top cli command.
 type TopOptions struct{}
 
 var (
-	topLong = dedent.Dedent(`
+	topLong = templates.LongDesc(i18n.T(`
 		Display Resource (CPU/Memory/Storage) usage.
 
-		The top command allows you to see the resource consumption for nodes or pods.`)
+		The top command allows you to see the resource consumption for nodes or pods.
+
+		This command requires Heapster to be correctly configured and working on the server. `))
 )
 
-func NewCmdTop(f *cmdutil.Factory, out io.Writer) *cobra.Command {
-	options := &TopOptions{}
-
+func NewCmdTop(f cmdutil.Factory, out, errOut io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "top",
-		Short: "Display Resource (CPU/Memory/Storage) usage",
+		Short: i18n.T("Display Resource (CPU/Memory/Storage) usage."),
 		Long:  topLong,
-		Run: func(cmd *cobra.Command, args []string) {
-			if err := options.RunTop(f, cmd, args, out); err != nil {
-				cmdutil.CheckErr(err)
-			}
-		},
+		Run:   cmdutil.DefaultSubCommandRun(errOut),
 	}
 
 	// create subcommands
 	cmd.AddCommand(NewCmdTopNode(f, out))
 	cmd.AddCommand(NewCmdTopPod(f, out))
 	return cmd
-}
-
-func (o TopOptions) RunTop(f *cmdutil.Factory, cmd *cobra.Command, args []string, out io.Writer) error {
-	return cmd.Help()
 }

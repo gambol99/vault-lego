@@ -1,46 +1,12 @@
-<!-- BEGIN MUNGE: UNVERSIONED_WARNING -->
-
-<!-- BEGIN STRIP_FOR_RELEASE -->
-
-<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
-     width="25" height="25">
-<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
-     width="25" height="25">
-<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
-     width="25" height="25">
-<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
-     width="25" height="25">
-<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
-     width="25" height="25">
-
-<h2>PLEASE NOTE: This document applies to the HEAD of the source tree</h2>
-
-If you are using a released version of Kubernetes, you should
-refer to the docs that go with that version.
-
-<!-- TAG RELEASE_LINK, added by the munger automatically -->
-<strong>
-The latest release of this document can be found
-[here](http://releases.k8s.io/release-1.2/examples/volumes/nfs/README.md).
-
-Documentation for other releases can be found at
-[releases.k8s.io](http://releases.k8s.io).
-</strong>
---
-
-<!-- END STRIP_FOR_RELEASE -->
-
-<!-- END MUNGE: UNVERSIONED_WARNING -->
-
 # Outline
 
 This example describes how to create Web frontend server, an auto-provisioned persistent volume on GCE, and an NFS-backed persistent claim.
 
 Demonstrated Kubernetes Concepts:
 
-* [Persistent Volumes](http://kubernetes.io/docs/user-guide/persistent-volumes/) to
+* [Persistent Volumes](https://kubernetes.io/docs/concepts/storage/persistent-volumes/) to
   define persistent disks (disk lifecycle not tied to the Pods).
-* [Services](http://kubernetes.io/docs/user-guide/services/) to enable Pods to
+* [Services](https://kubernetes.io/docs/concepts/services-networking/service/) to enable Pods to
   locate one another.
 
 ![alt text][nfs pv example]
@@ -48,14 +14,14 @@ Demonstrated Kubernetes Concepts:
 As illustrated above, two persistent volumes are used in this example:
 
 - Web frontend Pod uses a persistent volume based on NFS server, and
-- NFS server uses an auto provisioned [persistent volume](http://kubernetes.io/docs/user-guide/persistent-volumes/) from GCE PD or AWS EBS.
+- NFS server uses an auto provisioned [persistent volume](https://kubernetes.io/docs/concepts/storage/persistent-volumes/) from GCE PD or AWS EBS.
 
 Note, this example uses an NFS container that doesn't support NFSv4.
 
 [nfs pv example]: nfs-pv.png
 
 
-## tl;dr Quickstart
+## Quickstart
 
 ```console
 $ kubectl create -f examples/volumes/nfs/provisioner/nfs-server-gce-pv.yaml
@@ -119,7 +85,7 @@ Replace the invalid IP in the [nfs PV](nfs-pv.yaml). (In the future,
 we'll be able to tie these together using the service names, but for
 now, you have to hardcode the IP.)
 
-Create the the [persistent volume](../../../docs/user-guide/persistent-volumes.md)
+Create the the [persistent volume](https://kubernetes.io/docs/user-guide/persistent-volumes.md)
 and the persistent volume claim for your NFS server. The persistent volume and
 claim gives us an indirection that allow multiple pods to refer to the NFS
 server using a symbolic name rather than the hardcoded server address.
@@ -192,11 +158,6 @@ nfs-busybox-w3s4t
 ```
 
 
-
-
-<!-- BEGIN MUNGE: IS_VERSIONED -->
-<!-- TAG IS_VERSIONED -->
-<!-- END MUNGE: IS_VERSIONED -->
 
 
 <!-- BEGIN MUNGE: GENERATED_ANALYTICS -->

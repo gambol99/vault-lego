@@ -24,10 +24,10 @@ netexec: netexec.go
 	CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags '-w' ./netexec.go
 
 image: netexec
-	docker build -t $(PREFIX)/netexec:$(TAG) .
+	docker build --pull -t $(PREFIX)/netexec:$(TAG) .
 
 push: image
-	gcloud docker push $(PREFIX)/netexec:$(TAG)
+	gcloud docker -- push $(PREFIX)/netexec:$(TAG)
 
 clean:
 	rm -f netexec

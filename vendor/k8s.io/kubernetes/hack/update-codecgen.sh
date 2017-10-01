@@ -38,7 +38,35 @@ generated_files=($(
         -o -wholename '*/vendor/*' \
         -o -wholename '*/codecgen-*-1234.generated.go' \
       \) -prune \
-    \) -name '*.generated.go' | sort -r))
+    \) -name '*.generated.go' | LC_ALL=C sort -r
+
+  find ./vendor/k8s.io/kube-aggregator/ -not \( \
+      \( \
+        -wholename './output' \
+        -o -wholename './_output' \
+        -o -wholename './staging' \
+        -o -wholename './release' \
+        -o -wholename './target' \
+        -o -wholename '*/third_party/*' \
+        -o -wholename '*/codecgen-*-1234.generated.go' \
+      \) -prune \
+    \) -name '*.generated.go' | LC_ALL=C sort -r
+
+  find ./vendor/k8s.io/metrics/ \
+    -name '*.generated.go' | LC_ALL=C sort -r
+
+  find ./vendor/k8s.io/apiserver/ -not \( \
+      \( \
+        -wholename './output' \
+        -o -wholename './_output' \
+        -o -wholename './staging' \
+        -o -wholename './release' \
+        -o -wholename './target' \
+        -o -wholename '*/third_party/*' \
+        -o -wholename '*/codecgen-*-1234.generated.go' \
+      \) -prune \
+    \) -name '*.generated.go' | LC_ALL=C sort -r
+))
 
 # We only work for deps within this prefix.
 my_prefix="k8s.io/kubernetes"
@@ -67,7 +95,7 @@ for (( i=0; i<number; i++ )); do
   deps[${i}]=$(go list -f '{{range .Deps}}{{.}}{{"\n"}}{{end}}' ${file} | grep "^${my_prefix}")
 done
 ###echo "DBG: found $number generated files"
-###for f in $(echo "${generated_files[@]}" | sort); do
+###for f in $(echo "${generated_files[@]}" | LC_ALL=C sort); do
 ###    echo "DBG:   $f"
 ###done
 

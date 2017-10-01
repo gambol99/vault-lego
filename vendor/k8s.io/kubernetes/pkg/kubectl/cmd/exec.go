@@ -22,21 +22,23 @@ import (
 	"net/url"
 
 	dockerterm "github.com/docker/docker/pkg/term"
-	"github.com/renstrom/dedent"
 	"github.com/spf13/cobra"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	remotecommandconsts "k8s.io/apimachinery/pkg/util/remotecommand"
+	restclient "k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/remotecommand"
 	"k8s.io/kubernetes/pkg/api"
-	coreclient "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/core/unversioned"
-	"k8s.io/kubernetes/pkg/client/restclient"
-	"k8s.io/kubernetes/pkg/client/unversioned/remotecommand"
+	coreclient "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/core/internalversion"
+	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
-	remotecommandserver "k8s.io/kubernetes/pkg/kubelet/server/remotecommand"
+	"k8s.io/kubernetes/pkg/util/i18n"
 	"k8s.io/kubernetes/pkg/util/interrupt"
 	"k8s.io/kubernetes/pkg/util/term"
 )
 
 var (
-	exec_example = dedent.Dedent(`
+	exec_example = templates.Examples(i18n.T(`
 		# Get output from running 'date' from pod 123456-7890, using the first container by default
 		kubectl exec 123456-7890 date
 
@@ -45,14 +47,22 @@ var (
 
 		# Switch to raw terminal mode, sends stdin to 'bash' in ruby-container from pod 123456-7890
 		# and sends stdout/stderr from 'bash' back to the client
-		kubectl exec 123456-7890 -c ruby-container -i -t -- bash -il`)
+		kubectl exec 123456-7890 -c ruby-container -i -t -- bash -il
+
+		# List contents of /usr from the first container of pod 123456-7890 and sort by modification time.
+		# If the command you want to execute in the pod has any flags in common (e.g. -i),
+		# you must use two dashes (--) to separate your command's flags/arguments.
+		# Also note, do not surround your command and its flags/arguments with quotes
+		# unless that is how you would execute it normally (i.e., do ls -t /usr, not "ls -t /usr").
+		kubectl exec 123456-7890 -i -t -- ls -t /usr
+		`))
 )
 
 const (
 	execUsageStr = "expected 'exec POD_NAME COMMAND [ARG1] [ARG2] ... [ARGN]'.\nPOD_NAME and COMMAND are required arguments for the exec command"
 )
 
-func NewCmdExec(f *cmdutil.Factory, cmdIn io.Reader, cmdOut, cmdErr io.Writer) *cobra.Command {
+func NewCmdExec(f cmdutil.Factory, cmdIn io.Reader, cmdOut, cmdErr io.Writer) *cobra.Command {
 	options := &ExecOptions{
 		StreamOptions: StreamOptions{
 			In:  cmdIn,
@@ -64,7 +74,7 @@ func NewCmdExec(f *cmdutil.Factory, cmdIn io.Reader, cmdOut, cmdErr io.Writer) *
 	}
 	cmd := &cobra.Command{
 		Use:     "exec POD [-c CONTAINER] -- COMMAND [args...]",
-		Short:   "Execute a command in a container",
+		Short:   i18n.T("Execute a command in a container"),
 		Long:    "Execute a command in a container.",
 		Example: exec_example,
 		Run: func(cmd *cobra.Command, args []string) {
@@ -84,19 +94,19 @@ func NewCmdExec(f *cmdutil.Factory, cmdIn io.Reader, cmdOut, cmdErr io.Writer) *
 
 // RemoteExecutor defines the interface accepted by the Exec command - provided for test stubbing
 type RemoteExecutor interface {
-	Execute(method string, url *url.URL, config *restclient.Config, stdin io.Reader, stdout, stderr io.Writer, tty bool, terminalSizeQueue term.TerminalSizeQueue) error
+	Execute(method string, url *url.URL, config *restclient.Config, stdin io.Reader, stdout, stderr io.Writer, tty bool, terminalSizeQueue remotecommand.TerminalSizeQueue) error
 }
 
 // DefaultRemoteExecutor is the standard implementation of remote command execution
 type DefaultRemoteExecutor struct{}
 
-func (*DefaultRemoteExecutor) Execute(method string, url *url.URL, config *restclient.Config, stdin io.Reader, stdout, stderr io.Writer, tty bool, terminalSizeQueue term.TerminalSizeQueue) error {
+func (*DefaultRemoteExecutor) Execute(method string, url *url.URL, config *restclient.Config, stdin io.Reader, stdout, stderr io.Writer, tty bool, terminalSizeQueue remotecommand.TerminalSizeQueue) error {
 	exec, err := remotecommand.NewExecutor(config, method, url)
 	if err != nil {
 		return err
 	}
 	return exec.Stream(remotecommand.StreamOptions{
-		SupportedProtocols: remotecommandserver.SupportedStreamingProtocols,
+		SupportedProtocols: remotecommandconsts.SupportedStreamingProtocols,
 		Stdin:              stdin,
 		Stdout:             stdout,
 		Stderr:             stderr,
@@ -139,7 +149,7 @@ type ExecOptions struct {
 }
 
 // Complete verifies command line arguments and loads data from the command environment
-func (p *ExecOptions) Complete(f *cmdutil.Factory, cmd *cobra.Command, argsIn []string, argsLenAtDash int) error {
+func (p *ExecOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, argsIn []string, argsLenAtDash int) error {
 	// Let kubectl exec follow rules for `--`, see #13004 issue
 	if len(p.PodName) == 0 && (len(argsIn) == 0 || argsLenAtDash == 0) {
 		return cmdutil.UsageError(cmd, execUsageStr)
@@ -258,7 +268,7 @@ func (o *StreamOptions) setupTTY() term.TTY {
 
 // Run executes a validated remote execution against a pod.
 func (p *ExecOptions) Run() error {
-	pod, err := p.PodClient.Pods(p.Namespace).Get(p.PodName)
+	pod, err := p.PodClient.Pods(p.Namespace).Get(p.PodName, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
@@ -282,7 +292,7 @@ func (p *ExecOptions) Run() error {
 	// ensure we can recover the terminal while attached
 	t := p.setupTTY()
 
-	var sizeQueue term.TerminalSizeQueue
+	var sizeQueue remotecommand.TerminalSizeQueue
 	if t.Raw {
 		// this call spawns a goroutine to monitor/update the terminal size
 		sizeQueue = t.MonitorSize(t.GetSize())

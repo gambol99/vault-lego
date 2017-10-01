@@ -28,6 +28,18 @@ const (
 	recoveryKeyPath = "core/recovery-key"
 )
 
+type KeyNotFoundError struct {
+	Err error
+}
+
+func (e *KeyNotFoundError) WrappedErrors() []error {
+	return []error{e.Err}
+}
+
+func (e *KeyNotFoundError) Error() string {
+	return e.Err.Error()
+}
+
 type Seal interface {
 	SetCore(*Core)
 	Init() error
@@ -146,6 +158,13 @@ func (d *DefaultSeal) BarrierConfig() (*SealConfig, error) {
 func (d *DefaultSeal) SetBarrierConfig(config *SealConfig) error {
 	if err := d.checkCore(); err != nil {
 		return err
+	}
+
+	// Provide a way to wipe out the cached value (also prevents actually
+	// saving a nil config)
+	if config == nil {
+		d.config = nil
+		return nil
 	}
 
 	config.Type = d.BarrierType()

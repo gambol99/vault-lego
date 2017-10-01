@@ -99,10 +99,10 @@ func parseMetrics(data string, output *Metrics) error {
 }
 
 func (g *MetricsGrabber) getMetricsFromPod(podName string, namespace string, port int) (string, error) {
-	rawOutput, err := g.client.Get().
-		Prefix("proxy").
+	rawOutput, err := g.client.Core().RESTClient().Get().
 		Namespace(namespace).
 		Resource("pods").
+		SubResource("proxy").
 		Name(fmt.Sprintf("%v:%v", podName, port)).
 		Suffix("metrics").
 		Do().Raw()

@@ -1,18 +1,19 @@
 package transit
 
 import (
+	"strings"
+
+	"github.com/hashicorp/vault/helper/keysutil"
 	"github.com/hashicorp/vault/logical"
 	"github.com/hashicorp/vault/logical/framework"
 )
 
 func Factory(conf *logical.BackendConfig) (logical.Backend, error) {
 	b := Backend(conf)
-	be, err := b.Backend.Setup(conf)
-	if err != nil {
+	if err := b.Setup(conf); err != nil {
 		return nil, err
 	}
-
-	return be, nil
+	return b, nil
 }
 
 func Backend(conf *logical.BackendConfig) *backend {
@@ -25,6 +26,8 @@ func Backend(conf *logical.BackendConfig) *backend {
 			b.pathRotate(),
 			b.pathRewrap(),
 			b.pathKeys(),
+			b.pathListKeys(),
+			b.pathExportKeys(),
 			b.pathEncrypt(),
 			b.pathDecrypt(),
 			b.pathDatakey(),
@@ -35,15 +38,28 @@ func Backend(conf *logical.BackendConfig) *backend {
 			b.pathVerify(),
 		},
 
-		Secrets: []*framework.Secret{},
+		Secrets:     []*framework.Secret{},
+		Invalidate:  b.invalidate,
+		BackendType: logical.TypeLogical,
 	}
 
-	b.lm = newLockManager(conf.System.CachingDisabled())
+	b.lm = keysutil.NewLockManager(conf.System.CachingDisabled())
 
 	return &b
 }
 
 type backend struct {
 	*framework.Backend
-	lm *lockManager
+	lm *keysutil.LockManager
+}
+
+func (b *backend) invalidate(key string) {
+	if b.Logger().IsTrace() {
+		b.Logger().Trace("transit: invalidating key", "key", key)
+	}
+	switch {
+	case strings.HasPrefix(key, "policy/"):
+		name := strings.TrimPrefix(key, "policy/")
+		b.lm.InvalidatePolicy(name)
+	}
 }

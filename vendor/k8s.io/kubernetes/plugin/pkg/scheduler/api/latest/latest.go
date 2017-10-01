@@ -17,10 +17,10 @@ limitations under the License.
 package latest
 
 import (
-	"k8s.io/kubernetes/pkg/api/unversioned"
-	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/runtime/serializer/json"
-	"k8s.io/kubernetes/pkg/runtime/serializer/versioning"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/runtime/serializer/json"
+	"k8s.io/apimachinery/pkg/runtime/serializer/versioning"
 	"k8s.io/kubernetes/plugin/pkg/scheduler/api"
 	_ "k8s.io/kubernetes/plugin/pkg/scheduler/api/v1"
 )
@@ -43,11 +43,11 @@ var Codec runtime.Codec
 
 func init() {
 	jsonSerializer := json.NewSerializer(json.DefaultMetaFactory, api.Scheme, api.Scheme, true)
-	Codec = versioning.NewCodecForScheme(
+	Codec = versioning.NewDefaultingCodecForScheme(
 		api.Scheme,
 		jsonSerializer,
 		jsonSerializer,
-		unversioned.GroupVersion{Version: Version},
+		schema.GroupVersion{Version: Version},
 		runtime.InternalGroupVersioner,
 	)
 }

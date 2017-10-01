@@ -20,16 +20,16 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"net"
+	"os"
 	"strings"
 
 	"github.com/golang/glog"
-	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/kubernetes/pkg/api/v1"
 	"k8s.io/kubernetes/pkg/apis/componentconfig"
 	"k8s.io/kubernetes/pkg/kubelet/network"
 	"k8s.io/kubernetes/pkg/util/bandwidth"
 	utiliptables "k8s.io/kubernetes/pkg/util/iptables"
-	"k8s.io/kubernetes/pkg/util/sets"
 )
 
 const (
@@ -49,11 +49,10 @@ const (
 
 // effectiveHairpinMode determines the effective hairpin mode given the
 // configured mode, container runtime, and whether cbr0 should be configured.
-func effectiveHairpinMode(hairpinMode componentconfig.HairpinMode, containerRuntime string, configureCBR0 bool, networkPlugin string) (componentconfig.HairpinMode, error) {
+func effectiveHairpinMode(hairpinMode componentconfig.HairpinMode, containerRuntime string, networkPlugin string) (componentconfig.HairpinMode, error) {
 	// The hairpin mode setting doesn't matter if:
 	// - We're not using a bridge network. This is hard to check because we might
-	//   be using a plugin. It matters if --configure-cbr0=true, and we currently
-	//   don't pipe it down to any plugins.
+	//   be using a plugin.
 	// - It's set to hairpin-veth for a container runtime that doesn't know how
 	//   to set the hairpin flag on the veth's of containers. Currently the
 	//   docker runtime is the only one that understands this.
@@ -64,18 +63,14 @@ func effectiveHairpinMode(hairpinMode componentconfig.HairpinMode, containerRunt
 			glog.Warningf("Hairpin mode set to %q but container runtime is %q, ignoring", hairpinMode, containerRuntime)
 			return componentconfig.HairpinNone, nil
 		}
-		if hairpinMode == componentconfig.PromiscuousBridge && !configureCBR0 && networkPlugin != "kubenet" {
-			// This is not a valid combination.  Users might be using the
+		if hairpinMode == componentconfig.PromiscuousBridge && networkPlugin != "kubenet" {
+			// This is not a valid combination, since promiscuous-bridge only works on kubenet. Users might be using the
 			// default values (from before the hairpin-mode flag existed) and we
 			// should keep the old behavior.
-			glog.Warningf("Hairpin mode set to %q but configureCBR0 is false, falling back to %q", hairpinMode, componentconfig.HairpinVeth)
+			glog.Warningf("Hairpin mode set to %q but kubenet is not enabled, falling back to %q", hairpinMode, componentconfig.HairpinVeth)
 			return componentconfig.HairpinVeth, nil
 		}
-	} else if hairpinMode == componentconfig.HairpinNone {
-		if configureCBR0 {
-			glog.Warningf("Hairpin mode set to %q and configureCBR0 is true, this might result in loss of hairpin packets", hairpinMode)
-		}
-	} else {
+	} else if hairpinMode != componentconfig.HairpinNone {
 		return "", fmt.Errorf("unknown value: %q", hairpinMode)
 	}
 	return hairpinMode, nil
@@ -95,25 +90,124 @@ func (kl *Kubelet) providerRequiresNetworkingConfiguration() bool {
 	return supported
 }
 
-// Returns the list of DNS servers and DNS search domains.
-func (kl *Kubelet) parseResolvConf(reader io.Reader) (nameservers []string, searches []string, err error) {
-	var scrubber dnsScrubber
-	if kl.cloud != nil {
-		scrubber = kl.cloud
+func omitDuplicates(kl *Kubelet, pod *v1.Pod, combinedSearch []string) []string {
+	uniqueDomains := map[string]bool{}
+
+	for _, dnsDomain := range combinedSearch {
+		if _, exists := uniqueDomains[dnsDomain]; !exists {
+			combinedSearch[len(uniqueDomains)] = dnsDomain
+			uniqueDomains[dnsDomain] = true
+		} else {
+			log := fmt.Sprintf("Found and omitted duplicated dns domain in host search line: '%s' during merging with cluster dns domains", dnsDomain)
+			kl.recorder.Event(pod, v1.EventTypeWarning, "DNSSearchForming", log)
+			glog.Error(log)
+		}
 	}
-	return parseResolvConf(reader, scrubber)
+	return combinedSearch[:len(uniqueDomains)]
 }
 
-// A helper for testing.
-type dnsScrubber interface {
-	ScrubDNS(nameservers, searches []string) (nsOut, srchOut []string)
+func formDNSSearchFitsLimits(kl *Kubelet, pod *v1.Pod, composedSearch []string) []string {
+	// resolver file Search line current limitations
+	resolvSearchLineDNSDomainsLimit := 6
+	resolvSearchLineLenLimit := 255
+	limitsExceeded := false
+
+	if len(composedSearch) > resolvSearchLineDNSDomainsLimit {
+		composedSearch = composedSearch[:resolvSearchLineDNSDomainsLimit]
+		limitsExceeded = true
+	}
+
+	if resolvSearchhLineStrLen := len(strings.Join(composedSearch, " ")); resolvSearchhLineStrLen > resolvSearchLineLenLimit {
+		cutDomainsNum := 0
+		cutDoaminsLen := 0
+		for i := len(composedSearch) - 1; i >= 0; i-- {
+			cutDoaminsLen += len(composedSearch[i]) + 1
+			cutDomainsNum++
+
+			if (resolvSearchhLineStrLen - cutDoaminsLen) <= resolvSearchLineLenLimit {
+				break
+			}
+		}
+
+		composedSearch = composedSearch[:(len(composedSearch) - cutDomainsNum)]
+		limitsExceeded = true
+	}
+
+	if limitsExceeded {
+		log := fmt.Sprintf("Search Line limits were exceeded, some dns names have been omitted, the applied search line is: %s", strings.Join(composedSearch, " "))
+		kl.recorder.Event(pod, v1.EventTypeWarning, "DNSSearchForming", log)
+		glog.Error(log)
+	}
+	return composedSearch
+}
+
+func (kl *Kubelet) formDNSSearchForDNSDefault(hostSearch []string, pod *v1.Pod) []string {
+	return formDNSSearchFitsLimits(kl, pod, hostSearch)
+}
+
+func (kl *Kubelet) formDNSSearch(hostSearch []string, pod *v1.Pod) []string {
+	if kl.clusterDomain == "" {
+		formDNSSearchFitsLimits(kl, pod, hostSearch)
+		return hostSearch
+	}
+
+	nsSvcDomain := fmt.Sprintf("%s.svc.%s", pod.Namespace, kl.clusterDomain)
+	svcDomain := fmt.Sprintf("svc.%s", kl.clusterDomain)
+	dnsSearch := []string{nsSvcDomain, svcDomain, kl.clusterDomain}
+
+	combinedSearch := append(dnsSearch, hostSearch...)
+
+	combinedSearch = omitDuplicates(kl, pod, combinedSearch)
+	return formDNSSearchFitsLimits(kl, pod, combinedSearch)
+}
+
+func (kl *Kubelet) checkLimitsForResolvConf() {
+	// resolver file Search line current limitations
+	resolvSearchLineDNSDomainsLimit := 6
+	resolvSearchLineLenLimit := 255
+
+	f, err := os.Open(kl.resolverConfig)
+	if err != nil {
+		kl.recorder.Event(kl.nodeRef, v1.EventTypeWarning, "checkLimitsForResolvConf", err.Error())
+		glog.Error("checkLimitsForResolvConf: " + err.Error())
+		return
+	}
+	defer f.Close()
+
+	_, hostSearch, err := kl.parseResolvConf(f)
+	if err != nil {
+		kl.recorder.Event(kl.nodeRef, v1.EventTypeWarning, "checkLimitsForResolvConf", err.Error())
+		glog.Error("checkLimitsForResolvConf: " + err.Error())
+		return
+	}
+
+	domainCntLimit := resolvSearchLineDNSDomainsLimit
+
+	if kl.clusterDomain != "" {
+		domainCntLimit -= 3
+	}
+
+	if len(hostSearch) > domainCntLimit {
+		log := fmt.Sprintf("Resolv.conf file '%s' contains search line consisting of more than %d domains!", kl.resolverConfig, domainCntLimit)
+		kl.recorder.Event(kl.nodeRef, v1.EventTypeWarning, "checkLimitsForResolvConf", log)
+		glog.Error("checkLimitsForResolvConf: " + log)
+		return
+	}
+
+	if len(strings.Join(hostSearch, " ")) > resolvSearchLineLenLimit {
+		log := fmt.Sprintf("Resolv.conf file '%s' contains search line which length is more than allowed %d chars!", kl.resolverConfig, resolvSearchLineLenLimit)
+		kl.recorder.Event(kl.nodeRef, v1.EventTypeWarning, "checkLimitsForResolvConf", log)
+		glog.Error("checkLimitsForResolvConf: " + log)
+		return
+	}
+
+	return
 }
 
 // parseResolveConf reads a resolv.conf file from the given reader, and parses
-// it into nameservers and searches, possibly returning an error.  The given
-// dnsScrubber allows cloud providers to post-process dns names.
+// it into nameservers and searches, possibly returning an error.
 // TODO: move to utility package
-func parseResolvConf(reader io.Reader, dnsScrubber dnsScrubber) (nameservers []string, searches []string, err error) {
+func (kl *Kubelet) parseResolvConf(reader io.Reader) (nameservers []string, searches []string, err error) {
 	file, err := ioutil.ReadAll(reader)
 	if err != nil {
 		return nil, nil, err
@@ -135,24 +229,24 @@ func parseResolvConf(reader io.Reader, dnsScrubber dnsScrubber) (nameservers []s
 		if len(fields) == 0 {
 			continue
 		}
-		if fields[0] == "nameserver" {
-			nameservers = append(nameservers, fields[1:]...)
+		if fields[0] == "nameserver" && len(fields) >= 2 {
+			nameservers = append(nameservers, fields[1])
 		}
 		if fields[0] == "search" {
 			searches = fields[1:]
 		}
 	}
 
-	// Give the cloud-provider a chance to post-process DNS settings.
-	if dnsScrubber != nil {
-		nameservers, searches = dnsScrubber.ScrubDNS(nameservers, searches)
-	}
+	// There used to be code here to scrub DNS for each cloud, but doesn't
+	// make sense anymore since cloudproviders are being factored out.
+	// contact @thockin or @wlan0 for more information
+
 	return nameservers, searches, nil
 }
 
 // cleanupBandwidthLimits updates the status of bandwidth-limited containers
 // and ensures that only the appropriate CIDRs are active on the node.
-func (kl *Kubelet) cleanupBandwidthLimits(allPods []*api.Pod) error {
+func (kl *Kubelet) cleanupBandwidthLimits(allPods []*v1.Pod) error {
 	if kl.shaper == nil {
 		return nil
 	}
@@ -180,7 +274,7 @@ func (kl *Kubelet) cleanupBandwidthLimits(allPods []*api.Pod) error {
 			}
 			status = kl.generateAPIPodStatus(pod, s)
 		}
-		if status.Phase == api.PodRunning {
+		if status.Phase == v1.PodRunning {
 			possibleCIDRs.Insert(fmt.Sprintf("%s/32", status.PodIP))
 		}
 	}
@@ -195,61 +289,14 @@ func (kl *Kubelet) cleanupBandwidthLimits(allPods []*api.Pod) error {
 	return nil
 }
 
-// TODO: remove when kubenet plugin is ready
-// NOTE!!! if you make changes here, also make them to kubenet
-func (kl *Kubelet) reconcileCBR0(podCIDR string) error {
-	if podCIDR == "" {
-		glog.V(5).Info("PodCIDR not set. Will not configure cbr0.")
-		return nil
-	}
-	glog.V(5).Infof("PodCIDR is set to %q", podCIDR)
-	_, cidr, err := net.ParseCIDR(podCIDR)
-	if err != nil {
-		return err
-	}
-	// Set cbr0 interface address to first address in IPNet
-	cidr.IP.To4()[3] += 1
-	if err := ensureCbr0(cidr, kl.hairpinMode == componentconfig.PromiscuousBridge, kl.babysitDaemons); err != nil {
-		return err
-	}
-	if kl.shapingEnabled() {
-		if kl.shaper == nil {
-			glog.V(5).Info("Shaper is nil, creating")
-			kl.shaper = bandwidth.NewTCShaper("cbr0")
-		}
-		return kl.shaper.ReconcileInterface()
-	}
-	return nil
-}
-
-// syncNetworkStatus updates the network state, ensuring that the network is
-// configured correctly if the kubelet is set to configure cbr0:
-// * ensure that iptables masq rules are setup
-// * reconcile cbr0 with the pod CIDR
+// syncNetworkStatus updates the network state
 func (kl *Kubelet) syncNetworkStatus() {
-	var err error
-	if kl.configureCBR0 {
-		if err := ensureIPTablesMasqRule(kl.iptClient, kl.nonMasqueradeCIDR); err != nil {
-			err = fmt.Errorf("Error on adding iptables rules: %v", err)
-			glog.Error(err)
-			kl.runtimeState.setNetworkState(err)
-			return
-		}
-		podCIDR := kl.runtimeState.podCIDR()
-		if len(podCIDR) == 0 {
-			err = fmt.Errorf("ConfigureCBR0 requested, but PodCIDR not set. Will not configure CBR0 right now")
-			glog.Warning(err)
-		} else if err = kl.reconcileCBR0(podCIDR); err != nil {
-			err = fmt.Errorf("Error configuring cbr0: %v", err)
-			glog.Error(err)
-		}
-		if err != nil {
-			kl.runtimeState.setNetworkState(err)
-			return
-		}
+	// For cri integration, network state will be updated in updateRuntimeUp,
+	// we'll get runtime network status through cri directly.
+	// TODO: Remove this once we completely switch to cri integration.
+	if kl.networkPlugin != nil {
+		kl.runtimeState.setNetworkState(kl.networkPlugin.Status())
 	}
-
-	kl.runtimeState.setNetworkState(kl.networkPlugin.Status())
 }
 
 // updatePodCIDR updates the pod CIDR in the runtime state if it is different
@@ -261,14 +308,23 @@ func (kl *Kubelet) updatePodCIDR(cidr string) {
 		return
 	}
 
-	glog.Infof("Setting Pod CIDR: %v -> %v", podCIDR, cidr)
-	kl.runtimeState.setPodCIDR(cidr)
-
+	// kubelet -> network plugin
+	// cri runtime shims are responsible for their own network plugins
 	if kl.networkPlugin != nil {
 		details := make(map[string]interface{})
 		details[network.NET_PLUGIN_EVENT_POD_CIDR_CHANGE_DETAIL_CIDR] = cidr
 		kl.networkPlugin.Event(network.NET_PLUGIN_EVENT_POD_CIDR_CHANGE, details)
 	}
+
+	// kubelet -> generic runtime -> runtime shim -> network plugin
+	// docker/rkt non-cri implementations have a passthrough UpdatePodCIDR
+	if err := kl.GetRuntime().UpdatePodCIDR(cidr); err != nil {
+		glog.Errorf("Failed to update pod CIDR: %v", err)
+		return
+	}
+
+	glog.Infof("Setting Pod CIDR: %v -> %v", podCIDR, cidr)
+	kl.runtimeState.setPodCIDR(cidr)
 }
 
 // shapingEnabled returns whether traffic shaping is enabled.
@@ -277,6 +333,16 @@ func (kl *Kubelet) shapingEnabled() bool {
 	if kl.networkPlugin != nil && kl.networkPlugin.Capabilities().Has(network.NET_PLUGIN_CAPABILITY_SHAPING) {
 		return false
 	}
+	// This is not strictly true but we need to figure out how to handle
+	// bandwidth shaping anyway. If the kubelet doesn't have a networkPlugin,
+	// it could mean:
+	// a. the kubelet is responsible for bandwidth shaping
+	// b. the kubelet is using cri, and the cri has a network plugin
+	// Today, the only plugin that understands bandwidth shaping is kubenet, and
+	// it doesn't support bandwidth shaping when invoked through cri, so it
+	// effectively boils down to letting the kubelet decide how to handle
+	// shaping annotations. The combination of (cri + network plugin that
+	// handles bandwidth shaping) may not work because of this.
 	return true
 }
 

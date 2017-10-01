@@ -19,6 +19,7 @@ limitations under the License.
 package mount
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -162,6 +163,15 @@ func (*NsenterMounter) List() ([]MountPoint, error) {
 	return listProcMounts(hostProcMountsPath)
 }
 
+func (m *NsenterMounter) IsNotMountPoint(dir string) (bool, error) {
+	return IsNotMountPoint(m, dir)
+}
+
+func (*NsenterMounter) IsMountPointMatch(mp MountPoint, dir string) bool {
+	deletedDir := fmt.Sprintf("%s\\040(deleted)", dir)
+	return ((mp.Path == dir) || (mp.Path == deletedDir))
+}
+
 // IsLikelyNotMountPoint determines whether a path is a mountpoint by calling findmnt
 // in the host's root mount namespace.
 func (n *NsenterMounter) IsLikelyNotMountPoint(file string) (bool, error) {
@@ -175,7 +185,7 @@ func (n *NsenterMounter) IsLikelyNotMountPoint(file string) (bool, error) {
 		glog.V(5).Infof("findmnt: directory %s does not exist", file)
 		return true, err
 	}
-	// Add --first-only option: since we are testing for the absense of a mountpoint, it is sufficient to get only
+	// Add --first-only option: since we are testing for the absence of a mountpoint, it is sufficient to get only
 	// the first of multiple possible mountpoints using --first-only.
 	// Also add fstype output to make sure that the output of target file will give the full path
 	// TODO: Need more refactoring for this function. Track the solution with issue #26996

@@ -19,6 +19,12 @@ package benchmark
 import (
 	"testing"
 	"time"
+
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/kubernetes/test/integration/framework"
+	testutils "k8s.io/kubernetes/test/utils"
+
+	"github.com/golang/glog"
 )
 
 // BenchmarkScheduling100Nodes0Pods benchmarks the scheduling rate
@@ -51,12 +57,28 @@ func BenchmarkScheduling1000Nodes1000Pods(b *testing.B) {
 func benchmarkScheduling(numNodes, numScheduledPods int, b *testing.B) {
 	schedulerConfigFactory, finalFunc := mustSetupScheduler()
 	defer finalFunc()
-	c := schedulerConfigFactory.Client
+	c := schedulerConfigFactory.GetClient()
 
-	makeNodes(c, numNodes)
-	makePodsFromRC(c, "rc1", numScheduledPods)
+	nodePreparer := framework.NewIntegrationTestNodePreparer(
+		c,
+		[]testutils.CountToStrategy{{Count: numNodes, Strategy: &testutils.TrivialNodePrepareStrategy{}}},
+		"scheduler-perf-",
+	)
+	if err := nodePreparer.PrepareNodes(); err != nil {
+		glog.Fatalf("%v", err)
+	}
+	defer nodePreparer.CleanupNodes()
+
+	config := testutils.NewTestPodCreatorConfig()
+	config.AddStrategy("sched-test", numScheduledPods, testutils.NewSimpleWithControllerCreatePodStrategy("rc1"))
+	podCreator := testutils.NewTestPodCreator(c, config)
+	podCreator.CreatePods()
+
 	for {
-		scheduled := schedulerConfigFactory.ScheduledPodLister.Indexer.List()
+		scheduled, err := schedulerConfigFactory.GetScheduledPodLister().List(labels.Everything())
+		if err != nil {
+			glog.Fatalf("%v", err)
+		}
 		if len(scheduled) >= numScheduledPods {
 			break
 		}
@@ -64,11 +86,17 @@ func benchmarkScheduling(numNodes, numScheduledPods int, b *testing.B) {
 	}
 	// start benchmark
 	b.ResetTimer()
-	makePodsFromRC(c, "rc2", b.N)
+	config = testutils.NewTestPodCreatorConfig()
+	config.AddStrategy("sched-test", b.N, testutils.NewSimpleWithControllerCreatePodStrategy("rc2"))
+	podCreator = testutils.NewTestPodCreator(c, config)
+	podCreator.CreatePods()
 	for {
 		// This can potentially affect performance of scheduler, since List() is done under mutex.
 		// TODO: Setup watch on apiserver and wait until all pods scheduled.
-		scheduled := schedulerConfigFactory.ScheduledPodLister.Indexer.List()
+		scheduled, err := schedulerConfigFactory.GetScheduledPodLister().List(labels.Everything())
+		if err != nil {
+			glog.Fatalf("%v", err)
+		}
 		if len(scheduled) >= numScheduledPods+b.N {
 			break
 		}

@@ -48,6 +48,13 @@ type Auth struct {
 	// should never expire. The token should be renewed within the duration
 	// specified by this period.
 	Period time.Duration `json:"period" mapstructure:"period" structs:"period"`
+
+	// Number of allowed uses of the issued token
+	NumUses int `json:"num_uses" mapstructure:"num_uses" structs:"num_uses"`
+
+	// Persona is the information about the authenticated client returned by
+	// the auth backend
+	Persona *Persona `json:"persona" structs:"persona" mapstructure:"persona"`
 }
 
 func (a *Auth) GoString() string {

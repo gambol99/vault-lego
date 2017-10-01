@@ -13,12 +13,29 @@ const (
 	// TypeDurationSecond represent as seconds, this can be either an
 	// integer or go duration format string (e.g. 24h)
 	TypeDurationSecond
+
+	// TypeSlice represents a slice of any type
+	TypeSlice
+	// TypeStringSlice is a helper for TypeSlice that returns a sanitized
+	// slice of strings
+	TypeStringSlice
+	// TypeCommaStringSlice is a helper for TypeSlice that returns a sanitized
+	// slice of strings and also supports parsing a comma-separated list in
+	// a string field
+	TypeCommaStringSlice
+
+	// TypeNameString represents a name that is URI safe and follows specific
+	// rules.  These rules include start and end with an alphanumeric
+	// character and characters in the middle can be alphanumeric or . or -.
+	TypeNameString
 )
 
 func (t FieldType) String() string {
 	switch t {
 	case TypeString:
 		return "string"
+	case TypeNameString:
+		return "name string"
 	case TypeInt:
 		return "int"
 	case TypeBool:
@@ -27,6 +44,8 @@ func (t FieldType) String() string {
 		return "map"
 	case TypeDurationSecond:
 		return "duration (sec)"
+	case TypeSlice, TypeStringSlice, TypeCommaStringSlice:
+		return "slice"
 	default:
 		return "unknown type"
 	}

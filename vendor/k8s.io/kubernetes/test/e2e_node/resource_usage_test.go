@@ -23,8 +23,8 @@ import (
 	"strings"
 	"time"
 
-	client "k8s.io/kubernetes/pkg/client/unversioned"
-	"k8s.io/kubernetes/pkg/kubelet/api/v1alpha1/stats"
+	"k8s.io/kubernetes/pkg/client/clientset_generated/clientset"
+	stats "k8s.io/kubernetes/pkg/kubelet/apis/stats/v1alpha1"
 	"k8s.io/kubernetes/test/e2e/framework"
 
 	. "github.com/onsi/ginkgo"
@@ -45,7 +45,7 @@ var _ = framework.KubeDescribe("Resource-usage [Serial] [Slow]", func() {
 	f := framework.NewDefaultFramework("resource-usage")
 
 	BeforeEach(func() {
-		om = framework.NewRuntimeOperationMonitor(f.Client)
+		om = framework.NewRuntimeOperationMonitor(f.ClientSet)
 		// The test collects resource usage from a standalone Cadvisor pod.
 		// The Cadvsior of Kubelet has a housekeeping interval of 10s, which is too long to
 		// show the resource usage spikes. But changing its interval increases the overhead
@@ -71,7 +71,7 @@ var _ = framework.KubeDescribe("Resource-usage [Serial] [Slow]", func() {
 					stats.SystemContainerRuntime: {0.50: 0.30, 0.95: 0.40},
 				},
 				memLimits: framework.ResourceUsagePerContainer{
-					stats.SystemContainerKubelet: &framework.ContainerResourceUsage{MemoryRSSInBytes: 100 * 1024 * 1024},
+					stats.SystemContainerKubelet: &framework.ContainerResourceUsage{MemoryRSSInBytes: 200 * 1024 * 1024},
 					stats.SystemContainerRuntime: &framework.ContainerResourceUsage{MemoryRSSInBytes: 400 * 1024 * 1024},
 				},
 			},
@@ -79,9 +79,9 @@ var _ = framework.KubeDescribe("Resource-usage [Serial] [Slow]", func() {
 
 		for _, testArg := range rTests {
 			itArg := testArg
-
-			It(fmt.Sprintf("resource tracking for %d pods per node", itArg.podsNr), func() {
-				testInfo := getTestNodeInfo(f, itArg.getTestName())
+			desc := fmt.Sprintf("resource tracking for %d pods per node", itArg.podsNr)
+			It(desc, func() {
+				testInfo := getTestNodeInfo(f, itArg.getTestName(), desc)
 
 				runResourceUsageTest(f, rc, itArg)
 
@@ -93,6 +93,9 @@ var _ = framework.KubeDescribe("Resource-usage [Serial] [Slow]", func() {
 
 	Context("regular resource usage tracking", func() {
 		rTests := []resourceTest{
+			{
+				podsNr: 0,
+			},
 			{
 				podsNr: 10,
 			},
@@ -106,9 +109,9 @@ var _ = framework.KubeDescribe("Resource-usage [Serial] [Slow]", func() {
 
 		for _, testArg := range rTests {
 			itArg := testArg
-
-			It(fmt.Sprintf("resource tracking for %d pods per node [Benchmark]", itArg.podsNr), func() {
-				testInfo := getTestNodeInfo(f, itArg.getTestName())
+			desc := fmt.Sprintf("resource tracking for %d pods per node [Benchmark]", itArg.podsNr)
+			It(desc, func() {
+				testInfo := getTestNodeInfo(f, itArg.getTestName(), desc)
 
 				runResourceUsageTest(f, rc, itArg)
 
@@ -139,7 +142,7 @@ func runResourceUsageTest(f *framework.Framework, rc *ResourceCollector, testArg
 		// sleep for an interval here to measure steady data
 		sleepAfterCreatePods = 10 * time.Second
 	)
-	pods := newTestPods(testArg.podsNr, framework.GetPauseImageNameForHostArch(), "test_pod")
+	pods := newTestPods(testArg.podsNr, true, framework.GetPauseImageNameForHostArch(), "test_pod")
 
 	rc.Start()
 	// Explicitly delete pods to prevent namespace controller cleanning up timeout
@@ -171,11 +174,11 @@ func runResourceUsageTest(f *framework.Framework, rc *ResourceCollector, testArg
 		} else {
 			time.Sleep(reportingPeriod)
 		}
-		logPods(f.Client)
+		logPods(f.ClientSet)
 	}
 
 	By("Reporting overall resource usage")
-	logPods(f.Client)
+	logPods(f.ClientSet)
 }
 
 // logAndVerifyResource prints the resource usage as perf data and verifies whether resource usage satisfies the limit.
@@ -199,17 +202,17 @@ func logAndVerifyResource(f *framework.Framework, rc *ResourceCollector, cpuLimi
 	cpuSummaryPerNode[nodeName] = cpuSummary
 
 	// Print resource usage
-	framework.PrintPerfData(framework.ResourceUsageToPerfDataWithLabels(usagePerNode, testInfo))
-	framework.PrintPerfData(framework.CPUUsageToPerfDataWithLabels(cpuSummaryPerNode, testInfo))
+	logPerfData(framework.ResourceUsageToPerfDataWithLabels(usagePerNode, testInfo), "memory")
+	logPerfData(framework.CPUUsageToPerfDataWithLabels(cpuSummaryPerNode, testInfo), "cpu")
 
 	// Verify resource usage
 	if isVerify {
-		verifyMemoryLimits(f.Client, memLimits, usagePerNode)
+		verifyMemoryLimits(f.ClientSet, memLimits, usagePerNode)
 		verifyCPULimits(cpuLimits, cpuSummaryPerNode)
 	}
 }
 
-func verifyMemoryLimits(c *client.Client, expected framework.ResourceUsagePerContainer, actual framework.ResourceUsagePerNode) {
+func verifyMemoryLimits(c clientset.Interface, expected framework.ResourceUsagePerContainer, actual framework.ResourceUsagePerNode) {
 	if expected == nil {
 		return
 	}
@@ -279,7 +282,7 @@ func verifyCPULimits(expected framework.ContainersCPUSummary, actual framework.N
 	}
 }
 
-func logPods(c *client.Client) {
+func logPods(c clientset.Interface) {
 	nodeName := framework.TestContext.NodeName
 	podList, err := framework.GetKubeletRunningPods(c, nodeName)
 	if err != nil {

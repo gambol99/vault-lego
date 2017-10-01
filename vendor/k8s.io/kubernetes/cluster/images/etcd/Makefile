@@ -15,7 +15,7 @@
 # Build the etcd image
 #
 # Usage:
-# 	[TAGS=2.2.1 2.3.7 3.0.10] [REGISTRY=gcr.io/google_containers] [ARCH=amd64] [BASEIMAGE=busybox] make (build|push)
+# 	[TAGS=2.2.1 2.3.7 3.0.17] [REGISTRY=gcr.io/google_containers] [ARCH=amd64] [BASEIMAGE=busybox] make (build|push)
 
 # The image contains different etcd versions to simplify
 # upgrades. Thus be careful when removing any tag from here.
@@ -26,25 +26,28 @@
 # Except from etcd-$(tag) and etcdctl-$(tag) binaries, we also
 # need etcd and etcdctl binaries for backward compatibility reasons.
 # That binary will be set to the last tag from $(TAGS).
-TAGS?=2.2.1 2.3.7 3.0.10
-REGISTRY_TAG?=3.0.10
+TAGS?=2.2.1 2.3.7 3.0.17
+REGISTRY_TAG?=3.0.17
 ARCH?=amd64
 REGISTRY?=gcr.io/google_containers
-GOLANG_VERSION?=1.6.3
-GOARM=6
+GOLANG_VERSION?=1.7.6
+GOARM=7
 TEMP_DIR:=$(shell mktemp -d)
 
 ifeq ($(ARCH),amd64)
 	BASEIMAGE?=busybox
 endif
 ifeq ($(ARCH),arm)
-	BASEIMAGE?=armel/busybox
+	BASEIMAGE?=armhf/busybox
 endif
 ifeq ($(ARCH),arm64)
 	BASEIMAGE?=aarch64/busybox
 endif
 ifeq ($(ARCH),ppc64le)
 	BASEIMAGE?=ppc64le/busybox
+endif
+ifeq ($(ARCH),s390x)
+	BASEIMAGE?=s390x/busybox
 endif
 
 build:
@@ -55,6 +58,10 @@ build:
 	# Compile attachlease
 	docker run -it -v $(shell pwd)/../../../:/go/src/k8s.io/kubernetes -v $(TEMP_DIR):/build -e GOARCH=$(ARCH) golang:$(GOLANG_VERSION) \
 		/bin/bash -c "CGO_ENABLED=0 go build -o /build/attachlease k8s.io/kubernetes/cluster/images/etcd/attachlease"
+	# Compile rollback
+	docker run -it -v $(shell pwd)/../../../:/go/src/k8s.io/kubernetes -v $(TEMP_DIR):/build -e GOARCH=$(ARCH) golang:$(GOLANG_VERSION) \
+		/bin/bash -c "CGO_ENABLED=0 go build -o /build/rollback k8s.io/kubernetes/cluster/images/etcd/rollback"
+
 
 ifeq ($(ARCH),amd64)
 
@@ -68,7 +75,7 @@ ifeq ($(ARCH),amd64)
 		cp $(TEMP_DIR)/etcdctl $(TEMP_DIR)/etcdctl-$$tag; \
 	done
 else
-	
+
 	# Download etcd in a golang container and cross-compile it statically
 	# For each release create a tmp dir 'etcd_release_tmp_dir' and unpack the release tar there.
 	for tag in $(TAGS); do \
@@ -95,15 +102,15 @@ endif
 	cd $(TEMP_DIR) && sed -i.bak 's|BASEIMAGE|$(BASEIMAGE)|g' Dockerfile
 
 	# And build the image
-	docker build -t $(REGISTRY)/etcd-$(ARCH):$(REGISTRY_TAG) $(TEMP_DIR)
+	docker build --pull -t $(REGISTRY)/etcd-$(ARCH):$(REGISTRY_TAG) $(TEMP_DIR)
 
 push: build
-	gcloud docker push $(REGISTRY)/etcd-$(ARCH):$(REGISTRY_TAG)
+	gcloud docker -- push $(REGISTRY)/etcd-$(ARCH):$(REGISTRY_TAG)
 
 ifeq ($(ARCH),amd64)
 	# Backward compatibility. TODO: deprecate this image tag
 	docker tag $(REGISTRY)/etcd-$(ARCH):$(REGISTRY_TAG) $(REGISTRY)/etcd:$(REGISTRY_TAG)
-	gcloud docker push $(REGISTRY)/etcd:$(REGISTRY_TAG)
+	gcloud docker -- push $(REGISTRY)/etcd:$(REGISTRY_TAG)
 endif
 
 all: build

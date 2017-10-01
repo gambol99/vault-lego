@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"strings"
 
 	"k8s.io/gengo/generator"
 	"k8s.io/gengo/namer"
@@ -29,9 +30,10 @@ import (
 // genFakeForGroup produces a file for a group client, e.g. ExtensionsClient for the extension group.
 type genFakeForGroup struct {
 	generator.DefaultGen
-	outputPackage  string
-	realClientPath string
-	group          string
+	outputPackage     string
+	realClientPackage string
+	group             string
+	version           string
 	// types in this group
 	types   []*types.Type
 	imports namer.ImportTracker
@@ -51,26 +53,27 @@ func (g *genFakeForGroup) Namers(c *generator.Context) namer.NameSystems {
 }
 
 func (g *genFakeForGroup) Imports(c *generator.Context) (imports []string) {
-	imports = append(g.imports.ImportLines(), fmt.Sprintf("%s \"%s\"", filepath.Base(g.realClientPath), g.realClientPath))
+	imports = append(g.imports.ImportLines(), strings.ToLower(fmt.Sprintf("%s \"%s\"", filepath.Base(g.realClientPackage), g.realClientPackage)))
 	return imports
 }
 
 func (g *genFakeForGroup) GenerateType(c *generator.Context, t *types.Type, w io.Writer) error {
 	sw := generator.NewSnippetWriter(w, c, "$", "$")
-	const pkgTestingCore = "k8s.io/kubernetes/pkg/client/testing/core"
-	const pkgRESTClient = "k8s.io/kubernetes/pkg/client/restclient"
+
 	m := map[string]interface{}{
-		"group":      g.group,
-		"Group":      namer.IC(g.group),
-		"Fake":       c.Universe.Type(types.Name{Package: pkgTestingCore, Name: "Fake"}),
-		"RESTClient": c.Universe.Type(types.Name{Package: pkgRESTClient, Name: "RESTClient"}),
+		"group":               g.group,
+		"GroupVersion":        namer.IC(g.group) + namer.IC(g.version),
+		"Fake":                c.Universe.Type(types.Name{Package: "k8s.io/client-go/testing", Name: "Fake"}),
+		"RESTClientInterface": c.Universe.Type(types.Name{Package: "k8s.io/client-go/rest", Name: "Interface"}),
+		"RESTClient":          c.Universe.Type(types.Name{Package: "k8s.io/client-go/rest", Name: "RESTClient"}),
 	}
+
 	sw.Do(groupClientTemplate, m)
 	for _, t := range g.types {
 		wrapper := map[string]interface{}{
 			"type":              t,
-			"Group":             namer.IC(g.group),
-			"realClientPackage": filepath.Base(g.realClientPath),
+			"GroupVersion":      namer.IC(g.group) + namer.IC(g.version),
+			"realClientPackage": strings.ToLower(filepath.Base(g.realClientPackage)),
 		}
 		namespaced := !extractBoolTagOrDie("nonNamespaced", t.SecondClosestCommentLines)
 		if namespaced {
@@ -85,27 +88,28 @@ func (g *genFakeForGroup) GenerateType(c *generator.Context, t *types.Type, w io
 }
 
 var groupClientTemplate = `
-type Fake$.Group$ struct {
+type Fake$.GroupVersion$ struct {
 	*$.Fake|raw$
 }
 `
 
 var getterImplNamespaced = `
-func (c *Fake$.Group$) $.type|publicPlural$(namespace string) $.realClientPackage$.$.type|public$Interface {
+func (c *Fake$.GroupVersion$) $.type|publicPlural$(namespace string) $.realClientPackage$.$.type|public$Interface {
 	return &Fake$.type|publicPlural${c, namespace}
 }
 `
 
 var getterImplNonNamespaced = `
-func (c *Fake$.Group$) $.type|publicPlural$() $.realClientPackage$.$.type|public$Interface {
+func (c *Fake$.GroupVersion$) $.type|publicPlural$() $.realClientPackage$.$.type|public$Interface {
 	return &Fake$.type|publicPlural${c}
 }
 `
 
 var getRESTClient = `
-// GetRESTClient returns a RESTClient that is used to communicate
+// RESTClient returns a RESTClient that is used to communicate
 // with API server by this client implementation.
-func (c *Fake$.Group$) GetRESTClient() *$.RESTClient|raw$ {
-  return nil
+func (c *Fake$.GroupVersion$) RESTClient() $.RESTClientInterface|raw$ {
+	var ret *$.RESTClient|raw$
+	return ret
 }
 `

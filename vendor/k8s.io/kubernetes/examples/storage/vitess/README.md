@@ -1,37 +1,3 @@
-<!-- BEGIN MUNGE: UNVERSIONED_WARNING -->
-
-<!-- BEGIN STRIP_FOR_RELEASE -->
-
-<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
-     width="25" height="25">
-<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
-     width="25" height="25">
-<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
-     width="25" height="25">
-<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
-     width="25" height="25">
-<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
-     width="25" height="25">
-
-<h2>PLEASE NOTE: This document applies to the HEAD of the source tree</h2>
-
-If you are using a released version of Kubernetes, you should
-refer to the docs that go with that version.
-
-<!-- TAG RELEASE_LINK, added by the munger automatically -->
-<strong>
-The latest release of this document can be found
-[here](http://releases.k8s.io/release-1.4/examples/storage/vitess/README.md).
-
-Documentation for other releases can be found at
-[releases.k8s.io](http://releases.k8s.io).
-</strong>
---
-
-<!-- END STRIP_FOR_RELEASE -->
-
-<!-- END MUNGE: UNVERSIONED_WARNING -->
-
 ## Vitess Example
 
 This example shows how to run a [Vitess](http://vitess.io) cluster in Kubernetes.
@@ -54,17 +20,17 @@ You'll need to install [Go 1.4+](https://golang.org/doc/install) to build
 `vtctlclient`, the command-line admin tool for Vitess.
 
 We also assume you have a running Kubernetes cluster with `kubectl` pointing to
-it by default. See the [Getting Started guides](../../../docs/getting-started-guides/)
+it by default. See the [Getting Started guides](https://kubernetes.io/docs/getting-started-guides/)
 for how to get to that point. Note that your Kubernetes cluster needs to have
 enough resources (CPU+RAM) to schedule all the pods. By default, this example
 requires a cluster-wide total of at least 6 virtual CPUs and 10GiB RAM. You can
 tune these requirements in the
-[resource limits](../../../docs/user-guide/compute-resources.md)
+[resource limits](https://kubernetes.io/docs/user-guide/compute-resources.md)
 section of each YAML file.
 
 Lastly, you need to open ports 30000-30001 (for the Vitess admin daemon) and 80 (for
 the guestbook app) in your firewall. See the
-[Services and Firewalls](../../../docs/user-guide/services-firewalls.md)
+[Services and Firewalls](https://kubernetes.io/docs/user-guide/services-firewalls.md)
 guide for examples of how to do that.
 
 ### Configure site-local settings

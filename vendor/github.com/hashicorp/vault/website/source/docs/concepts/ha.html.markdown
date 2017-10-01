@@ -16,7 +16,7 @@ You can tell if a data store supports high availability mode ("HA") by starting
 the server and seeing if "(HA available)" is output next to the data store
 information. If it is, then Vault will automatically use HA mode. This
 information is also available on the
-[Configuration](https://www.vaultproject.io/docs/config/index.html) page.
+[Configuration](https://www.vaultproject.io/docs/configuration/index.html) page.
 
 To be highly available, one of the Vault server nodes grabs a lock within the
 data store. The successful server node then becomes the active node; all other
@@ -54,19 +54,28 @@ sent over this TLS-protected communication channel, and acted upon by the
 active node. The active node then returns a response to the standby, which
 sends the response back to the requesting client.
 
+## Request Forwarding
+
+If request forwarding is enabled (turned on by default in 0.6.2), clients can
+still force the older/fallback redirection behavior (see below) if desired by
+setting the `X-Vault-No-Request-Forwarding` header to any non-empty value.
+
+Successful cluster setup requires a few configuration parameters, although some
+can be automatically determined.
+
 ## Client Redirection
 
-This is currently the only mode enabled by default. When a standby node
-receives a request, it will redirect the client using a `307` status code to
-the _active node's_ redirect address.
+If `X-Vault-No-Request-Forwarding` header in the request is set to a non-empty
+value, the standby nodes will redirect the client using a `307` status code to
+the *active node's* redirect address.
 
 This is also the fallback method used when request forwarding is turned off or
 there is an error performing the forwarding. As such, a redirect address is
 always required for all HA setups.
 
 Some HA data store drivers can autodetect the redirect address, but it is often
-necessary to configure it manually via setting a value in the `backend`
-configuration block (or `ha_backend` if using split data/HA mode). The key for
+necessary to configure it manually via setting a value in the `storage`
+configuration block (or `ha_storage` if using split data/HA mode). The key for
 this value is `redirect_addr` and the value can also be specified by the
 `VAULT_REDIRECT_ADDR` environment variable, which takes precedence.
 
@@ -81,10 +90,10 @@ In both cases, the `redirect_addr` should be a full URL including scheme
 
 When clients are able to access Vault directly, the `redirect_addr` for each
 node should be that node's address. For instance, if there are two Vault nodes
-`A` (accessed via `https://a.vault.mycompany.com`) and `B` (accessed via
-`https://b.vault.mycompany.com`), node `A` would set its `redirect_addr` to
-`https://a.vault.mycompany.com` and node `B` would set its `redirect_addr` to
-`https://b.vault.mycompany.com`.
+`A` (accessed via `https://a.vault.mycompany.com:8200`) and `B` (accessed via
+`https://b.vault.mycompany.com:8200`), node `A` would set its `redirect_addr`
+to `https://a.vault.mycompany.com:8200` and node `B` would set its
+`redirect_addr` to `https://b.vault.mycompany.com:8200`.
 
 This way, when `A` is the active node, any requests received by node `B` will
 cause it to redirect the client to node `A`'s `redirect_addr` at
@@ -104,15 +113,6 @@ balancer; at that point hopefully the load balancer's configuration will have
 been updated to know the address of the current leader. This can cause a
 redirect loop and as such is not a recommended setup when it can be avoided.
 
-## Request Forwarding
-
-If request forwarding is enabled (turned on by default in 0.6.2), clients can
-still force the older/fallback redirection behavior if desired by setting the
-`X-Vault-No-Request-Forwarding` header to any non-empty value.
-
-Successful cluster setup requires a few configuration parameters, although some
-can be automatically determined.
-
 ### Per-Node Cluster Listener Addresses
 
 Each `listener` block in Vault's configuration file contains an `address` value
@@ -127,22 +127,22 @@ it will start cluster listeners, and when it becomes standby it will stop them.
 
 ### Per-Node Cluster Address
 
-Similar to the `redirect_addr`, this is the value that each node, if active,
-should advertise to the standbys to use for server-to-server communications,
-and lives in the `backend` (or `ha_backend`) block.  On each node, this should
-be set to a host name or IP address that a standby can use to reach one of that
-node's `cluster_address` values set in the `listener` blocks, including port.
-(Note that this will always be forced to `https` since only TLS connections are
-used between servers.)
+Similar to the `redirect_addr`, `cluster_addr` is the value that each node, if
+active, should advertise to the standbys to use for server-to-server
+communications, and lives in the `storage` (or `ha_storage`) block. On each
+node, this should be set to a host name or IP address that a standby can use to
+reach one of that node's `cluster_address` values set in the `listener` blocks,
+including port. (Note that this will always be forced to `https` since only TLS
+connections are used between servers.)
 
 This value can also be specified by the `VAULT_CLUSTER_ADDR` environment
 variable, which takes precedence.
 
-## Backend Support
+## Storage Support
 
-Currently there are several backends that support high availability mode,
-including Consul, ZooKeeper and etcd. These may change over time, and the
-[configuration page](/docs/config/index.html) should be referenced.
+Currently there are several storage backends that support high availability
+mode, including Consul, ZooKeeper and etcd. These may change over time, and the
+[configuration page](/docs/configuration/index.html) should be referenced.
 
 The Consul backend is the recommended HA backend, as it is used in production
 by HashiCorp and its customers with commercial support.

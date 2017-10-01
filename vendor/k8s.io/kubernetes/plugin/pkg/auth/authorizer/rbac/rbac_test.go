@@ -21,11 +21,12 @@ import (
 	"strings"
 	"testing"
 
-	"k8s.io/kubernetes/pkg/api"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apiserver/pkg/authentication/user"
+	"k8s.io/apiserver/pkg/authorization/authorizer"
 	"k8s.io/kubernetes/pkg/apis/rbac"
-	"k8s.io/kubernetes/pkg/apis/rbac/validation"
-	"k8s.io/kubernetes/pkg/auth/authorizer"
-	"k8s.io/kubernetes/pkg/auth/user"
+	rbacregistryvalidation "k8s.io/kubernetes/pkg/registry/rbac/validation"
+	"k8s.io/kubernetes/plugin/pkg/auth/authorizer/rbac/bootstrappolicy"
 )
 
 func newRule(verbs, apiGroups, resources, nonResourceURLs string) rbac.PolicyRule {
@@ -37,12 +38,12 @@ func newRule(verbs, apiGroups, resources, nonResourceURLs string) rbac.PolicyRul
 	}
 }
 
-func newRole(name, namespace string, rules ...rbac.PolicyRule) rbac.Role {
-	return rbac.Role{ObjectMeta: api.ObjectMeta{Namespace: namespace, Name: name}, Rules: rules}
+func newRole(name, namespace string, rules ...rbac.PolicyRule) *rbac.Role {
+	return &rbac.Role{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name}, Rules: rules}
 }
 
-func newClusterRole(name string, rules ...rbac.PolicyRule) rbac.ClusterRole {
-	return rbac.ClusterRole{ObjectMeta: api.ObjectMeta{Name: name}, Rules: rules}
+func newClusterRole(name string, rules ...rbac.PolicyRule) *rbac.ClusterRole {
+	return &rbac.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: name}, Rules: rules}
 }
 
 const (
@@ -50,9 +51,9 @@ const (
 	bindToClusterRole uint16 = 0x1
 )
 
-func newClusterRoleBinding(roleName string, subjects ...string) rbac.ClusterRoleBinding {
-	r := rbac.ClusterRoleBinding{
-		ObjectMeta: api.ObjectMeta{},
+func newClusterRoleBinding(roleName string, subjects ...string) *rbac.ClusterRoleBinding {
+	r := &rbac.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{},
 		RoleRef: rbac.RoleRef{
 			APIGroup: rbac.GroupName,
 			Kind:     "ClusterRole", // ClusterRoleBindings can only refer to ClusterRole
@@ -64,12 +65,21 @@ func newClusterRoleBinding(roleName string, subjects ...string) rbac.ClusterRole
 	for i, subject := range subjects {
 		split := strings.SplitN(subject, ":", 2)
 		r.Subjects[i].Kind, r.Subjects[i].Name = split[0], split[1]
+
+		switch r.Subjects[i].Kind {
+		case rbac.ServiceAccountKind:
+			r.Subjects[i].APIGroup = ""
+		case rbac.UserKind, rbac.GroupKind:
+			r.Subjects[i].APIGroup = rbac.GroupName
+		default:
+			panic(fmt.Errorf("invalid kind %s", r.Subjects[i].Kind))
+		}
 	}
 	return r
 }
 
-func newRoleBinding(namespace, roleName string, bindType uint16, subjects ...string) rbac.RoleBinding {
-	r := rbac.RoleBinding{ObjectMeta: api.ObjectMeta{Namespace: namespace}}
+func newRoleBinding(namespace, roleName string, bindType uint16, subjects ...string) *rbac.RoleBinding {
+	r := &rbac.RoleBinding{ObjectMeta: metav1.ObjectMeta{Namespace: namespace}}
 
 	switch bindType {
 	case bindToRole:
@@ -82,6 +92,15 @@ func newRoleBinding(namespace, roleName string, bindType uint16, subjects ...str
 	for i, subject := range subjects {
 		split := strings.SplitN(subject, ":", 2)
 		r.Subjects[i].Kind, r.Subjects[i].Name = split[0], split[1]
+
+		switch r.Subjects[i].Kind {
+		case rbac.ServiceAccountKind:
+			r.Subjects[i].APIGroup = ""
+		case rbac.UserKind, rbac.GroupKind:
+			r.Subjects[i].APIGroup = rbac.GroupName
+		default:
+			panic(fmt.Errorf("invalid kind %s", r.Subjects[i].Kind))
+		}
 	}
 	return r
 }
@@ -117,21 +136,19 @@ func (d *defaultAttributes) GetPath() string         { return "" }
 
 func TestAuthorizer(t *testing.T) {
 	tests := []struct {
-		roles               []rbac.Role
-		roleBindings        []rbac.RoleBinding
-		clusterRoles        []rbac.ClusterRole
-		clusterRoleBindings []rbac.ClusterRoleBinding
-
-		superUser string
+		roles               []*rbac.Role
+		roleBindings        []*rbac.RoleBinding
+		clusterRoles        []*rbac.ClusterRole
+		clusterRoleBindings []*rbac.ClusterRoleBinding
 
 		shouldPass []authorizer.Attributes
 		shouldFail []authorizer.Attributes
 	}{
 		{
-			clusterRoles: []rbac.ClusterRole{
+			clusterRoles: []*rbac.ClusterRole{
 				newClusterRole("admin", newRule("*", "*", "*", "*")),
 			},
-			roleBindings: []rbac.RoleBinding{
+			roleBindings: []*rbac.RoleBinding{
 				newRoleBinding("ns1", "admin", bindToClusterRole, "User:admin", "Group:admins"),
 			},
 			shouldPass: []authorizer.Attributes{
@@ -150,12 +167,12 @@ func TestAuthorizer(t *testing.T) {
 		},
 		{
 			// Non-resource-url tests
-			clusterRoles: []rbac.ClusterRole{
+			clusterRoles: []*rbac.ClusterRole{
 				newClusterRole("non-resource-url-getter", newRule("get", "", "", "/apis")),
 				newClusterRole("non-resource-url", newRule("*", "", "", "/apis")),
 				newClusterRole("non-resource-url-prefix", newRule("get", "", "", "/apis/*")),
 			},
-			clusterRoleBindings: []rbac.ClusterRoleBinding{
+			clusterRoleBindings: []*rbac.ClusterRoleBinding{
 				newClusterRoleBinding("non-resource-url-getter", "User:foo", "Group:bar"),
 				newClusterRoleBinding("non-resource-url", "User:admin", "Group:admin"),
 				newClusterRoleBinding("non-resource-url-prefix", "User:prefixed", "Group:prefixed"),
@@ -191,10 +208,10 @@ func TestAuthorizer(t *testing.T) {
 		},
 		{
 			// test subresource resolution
-			clusterRoles: []rbac.ClusterRole{
+			clusterRoles: []*rbac.ClusterRole{
 				newClusterRole("admin", newRule("*", "*", "pods", "*")),
 			},
-			roleBindings: []rbac.RoleBinding{
+			roleBindings: []*rbac.RoleBinding{
 				newRoleBinding("ns1", "admin", bindToClusterRole, "User:admin", "Group:admins"),
 			},
 			shouldPass: []authorizer.Attributes{
@@ -206,10 +223,10 @@ func TestAuthorizer(t *testing.T) {
 		},
 		{
 			// test subresource resolution
-			clusterRoles: []rbac.ClusterRole{
+			clusterRoles: []*rbac.ClusterRole{
 				newClusterRole("admin", newRule("*", "*", "pods/status", "*")),
 			},
-			roleBindings: []rbac.RoleBinding{
+			roleBindings: []*rbac.RoleBinding{
 				newRoleBinding("ns1", "admin", bindToClusterRole, "User:admin", "Group:admins"),
 			},
 			shouldPass: []authorizer.Attributes{
@@ -221,8 +238,8 @@ func TestAuthorizer(t *testing.T) {
 		},
 	}
 	for i, tt := range tests {
-		ruleResolver := validation.NewTestRuleResolver(tt.roles, tt.roleBindings, tt.clusterRoles, tt.clusterRoleBindings)
-		a := RBACAuthorizer{tt.superUser, ruleResolver}
+		ruleResolver, _ := rbacregistryvalidation.NewTestRuleResolver(tt.roles, tt.roleBindings, tt.clusterRoles, tt.clusterRoleBindings)
+		a := RBACAuthorizer{ruleResolver}
 		for _, attr := range tt.shouldPass {
 			if authorized, _, _ := a.Authorize(attr); !authorized {
 				t.Errorf("case %d: incorrectly restricted %s", i, attr)
@@ -365,7 +382,7 @@ func TestRuleMatches(t *testing.T) {
 	}
 	for _, tc := range tests {
 		for request, expected := range tc.requestsToExpected {
-			if e, a := expected, RuleAllows(request, tc.rule); e != a {
+			if e, a := expected, RuleAllows(request, &tc.rule); e != a {
 				t.Errorf("%q: expected %v, got %v for %v", tc.name, e, a, request)
 			}
 		}
@@ -415,4 +432,85 @@ func (r *requestAttributeBuilder) URL(url string) *requestAttributeBuilder {
 
 func (r *requestAttributeBuilder) New() authorizer.AttributesRecord {
 	return r.request
+}
+
+func BenchmarkAuthorize(b *testing.B) {
+	bootstrapRoles := []rbac.ClusterRole{}
+	bootstrapRoles = append(bootstrapRoles, bootstrappolicy.ControllerRoles()...)
+	bootstrapRoles = append(bootstrapRoles, bootstrappolicy.ClusterRoles()...)
+
+	bootstrapBindings := []rbac.ClusterRoleBinding{}
+	bootstrapBindings = append(bootstrapBindings, bootstrappolicy.ClusterRoleBindings()...)
+	bootstrapBindings = append(bootstrapBindings, bootstrappolicy.ControllerRoleBindings()...)
+
+	clusterRoles := []*rbac.ClusterRole{}
+	for i := range bootstrapRoles {
+		clusterRoles = append(clusterRoles, &bootstrapRoles[i])
+	}
+	clusterRoleBindings := []*rbac.ClusterRoleBinding{}
+	for i := range bootstrapBindings {
+		clusterRoleBindings = append(clusterRoleBindings, &bootstrapBindings[i])
+	}
+
+	_, resolver := rbacregistryvalidation.NewTestRuleResolver(nil, nil, clusterRoles, clusterRoleBindings)
+
+	authz := New(resolver, resolver, resolver, resolver)
+
+	nodeUser := &user.DefaultInfo{Name: "system:node:node1", Groups: []string{"system:nodes", "system:authenticated"}}
+	requests := []struct {
+		name  string
+		attrs authorizer.Attributes
+	}{
+		{
+			"allow list pods",
+			authorizer.AttributesRecord{
+				ResourceRequest: true,
+				User:            nodeUser,
+				Verb:            "list",
+				Resource:        "pods",
+				Subresource:     "",
+				Name:            "",
+				Namespace:       "",
+				APIGroup:        "",
+				APIVersion:      "v1",
+			},
+		},
+		{
+			"allow update pods/status",
+			authorizer.AttributesRecord{
+				ResourceRequest: true,
+				User:            nodeUser,
+				Verb:            "update",
+				Resource:        "pods",
+				Subresource:     "status",
+				Name:            "mypods",
+				Namespace:       "myns",
+				APIGroup:        "",
+				APIVersion:      "v1",
+			},
+		},
+		{
+			"forbid educate dolphins",
+			authorizer.AttributesRecord{
+				ResourceRequest: true,
+				User:            nodeUser,
+				Verb:            "educate",
+				Resource:        "dolphins",
+				Subresource:     "",
+				Name:            "",
+				Namespace:       "",
+				APIGroup:        "",
+				APIVersion:      "v1",
+			},
+		},
+	}
+
+	b.ResetTimer()
+	for _, request := range requests {
+		b.Run(request.name, func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				authz.Authorize(request.attrs)
+			}
+		})
+	}
 }

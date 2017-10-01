@@ -21,8 +21,8 @@ import (
 	"sync"
 	"time"
 
-	"k8s.io/kubernetes/pkg/util/flowcontrol"
-	"k8s.io/kubernetes/pkg/util/wait"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/util/flowcontrol"
 
 	"github.com/golang/glog"
 	"github.com/prometheus/client_golang/prometheus"
@@ -34,7 +34,7 @@ const (
 
 var (
 	metricsLock        sync.Mutex
-	rateLimiterMetrics map[string]prometheus.Gauge = make(map[string]prometheus.Gauge)
+	rateLimiterMetrics = make(map[string]prometheus.Gauge)
 )
 
 func registerRateLimiterMetric(ownerName string) error {

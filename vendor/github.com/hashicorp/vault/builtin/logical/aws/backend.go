@@ -9,13 +9,23 @@ import (
 )
 
 func Factory(conf *logical.BackendConfig) (logical.Backend, error) {
-	return Backend().Setup(conf)
+	b := Backend()
+	if err := b.Setup(conf); err != nil {
+		return nil, err
+	}
+	return b, nil
 }
 
 func Backend() *backend {
 	var b backend
 	b.Backend = &framework.Backend{
 		Help: strings.TrimSpace(backendHelp),
+
+		PathsSpecial: &logical.Paths{
+			LocalStorage: []string{
+				framework.WALPrefix,
+			},
+		},
 
 		Paths: []*framework.Path{
 			pathConfigRoot(),
@@ -32,6 +42,7 @@ func Backend() *backend {
 
 		WALRollback:       walRollback,
 		WALRollbackMinAge: 5 * time.Minute,
+		BackendType:       logical.TypeLogical,
 	}
 
 	return &b

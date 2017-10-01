@@ -10,10 +10,19 @@ description: |-
 
 Name: `github`
 
-The GitHub auth backend can be used to authenticate with Vault using
-a GitHub personal access token.
-This method of authentication is most useful for humans: operators or
-developers using Vault directly via the CLI.
+The GitHub auth backend can be used to authenticate with Vault using a GitHub
+personal access token. This method of authentication is most useful for humans:
+operators or developers using Vault directly via the CLI.
+
+**N.B.**: Vault does not support an OAuth workflow to generate GitHub tokens,
+so does not act as a GitHub application. As a result, this backend uses
+personal access tokens. An important consequence is that any valid GitHub
+access token with the `read:org` scope can be used for authentication. If such
+a token is stolen from a third party service, and the attacker is able to make
+network calls to Vault, they will be able to log in as the user that generated
+the access token. When using this backend it is a good idea to ensure that
+access to Vault is restricted at a network level rather than public. If these
+risks are unacceptable to you, you should use a different backend.
 
 ## Authentication
 
@@ -42,23 +51,27 @@ The response will be in JSON. For example:
 
 ```javascript
 {
-  "lease_id": "",
-  "renewable": false,
-  "lease_duration": 0,
-  "data": null,
-  "warnings": null,
   "auth": {
-    "client_token": "c4f280f6-fdb2-18eb-89d3-589e2e834cdb",
-    "policies": [
-      "admins"
-    ],
+    "renewable": true,
+    "lease_duration": 2764800,
     "metadata": {
-      "org": "test_org",
-      "username": "rajanadar",
+      "username": "vishalnayak",
+      "org": "hashicorp"
     },
-    "lease_duration": 0,
-    "renewable": false
-  }
+    "policies": [
+      "default",
+      "dev-policy"
+    ],
+    "accessor": "f93c4b2d-18b6-2b50-7a32-0fecf88237b8",
+    "client_token": "1977fceb-3bfa-6c71-4d1f-b64af98ac018"
+  },
+  "warnings": null,
+  "wrap_info": null,
+  "data": null,
+  "lease_duration": 0,
+  "renewable": false,
+  "lease_id": "",
+  "request_id": "3c346f3b-e089-39ab-a953-a349f2284e3c"
 }
 ```
 
@@ -109,21 +122,45 @@ you will need to include it as: `some-amazing-team`.
 Example:
 
 ```
-$ vault write auth/github/map/teams/admins value=admins
-Success! Data written to: auth/github/map/teams/admins
+$ vault write auth/github/map/teams/dev value=dev-policy
+Success! Data written to: auth/github/map/teams/dev
 ```
 
-The above would make anyone in the "admins" team receive tokens with the policy `admins`.
+The above would make anyone in the `dev` team receive tokens with the policy
+`dev-policy`.
 
-You can then auth with a user that is a member of the "admins" team using a Personal Access Token with the `read:org` scope.
+You can then auth with a user that is a member of the `dev` team using a
+Personal Access Token with the `read:org` scope.
+
+You can also create mappings for specific users in a similar fashion with the 
+`map/users/<user>` endpoint.
+Example:
+
+```
+$ vault write auth/github/map/users/user1 value=user1-policy
+Success! Data written to: auth/github/map/teams/user1
+```
+
+Now a user with GitHub username `user1` will be assigned the `user1-policy` on authentication, 
+in addition to any team policies.
 
 GitHub token can also be supplied from the env variable `VAULT_AUTH_GITHUB_TOKEN`.
 
 ```
 $ vault auth -method=github token=000000905b381e723b3d6a7d52f148a5d43c4b45
-Successfully authenticated! The policies that are associated
-with this token are listed below:
-
-admins
+Successfully authenticated! You are now logged in.
+The token below is already saved in the session. You do not
+need to "vault auth" again with the token.
+token: 0d9ab511-bc25-4fb6-a58b-94ce12b8da9c
+token_duration: 2764800
+token_policies: [default dev-policy]
 ```
 
+Clients can use this token to perform an allowed set of operations on all the
+paths contained by the policy set.
+
+## API
+
+The GitHub authentication backend has a full HTTP API. Please see the
+[GitHub Auth API](/api/auth/github/index.html) for more
+details.

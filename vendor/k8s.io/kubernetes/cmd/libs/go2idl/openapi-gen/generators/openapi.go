@@ -25,29 +25,47 @@ import (
 	"sort"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/openapi"
 	"k8s.io/gengo/args"
 	"k8s.io/gengo/generator"
 	"k8s.io/gengo/namer"
 	"k8s.io/gengo/types"
-	"k8s.io/kubernetes/pkg/genericapiserver/openapi/common"
 
 	"github.com/golang/glog"
 )
 
 // This is the comment tag that carries parameters for open API generation.
 const tagName = "k8s:openapi-gen"
+const tagOptional = "optional"
 
 // Known values for the tag.
 const (
-	tagValueTrue  = "true"
-	tagValueFalse = "false"
+	tagValueTrue               = "true"
+	tagValueFalse              = "false"
+	tagExtensionPrefix         = "x-kubernetes-"
+	tagPatchStrategy           = "patchStrategy"
+	tagPatchMergeKey           = "patchMergeKey"
+	patchStrategyExtensionName = "patch-strategy"
+	patchMergeKeyExtensionName = "patch-merge-key"
 )
 
-func hasOpenAPITagValue(comments []string, value string) bool {
-	tagValues := types.ExtractCommentTags("+", comments)[tagName]
-	if tagValues == nil {
-		return false
+func getOpenAPITagValue(comments []string) []string {
+	return types.ExtractCommentTags("+", comments)[tagName]
+}
+
+func getSingleTagsValue(comments []string, tag string) (string, error) {
+	tags, ok := types.ExtractCommentTags("+", comments)[tag]
+	if !ok || len(tags) == 0 {
+		return "", nil
 	}
+	if len(tags) > 1 {
+		return "", fmt.Errorf("Multiple values are not allowed for tag %s", tag)
+	}
+	return tags[0], nil
+}
+
+func hasOpenAPITagValue(comments []string, value string) bool {
+	tagValues := getOpenAPITagValue(comments)
 	for _, val := range tagValues {
 		if val == value {
 			return true
@@ -56,17 +74,36 @@ func hasOpenAPITagValue(comments []string, value string) bool {
 	return false
 }
 
+// hasOptionalTag returns true if the member has +optional in its comments or
+// omitempty in its json tags.
+func hasOptionalTag(m *types.Member) bool {
+	hasOptionalCommentTag := types.ExtractCommentTags(
+		"+", m.CommentLines)[tagOptional] != nil
+	hasOptionalJsonTag := strings.Contains(
+		reflect.StructTag(m.Tags).Get("json"), "omitempty")
+	return hasOptionalCommentTag || hasOptionalJsonTag
+}
+
+type identityNamer struct{}
+
+func (_ identityNamer) Name(t *types.Type) string {
+	return t.Name.String()
+}
+
+var _ namer.Namer = identityNamer{}
+
 // NameSystems returns the name system used by the generators in this package.
 func NameSystems() namer.NameSystems {
 	return namer.NameSystems{
-		"raw": namer.NewRawNamer("", nil),
+		"raw":           namer.NewRawNamer("", nil),
+		"sorting_namer": identityNamer{},
 	}
 }
 
 // DefaultNameSystem returns the default name system for ordering the types to be
 // processed by the generators in this package.
 func DefaultNameSystem() string {
-	return "raw"
+	return "sorting_namer"
 }
 
 func Packages(context *generator.Context, arguments *args.GeneratorArgs) generator.Packages {
@@ -116,13 +153,13 @@ func Packages(context *generator.Context, arguments *args.GeneratorArgs) generat
 
 const (
 	specPackagePath          = "github.com/go-openapi/spec"
-	openAPICommonPackagePath = "k8s.io/kubernetes/pkg/genericapiserver/openapi/common"
+	openAPICommonPackagePath = "k8s.io/apimachinery/pkg/openapi"
 )
 
 // openApiGen produces a file with auto-generated OpenAPI functions.
 type openAPIGen struct {
 	generator.DefaultGen
-	// TargetPackage is the package that will get OpenAPIDefinitions variable contains all open API definitions.
+	// TargetPackage is the package that will get GetOpenAPIDefinitions function returns all open API definitions.
 	targetPackage *types.Package
 	imports       namer.ImportTracker
 	context       *generator.Context
@@ -174,22 +211,23 @@ func (g *openAPIGen) Imports(c *generator.Context) []string {
 
 func argsFromType(t *types.Type) generator.Args {
 	return generator.Args{
-		"type":               t,
-		"OpenAPIDefinitions": types.Ref(openAPICommonPackagePath, "OpenAPIDefinitions"),
-		"OpenAPIDefinition":  types.Ref(openAPICommonPackagePath, "OpenAPIDefinition"),
-		"SpecSchemaType":     types.Ref(specPackagePath, "Schema"),
+		"type":              t,
+		"ReferenceCallback": types.Ref(openAPICommonPackagePath, "ReferenceCallback"),
+		"OpenAPIDefinition": types.Ref(openAPICommonPackagePath, "OpenAPIDefinition"),
+		"SpecSchemaType":    types.Ref(specPackagePath, "Schema"),
 	}
 }
 
 func (g *openAPIGen) Init(c *generator.Context, w io.Writer) error {
 	sw := generator.NewSnippetWriter(w, c, "$", "$")
-	sw.Do("var OpenAPIDefinitions *$.OpenAPIDefinitions|raw$ = ", argsFromType(nil))
-	sw.Do("&$.OpenAPIDefinitions|raw${\n", argsFromType(nil))
+	sw.Do("func GetOpenAPIDefinitions(ref $.ReferenceCallback|raw$) map[string]$.OpenAPIDefinition|raw$ {\n", argsFromType(nil))
+	sw.Do("return map[string]$.OpenAPIDefinition|raw${\n", argsFromType(nil))
 	return sw.Error()
 }
 
 func (g *openAPIGen) Finalize(c *generator.Context, w io.Writer) error {
 	sw := generator.NewSnippetWriter(w, c, "$", "$")
+	sw.Do("}\n", nil)
 	sw.Do("}\n", nil)
 	return sw.Error()
 }
@@ -212,6 +250,10 @@ func getJsonTags(m *types.Member) []string {
 	return strings.Split(jsonTag, ",")
 }
 
+func getPatchTags(m *types.Member) (string, string) {
+	return reflect.StructTag(m.Tags).Get(tagPatchMergeKey), reflect.StructTag(m.Tags).Get(tagPatchStrategy)
+}
+
 func getReferableName(m *types.Member) string {
 	jsonTags := getJsonTags(m)
 	if len(jsonTags) > 0 {
@@ -225,28 +267,9 @@ func getReferableName(m *types.Member) string {
 	}
 }
 
-func optionIndex(s, optionName string) int {
-	ret := 0
-	for s != "" {
-		var next string
-		i := strings.Index(s, ",")
-		if i >= 0 {
-			s, next = s[:i], s[i+1:]
-		}
-		if s == optionName {
-			return ret
-		}
-		s = next
-		ret++
-	}
-	return -1
-}
-
-func isPropertyRequired(m *types.Member) bool {
-	// A property is required if it does not have omitempty value in its json tag (documentation and implementation
-	// of json package requires omitempty to be at location 1 or higher.
-	// TODO: Move optional field definition from tags to comments.
-	return optionIndex(reflect.StructTag(m.Tags).Get("json"), "omitempty") < 1
+func shouldInlineMembers(m *types.Member) bool {
+	jsonTags := getJsonTags(m)
+	return len(jsonTags) > 1 && jsonTags[1] == "inline"
 }
 
 type openAPITypeWriter struct {
@@ -284,40 +307,59 @@ func typeShortName(t *types.Type) string {
 	return filepath.Base(t.Name.Package) + "." + t.Name.Name
 }
 
+func (g openAPITypeWriter) generateMembers(t *types.Type, required []string) ([]string, error) {
+	var err error
+	for _, m := range t.Members {
+		if hasOpenAPITagValue(m.CommentLines, tagValueFalse) {
+			continue
+		}
+		if shouldInlineMembers(&m) {
+			required, err = g.generateMembers(m.Type, required)
+			if err != nil {
+				return required, err
+			}
+			continue
+		}
+		name := getReferableName(&m)
+		if name == "" {
+			continue
+		}
+		if !hasOptionalTag(&m) {
+			required = append(required, name)
+		}
+		if err = g.generateProperty(&m, t); err != nil {
+			return required, err
+		}
+	}
+	return required, nil
+}
+
 func (g openAPITypeWriter) generate(t *types.Type) error {
 	// Only generate for struct type and ignore the rest
 	switch t.Kind {
 	case types.Struct:
 		args := argsFromType(t)
-		g.Do("\"$.$\": ", typeShortName(t))
+		g.Do("\"$.$\": ", t.Name)
 		if hasOpenAPIDefinitionMethod(t) {
-			g.Do("$.type|raw${}.OpenAPIDefinition(),", args)
+			g.Do("$.type|raw${}.OpenAPIDefinition(),\n", args)
 			return nil
 		}
 		g.Do("{\nSchema: spec.Schema{\nSchemaProps: spec.SchemaProps{\n", nil)
 		g.generateDescription(t.CommentLines)
 		g.Do("Properties: map[string]$.SpecSchemaType|raw${\n", args)
-		required := []string{}
-		for _, m := range t.Members {
-			if hasOpenAPITagValue(m.CommentLines, tagValueFalse) {
-				continue
-			}
-			name := getReferableName(&m)
-			if name == "" {
-				continue
-			}
-			if isPropertyRequired(&m) {
-				required = append(required, name)
-			}
-			if err := g.generateProperty(&m); err != nil {
-				return err
-			}
+		required, err := g.generateMembers(t, []string{})
+		if err != nil {
+			return err
 		}
 		g.Do("},\n", nil)
 		if len(required) > 0 {
 			g.Do("Required: []string{\"$.$\"},\n", strings.Join(required, "\",\""))
 		}
-		g.Do("},\n},\n", nil)
+		g.Do("},\n", nil)
+		if err := g.generateExtensions(t.CommentLines); err != nil {
+			return err
+		}
+		g.Do("},\n", nil)
 		g.Do("Dependencies: []string{\n", args)
 		// Map order is undefined, sort them or we may get a different file generated each time.
 		keys := []string{}
@@ -327,7 +369,7 @@ func (g openAPITypeWriter) generate(t *types.Type) error {
 		sort.Strings(keys)
 		for _, k := range keys {
 			v := g.refTypes[k]
-			if t, _ := common.GetOpenAPITypeFormat(v.String()); t != "" {
+			if t, _ := openapi.GetOpenAPITypeFormat(v.String()); t != "" {
 				// This is a known type, we do not need a reference to it
 				// Will eliminate special case of time.Time
 				continue
@@ -335,6 +377,69 @@ func (g openAPITypeWriter) generate(t *types.Type) error {
 			g.Do("\"$.$\",", k)
 		}
 		g.Do("},\n},\n", nil)
+	}
+	return nil
+}
+
+func (g openAPITypeWriter) generateExtensions(CommentLines []string) error {
+	tagValues := getOpenAPITagValue(CommentLines)
+	type NameValue struct {
+		Name, Value string
+	}
+	extensions := []NameValue{}
+	for _, val := range tagValues {
+		if strings.HasPrefix(val, tagExtensionPrefix) {
+			parts := strings.SplitN(val, ":", 2)
+			if len(parts) != 2 {
+				return fmt.Errorf("Invalid extension value: %v", val)
+			}
+			extensions = append(extensions, NameValue{parts[0], parts[1]})
+		}
+	}
+	patchMergeKeyTag, err := getSingleTagsValue(CommentLines, tagPatchMergeKey)
+	if err != nil {
+		return err
+	}
+	if len(patchMergeKeyTag) > 0 {
+		extensions = append(extensions, NameValue{tagExtensionPrefix + patchMergeKeyExtensionName, patchMergeKeyTag})
+	}
+	patchStrategyTag, err := getSingleTagsValue(CommentLines, tagPatchStrategy)
+	if err != nil {
+		return err
+	}
+	if len(patchStrategyTag) > 0 {
+		extensions = append(extensions, NameValue{tagExtensionPrefix + patchStrategyExtensionName, patchStrategyTag})
+	}
+	if len(extensions) == 0 {
+		return nil
+	}
+	g.Do("VendorExtensible: spec.VendorExtensible{\nExtensions: spec.Extensions{\n", nil)
+	for _, extension := range extensions {
+		g.Do("\"$.$\": ", extension.Name)
+		g.Do("\"$.$\",\n", extension.Value)
+	}
+	g.Do("},\n},\n", nil)
+	return nil
+}
+
+// TODO(#44005): Move this validation outside of this generator (probably to policy verifier)
+func (g openAPITypeWriter) validatePatchTags(m *types.Member, parent *types.Type) error {
+	patchMergeKeyStructTag, patchStrategyStructTag := getPatchTags(m)
+	patchMergeKeyCommentTag, err := getSingleTagsValue(m.CommentLines, tagPatchMergeKey)
+	if err != nil {
+		return err
+	}
+	patchStrategyCommentTag, err := getSingleTagsValue(m.CommentLines, tagPatchStrategy)
+	if err != nil {
+		return err
+	}
+	if patchMergeKeyStructTag != patchMergeKeyCommentTag {
+		return fmt.Errorf("patchMergeKey in comment and struct tags should match for member (%s) of (%s)",
+			m.Name, parent.Name.String())
+	}
+	if patchStrategyStructTag != patchStrategyCommentTag {
+		return fmt.Errorf("patchStrategy in comment and struct tags should match for member (%s) of (%s)",
+			m.Name, parent.Name.String())
 	}
 	return nil
 }
@@ -382,12 +487,18 @@ func (g openAPITypeWriter) generateDescription(CommentLines []string) {
 	}
 }
 
-func (g openAPITypeWriter) generateProperty(m *types.Member) error {
+func (g openAPITypeWriter) generateProperty(m *types.Member, parent *types.Type) error {
 	name := getReferableName(m)
 	if name == "" {
 		return nil
 	}
+	if err := g.validatePatchTags(m, parent); err != nil {
+		return err
+	}
 	g.Do("\"$.$\": {\n", name)
+	if err := g.generateExtensions(m.CommentLines); err != nil {
+		return err
+	}
 	g.Do("SchemaProps: spec.SchemaProps{\n", nil)
 	g.generateDescription(m.CommentLines)
 	jsonTags := getJsonTags(m)
@@ -398,7 +509,7 @@ func (g openAPITypeWriter) generateProperty(m *types.Member) error {
 	}
 	t := resolveAliasAndPtrType(m.Type)
 	// If we can get a openAPI type and format for this type, we consider it to be simple property
-	typeString, format := common.GetOpenAPITypeFormat(t.String())
+	typeString, format := openapi.GetOpenAPITypeFormat(t.String())
 	if typeString != "" {
 		g.generateSimpleProperty(typeString, format)
 		g.Do("},\n},\n", nil)
@@ -406,7 +517,7 @@ func (g openAPITypeWriter) generateProperty(m *types.Member) error {
 	}
 	switch t.Kind {
 	case types.Builtin:
-		return fmt.Errorf("please add type %v to getOpenAPITypeFormat function.", t)
+		return fmt.Errorf("please add type %v to getOpenAPITypeFormat function", t)
 	case types.Map:
 		if err := g.generateMapProperty(t); err != nil {
 			return err
@@ -418,7 +529,7 @@ func (g openAPITypeWriter) generateProperty(m *types.Member) error {
 	case types.Struct, types.Interface:
 		g.generateReferenceProperty(t)
 	default:
-		return fmt.Errorf("cannot generate spec for type %v.", t)
+		return fmt.Errorf("cannot generate spec for type %v", t)
 	}
 	g.Do("},\n},\n", nil)
 	return g.Error()
@@ -430,14 +541,8 @@ func (g openAPITypeWriter) generateSimpleProperty(typeString, format string) {
 }
 
 func (g openAPITypeWriter) generateReferenceProperty(t *types.Type) {
-	var name string
-	if t.Name.Package == "" {
-		name = t.Name.Name
-	} else {
-		name = filepath.Base(t.Name.Package) + "." + t.Name.Name
-	}
-	g.refTypes[name] = t
-	g.Do("Ref: spec.MustCreateRef(\"#/definitions/$.$\"),\n", name)
+	g.refTypes[t.Name.String()] = t
+	g.Do("Ref: ref(\"$.$\"),\n", t.Name.String())
 }
 
 func resolveAliasAndPtrType(t *types.Type) *types.Type {
@@ -464,10 +569,15 @@ func (g openAPITypeWriter) generateMapProperty(t *types.Type) error {
 	}
 	g.Do("Type: []string{\"object\"},\n", nil)
 	g.Do("AdditionalProperties: &spec.SchemaOrBool{\nSchema: &spec.Schema{\nSchemaProps: spec.SchemaProps{\n", nil)
+	typeString, format := openapi.GetOpenAPITypeFormat(elemType.String())
+	if typeString != "" {
+		g.generateSimpleProperty(typeString, format)
+		g.Do("},\n},\n},\n", nil)
+		return nil
+	}
 	switch elemType.Kind {
 	case types.Builtin:
-		typeString, format := common.GetOpenAPITypeFormat(elemType.String())
-		g.generateSimpleProperty(typeString, format)
+		return fmt.Errorf("please add type %v to getOpenAPITypeFormat function.", elemType)
 	case types.Struct:
 		g.generateReferenceProperty(t.Elem)
 	case types.Slice, types.Array:
@@ -483,10 +593,15 @@ func (g openAPITypeWriter) generateSliceProperty(t *types.Type) error {
 	elemType := resolveAliasAndPtrType(t.Elem)
 	g.Do("Type: []string{\"array\"},\n", nil)
 	g.Do("Items: &spec.SchemaOrArray{\nSchema: &spec.Schema{\nSchemaProps: spec.SchemaProps{\n", nil)
+	typeString, format := openapi.GetOpenAPITypeFormat(elemType.String())
+	if typeString != "" {
+		g.generateSimpleProperty(typeString, format)
+		g.Do("},\n},\n},\n", nil)
+		return nil
+	}
 	switch elemType.Kind {
 	case types.Builtin:
-		typeString, format := common.GetOpenAPITypeFormat(elemType.String())
-		g.generateSimpleProperty(typeString, format)
+		return fmt.Errorf("please add type %v to getOpenAPITypeFormat function.", elemType)
 	case types.Struct:
 		g.generateReferenceProperty(t.Elem)
 	default:

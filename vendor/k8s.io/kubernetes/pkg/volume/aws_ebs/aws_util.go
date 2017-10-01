@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/golang/glog"
+	"k8s.io/kubernetes/pkg/api/v1"
 	"k8s.io/kubernetes/pkg/cloudprovider"
 	"k8s.io/kubernetes/pkg/cloudprovider/providers/aws"
 	"k8s.io/kubernetes/pkg/volume"
@@ -64,7 +65,7 @@ func (util *AWSDiskUtil) DeleteVolume(d *awsElasticBlockStoreDeleter) error {
 
 // CreateVolume creates an AWS EBS volume.
 // Returns: volumeID, volumeSizeGB, labels, error
-func (util *AWSDiskUtil) CreateVolume(c *awsElasticBlockStoreProvisioner) (string, int, map[string]string, error) {
+func (util *AWSDiskUtil) CreateVolume(c *awsElasticBlockStoreProvisioner) (aws.KubernetesVolumeID, int, map[string]string, error) {
 	cloud, err := getCloudProvider(c.awsElasticBlockStore.plugin.host.GetCloudProvider())
 	if err != nil {
 		return "", 0, nil, err
@@ -79,22 +80,29 @@ func (util *AWSDiskUtil) CreateVolume(c *awsElasticBlockStoreProvisioner) (strin
 	}
 	tags["Name"] = volume.GenerateVolumeName(c.options.ClusterName, c.options.PVName, 255) // AWS tags can have 255 characters
 
-	requestBytes := c.options.Capacity.Value()
+	capacity := c.options.PVC.Spec.Resources.Requests[v1.ResourceName(v1.ResourceStorage)]
+	requestBytes := capacity.Value()
 	// AWS works with gigabytes, convert to GiB with rounding up
 	requestGB := int(volume.RoundUpSize(requestBytes, 1024*1024*1024))
 	volumeOptions := &aws.VolumeOptions{
 		CapacityGB: requestGB,
 		Tags:       tags,
-		PVCName:    c.options.PVCName,
+		PVCName:    c.options.PVC.Name,
 	}
 	// Apply Parameters (case-insensitive). We leave validation of
 	// the values to the cloud provider.
+	volumeOptions.ZonePresent = false
+	volumeOptions.ZonesPresent = false
 	for k, v := range c.options.Parameters {
 		switch strings.ToLower(k) {
 		case "type":
 			volumeOptions.VolumeType = v
 		case "zone":
+			volumeOptions.ZonePresent = true
 			volumeOptions.AvailabilityZone = v
+		case "zones":
+			volumeOptions.ZonesPresent = true
+			volumeOptions.AvailabilityZones = v
 		case "iopspergb":
 			volumeOptions.IOPSPerGB, err = strconv.Atoi(v)
 			if err != nil {
@@ -112,8 +120,12 @@ func (util *AWSDiskUtil) CreateVolume(c *awsElasticBlockStoreProvisioner) (strin
 		}
 	}
 
-	// TODO: implement c.options.ProvisionerSelector parsing
-	if c.options.Selector != nil {
+	if volumeOptions.ZonePresent && volumeOptions.ZonesPresent {
+		return "", 0, nil, fmt.Errorf("both zone and zones StorageClass parameters must not be used at the same time")
+	}
+
+	// TODO: implement PVC.Selector parsing
+	if c.options.PVC.Spec.Selector != nil {
 		return "", 0, nil, fmt.Errorf("claim.Spec.Selector is not supported for dynamic provisioning on AWS")
 	}
 

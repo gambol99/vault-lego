@@ -104,20 +104,9 @@ function verify-prereqs {
   export USING_KUBE_SCRIPTS=true
 }
 
-# Create a temp dir that'll be deleted at the end of this bash session.
-#
-# Vars set:
-#   KUBE_TEMP
-function ensure-temp-dir {
-  if [[ -z ${KUBE_TEMP-} ]]; then
-    export KUBE_TEMP=$(mktemp -d -t kubernetes.XXXXXX)
-    trap 'rm -rf "${KUBE_TEMP}"' EXIT
-  fi
-}
-
 # Create a set of provision scripts for the master and each of the nodes
 function create-provision-scripts {
-  ensure-temp-dir
+  kube::util::ensure-temp-dir
 
   (
     echo "#! /bin/bash"
@@ -153,6 +142,7 @@ function echo-kube-env() {
   echo "MASTER_IP='${MASTER_IP}'"
   echo "NODE_NAMES=(${NODE_NAMES[@]})"
   echo "NODE_IPS=(${NODE_IPS[@]})"
+  echo "DEFAULT_NETWORK_IF_NAME=${DEFAULT_NETWORK_IF_NAME}"
   echo "CONTAINER_SUBNET='${CONTAINER_SUBNET}'"
   echo "CLUSTER_IP_RANGE='${CLUSTER_IP_RANGE}'"
   echo "MASTER_CONTAINER_SUBNET='${MASTER_CONTAINER_SUBNET}'"
@@ -174,7 +164,6 @@ function echo-kube-env() {
   echo "ENABLE_CLUSTER_DNS='${ENABLE_CLUSTER_DNS:-false}'"
   echo "DNS_SERVER_IP='${DNS_SERVER_IP:-}'"
   echo "DNS_DOMAIN='${DNS_DOMAIN:-}'"
-  echo "DNS_REPLICAS='${DNS_REPLICAS:-}'"
   echo "RUNTIME_CONFIG='${RUNTIME_CONFIG:-}'"
   echo "ADMISSION_CONTROL='${ADMISSION_CONTROL:-}'"
   echo "DOCKER_OPTS='${EXTRA_DOCKER_OPTS:-}'"
@@ -240,8 +229,15 @@ function verify-cluster {
   echo "Waiting for each node to be registered with cloud provider"
   for (( i=0; i<${#NODE_NAMES[@]}; i++)); do
     local validated="0"
+    start="$(date +%s)"
     until [[ "$validated" == "1" ]]; do
-      local nodes=$("${KUBE_ROOT}/cluster/kubectl.sh" get nodes -o name --api-version=v1)
+      now="$(date +%s)"
+      # Timeout set to 3 minutes
+      if [ $((now - start)) -gt 180 ]; then
+        echo "Timeout while waiting for echo node to be registered with cloud provider"
+        exit 2
+      fi
+      local nodes=$("${KUBE_ROOT}/cluster/kubectl.sh" get nodes -o name)
       validated=$(echo $nodes | grep -c "${NODE_NAMES[i]}") || {
         printf "."
         sleep 2

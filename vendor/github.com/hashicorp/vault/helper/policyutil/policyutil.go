@@ -7,20 +7,34 @@ import (
 	"github.com/hashicorp/vault/helper/strutil"
 )
 
+const (
+	AddDefaultPolicy      = true
+	DoNotAddDefaultPolicy = false
+)
+
 // ParsePolicies parses a comma-delimited list of policies.
 // The resulting collection will have no duplicate elements.
 // If 'root' policy was present in the list of policies, then
 // all other policies will be ignored, the result will contain
 // just the 'root'. In cases where 'root' is not present, if
 // 'default' policy is not already present, it will be added.
-func ParsePolicies(policiesRaw string) []string {
-	if policiesRaw == "" {
+func ParsePolicies(policiesRaw interface{}) []string {
+	if policiesRaw == nil {
 		return []string{"default"}
 	}
 
-	policies := strings.Split(policiesRaw, ",")
+	var policies []string
+	switch policiesRaw.(type) {
+	case string:
+		if policiesRaw.(string) == "" {
+			return []string{}
+		}
+		policies = strings.Split(policiesRaw.(string), ",")
+	case []string:
+		policies = policiesRaw.([]string)
+	}
 
-	return SanitizePolicies(policies, true)
+	return SanitizePolicies(policies, false)
 }
 
 // SanitizePolicies performs the common input validation tasks
@@ -56,7 +70,7 @@ func SanitizePolicies(policies []string, addDefault bool) []string {
 		policies = append(policies, "default")
 	}
 
-	return strutil.RemoveDuplicates(policies)
+	return strutil.RemoveDuplicates(policies, true)
 }
 
 // EquivalentPolicies checks whether the given policy sets are equivalent, as in,

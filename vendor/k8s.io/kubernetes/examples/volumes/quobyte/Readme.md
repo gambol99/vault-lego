@@ -1,37 +1,3 @@
-<!-- BEGIN MUNGE: UNVERSIONED_WARNING -->
-
-<!-- BEGIN STRIP_FOR_RELEASE -->
-
-<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
-     width="25" height="25">
-<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
-     width="25" height="25">
-<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
-     width="25" height="25">
-<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
-     width="25" height="25">
-<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
-     width="25" height="25">
-
-<h2>PLEASE NOTE: This document applies to the HEAD of the source tree</h2>
-
-If you are using a released version of Kubernetes, you should
-refer to the docs that go with that version.
-
-<!-- TAG RELEASE_LINK, added by the munger automatically -->
-<strong>
-The latest release of this document can be found
-[here](http://releases.k8s.io/release-1.4/examples/volumes/quobyte/Readme.md).
-
-Documentation for other releases can be found at
-[releases.k8s.io](http://releases.k8s.io).
-</strong>
---
-
-<!-- END STRIP_FOR_RELEASE -->
-
-<!-- END MUNGE: UNVERSIONED_WARNING -->
-
 <!-- BEGIN MUNGE: GENERATED_TOC -->
 
 - [Quobyte Volume](#quobyte-volume)
@@ -94,7 +60,7 @@ spec:
 <!-- END MUNGE: EXAMPLE ./quobyte-pod.yaml -->
 
 Parameters:
-* **registry** Quobyte registry to use to mount the volume. You can specifiy the registry as <host>:<port> pair or if you want to specify multiple registries you just have to put a comma between them e.q. <host1>:<port>,<host2>:<port>,<host3>:<port>. The host can be an IP address or if you have a working DNS you can also provide the DNS names.
+* **registry** Quobyte registry to use to mount the volume. You can specify the registry as <host>:<port> pair or if you want to specify multiple registries you just have to put a comma between them e.q. <host1>:<port>,<host2>:<port>,<host3>:<port>. The host can be an IP address or if you have a working DNS you can also provide the DNS names.
 * **volume** volume represents a Quobyte volume which must be created before usage.
 * **readOnly** is the boolean that sets the mountpoint readOnly or readWrite.
 * **user** maps all access to this user. Default is `root`.

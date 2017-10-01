@@ -24,17 +24,16 @@ import (
 	"strings"
 	"testing"
 
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
+	restclient "k8s.io/client-go/rest"
+	utiltesting "k8s.io/client-go/util/testing"
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/testapi"
-	"k8s.io/kubernetes/pkg/api/unversioned"
-	"k8s.io/kubernetes/pkg/apimachinery/registered"
 	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
-	"k8s.io/kubernetes/pkg/client/restclient"
-	client "k8s.io/kubernetes/pkg/client/unversioned"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
-	"k8s.io/kubernetes/pkg/runtime"
-	utiltesting "k8s.io/kubernetes/pkg/util/testing"
 )
 
 const NameRequiredError = "resource name may not be empty"
@@ -55,7 +54,6 @@ type Response struct {
 }
 
 type Client struct {
-	*client.Client
 	Clientset *clientset.Clientset
 	Request   Request
 	Response  Response
@@ -82,35 +80,7 @@ func (c *Client) Setup(t *testing.T) *Client {
 		c.handler.ResponseBody = *responseBody
 	}
 	c.server = httptest.NewServer(c.handler)
-	if c.Client == nil {
-		c.Client = client.NewOrDie(&restclient.Config{
-			Host:          c.server.URL,
-			ContentConfig: restclient.ContentConfig{GroupVersion: &registered.GroupOrDie(api.GroupName).GroupVersion},
-		})
-
-		// TODO: caesarxuchao: hacky way to specify version of Experimental client.
-		// We will fix this by supporting multiple group versions in Config
-		c.AutoscalingClient = client.NewAutoscalingOrDie(&restclient.Config{
-			Host:          c.server.URL,
-			ContentConfig: restclient.ContentConfig{GroupVersion: testapi.Autoscaling.GroupVersion()},
-		})
-		c.BatchClient = client.NewBatchOrDie(&restclient.Config{
-			Host:          c.server.URL,
-			ContentConfig: restclient.ContentConfig{GroupVersion: testapi.Batch.GroupVersion()},
-		})
-		c.ExtensionsClient = client.NewExtensionsOrDie(&restclient.Config{
-			Host:          c.server.URL,
-			ContentConfig: restclient.ContentConfig{GroupVersion: testapi.Extensions.GroupVersion()},
-		})
-		c.RbacClient = client.NewRbacOrDie(&restclient.Config{
-			Host:          c.server.URL,
-			ContentConfig: restclient.ContentConfig{GroupVersion: testapi.Rbac.GroupVersion()},
-		})
-		c.StorageClient = client.NewStorageOrDie(&restclient.Config{
-			Host:          c.server.URL,
-			ContentConfig: restclient.ContentConfig{GroupVersion: testapi.Storage.GroupVersion()},
-		})
-
+	if c.Clientset == nil {
 		c.Clientset = clientset.NewForConfigOrDie(&restclient.Config{Host: c.server.URL})
 	}
 	c.QueryValidator = map[string]func(string, string) bool{}
@@ -130,7 +100,7 @@ func (c *Client) ServerURL() string {
 func (c *Client) Validate(t *testing.T, received runtime.Object, err error) {
 	c.ValidateCommon(t, err)
 
-	if c.Response.Body != nil && !api.Semantic.DeepDerivative(c.Response.Body, received) {
+	if c.Response.Body != nil && !apiequality.Semantic.DeepDerivative(c.Response.Body, received) {
 		t.Errorf("bad response for request %#v: \nexpected %#v\ngot %#v\n", c.Request, c.Response.Body, received)
 	}
 }
@@ -171,9 +141,9 @@ func (c *Client) ValidateCommon(t *testing.T, err error) {
 		validator, ok := c.QueryValidator[key]
 		if !ok {
 			switch key {
-			case unversioned.LabelSelectorQueryParam(registered.GroupOrDie(api.GroupName).GroupVersion.String()):
+			case metav1.LabelSelectorQueryParam(api.Registry.GroupOrDie(api.GroupName).GroupVersion.String()):
 				validator = ValidateLabels
-			case unversioned.FieldSelectorQueryParam(registered.GroupOrDie(api.GroupName).GroupVersion.String()):
+			case metav1.FieldSelectorQueryParam(api.Registry.GroupOrDie(api.GroupName).GroupVersion.String()):
 				validator = validateFields
 			default:
 				validator = func(a, b string) bool { return a == b }

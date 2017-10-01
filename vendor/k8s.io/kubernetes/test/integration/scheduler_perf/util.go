@@ -21,18 +21,17 @@ import (
 	"net/http/httptest"
 
 	"github.com/golang/glog"
+	clientv1core "k8s.io/client-go/kubernetes/typed/core/v1"
+	clientv1 "k8s.io/client-go/pkg/api/v1"
+	restclient "k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/resource"
-	"k8s.io/kubernetes/pkg/apimachinery/registered"
-	"k8s.io/kubernetes/pkg/client/record"
-	"k8s.io/kubernetes/pkg/client/restclient"
-	client "k8s.io/kubernetes/pkg/client/unversioned"
-	"k8s.io/kubernetes/pkg/master"
-	"k8s.io/kubernetes/pkg/util/workqueue"
+	"k8s.io/kubernetes/pkg/api/v1"
+	"k8s.io/kubernetes/pkg/client/clientset_generated/clientset"
+	informers "k8s.io/kubernetes/pkg/client/informers/informers_generated/externalversions"
 	"k8s.io/kubernetes/plugin/pkg/scheduler"
 	_ "k8s.io/kubernetes/plugin/pkg/scheduler/algorithmprovider"
 	"k8s.io/kubernetes/plugin/pkg/scheduler/factory"
-	e2e "k8s.io/kubernetes/test/e2e/framework"
 	"k8s.io/kubernetes/test/integration/framework"
 )
 
@@ -43,126 +42,60 @@ import (
 // remove resources after finished.
 // Notes on rate limiter:
 //   - client rate limit is set to 5000.
-func mustSetupScheduler() (schedulerConfigFactory *factory.ConfigFactory, destroyFunc func()) {
-	var m *master.Master
-	masterConfig := framework.NewIntegrationTestMasterConfig()
-	m, err := masterConfig.Complete().New()
-	if err != nil {
-		panic("error in brining up the master: " + err.Error())
-	}
+func mustSetupScheduler() (schedulerConfigurator scheduler.Configurator, destroyFunc func()) {
+
+	h := &framework.MasterHolder{Initialized: make(chan struct{})}
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		m.Handler.ServeHTTP(w, req)
+		<-h.Initialized
+		h.M.GenericAPIServer.Handler.ServeHTTP(w, req)
 	}))
 
-	c := client.NewOrDie(&restclient.Config{
+	framework.RunAMasterUsingServer(framework.NewIntegrationTestMasterConfig(), s, h)
+
+	clientSet := clientset.NewForConfigOrDie(&restclient.Config{
 		Host:          s.URL,
-		ContentConfig: restclient.ContentConfig{GroupVersion: &registered.GroupOrDie(api.GroupName).GroupVersion},
+		ContentConfig: restclient.ContentConfig{GroupVersion: &api.Registry.GroupOrDie(v1.GroupName).GroupVersion},
 		QPS:           5000.0,
 		Burst:         5000,
 	})
 
-	schedulerConfigFactory = factory.NewConfigFactory(c, api.DefaultSchedulerName, api.DefaultHardPodAffinitySymmetricWeight, api.DefaultFailureDomains)
-	schedulerConfig, err := schedulerConfigFactory.Create()
-	if err != nil {
-		panic("Couldn't create scheduler config")
-	}
+	informerFactory := informers.NewSharedInformerFactory(clientSet, 0)
+
+	schedulerConfigurator = factory.NewConfigFactory(
+		v1.DefaultSchedulerName,
+		clientSet,
+		informerFactory.Core().V1().Nodes(),
+		informerFactory.Core().V1().Pods(),
+		informerFactory.Core().V1().PersistentVolumes(),
+		informerFactory.Core().V1().PersistentVolumeClaims(),
+		informerFactory.Core().V1().ReplicationControllers(),
+		informerFactory.Extensions().V1beta1().ReplicaSets(),
+		informerFactory.Apps().V1beta1().StatefulSets(),
+		informerFactory.Core().V1().Services(),
+		v1.DefaultHardPodAffinitySymmetricWeight,
+	)
+
 	eventBroadcaster := record.NewBroadcaster()
-	schedulerConfig.Recorder = eventBroadcaster.NewRecorder(api.EventSource{Component: "scheduler"})
-	eventBroadcaster.StartRecordingToSink(c.Events(""))
-	scheduler.New(schedulerConfig).Run()
+	eventBroadcaster.StartRecordingToSink(&clientv1core.EventSinkImpl{Interface: clientv1core.New(clientSet.Core().RESTClient()).Events("")})
+
+	sched, err := scheduler.NewFromConfigurator(schedulerConfigurator, func(conf *scheduler.Config) {
+		conf.Recorder = eventBroadcaster.NewRecorder(api.Scheme, clientv1.EventSource{Component: "scheduler"})
+	})
+	if err != nil {
+		glog.Fatalf("Error creating scheduler: %v", err)
+	}
+
+	stop := make(chan struct{})
+	informerFactory.Start(stop)
+
+	sched.Run()
 
 	destroyFunc = func() {
 		glog.Infof("destroying")
-		close(schedulerConfig.StopEverything)
+		sched.StopEverything()
+		close(stop)
 		s.Close()
 		glog.Infof("destroyed")
 	}
 	return
-}
-
-func makeNodes(c client.Interface, nodeCount int) {
-	glog.Infof("making %d nodes", nodeCount)
-	baseNode := &api.Node{
-		ObjectMeta: api.ObjectMeta{
-			GenerateName: "scheduler-test-node-",
-		},
-		Spec: api.NodeSpec{
-			ExternalID: "foobar",
-		},
-		Status: api.NodeStatus{
-			Capacity: api.ResourceList{
-				api.ResourcePods:   *resource.NewQuantity(110, resource.DecimalSI),
-				api.ResourceCPU:    resource.MustParse("4"),
-				api.ResourceMemory: resource.MustParse("32Gi"),
-			},
-			Phase: api.NodeRunning,
-			Conditions: []api.NodeCondition{
-				{Type: api.NodeReady, Status: api.ConditionTrue},
-			},
-		},
-	}
-	for i := 0; i < nodeCount; i++ {
-		if _, err := c.Nodes().Create(baseNode); err != nil {
-			panic("error creating node: " + err.Error())
-		}
-	}
-}
-
-func makePodSpec() api.PodSpec {
-	return api.PodSpec{
-		Containers: []api.Container{{
-			Name:  "pause",
-			Image: e2e.GetPauseImageNameForHostArch(),
-			Ports: []api.ContainerPort{{ContainerPort: 80}},
-			Resources: api.ResourceRequirements{
-				Limits: api.ResourceList{
-					api.ResourceCPU:    resource.MustParse("100m"),
-					api.ResourceMemory: resource.MustParse("500Mi"),
-				},
-				Requests: api.ResourceList{
-					api.ResourceCPU:    resource.MustParse("100m"),
-					api.ResourceMemory: resource.MustParse("500Mi"),
-				},
-			},
-		}},
-	}
-}
-
-// makePodsFromRC will create a ReplicationController object and
-// a given number of pods (imitating the controller).
-func makePodsFromRC(c client.Interface, name string, podCount int) {
-	rc := &api.ReplicationController{
-		ObjectMeta: api.ObjectMeta{
-			Name: name,
-		},
-		Spec: api.ReplicationControllerSpec{
-			Replicas: int32(podCount),
-			Selector: map[string]string{"name": name},
-			Template: &api.PodTemplateSpec{
-				ObjectMeta: api.ObjectMeta{
-					Labels: map[string]string{"name": name},
-				},
-				Spec: makePodSpec(),
-			},
-		},
-	}
-	if _, err := c.ReplicationControllers("default").Create(rc); err != nil {
-		glog.Fatalf("unexpected error: %v", err)
-	}
-
-	basePod := &api.Pod{
-		ObjectMeta: api.ObjectMeta{
-			GenerateName: "scheduler-test-pod-",
-			Labels:       map[string]string{"name": name},
-		},
-		Spec: makePodSpec(),
-	}
-	createPod := func(i int) {
-		for {
-			if _, err := c.Pods("default").Create(basePod); err == nil {
-				break
-			}
-		}
-	}
-	workqueue.Parallelize(30, podCount, createPod)
 }

@@ -7,12 +7,17 @@ import (
 
 	"github.com/go-ldap/ldap"
 	"github.com/hashicorp/vault/helper/mfa"
+	"github.com/hashicorp/vault/helper/strutil"
 	"github.com/hashicorp/vault/logical"
 	"github.com/hashicorp/vault/logical/framework"
 )
 
 func Factory(conf *logical.BackendConfig) (logical.Backend, error) {
-	return Backend().Setup(conf)
+	b := Backend()
+	if err := b.Setup(conf); err != nil {
+		return nil, err
+	}
+	return b, nil
 }
 
 func Backend() *backend {
@@ -38,7 +43,8 @@ func Backend() *backend {
 			mfa.MFAPaths(b.Backend, pathLogin(&b))...,
 		),
 
-		AuthRenew: b.pathLoginRenew,
+		AuthRenew:   b.pathLoginRenew,
+		BackendType: logical.TypeCredential,
 	}
 
 	return &b
@@ -100,21 +106,44 @@ func (b *backend) Login(req *logical.Request, username string, password string) 
 		return nil, logical.ErrorResponse("invalid connection returned from LDAP dial"), nil
 	}
 
-	bindDN, err := b.getBindDN(cfg, c, username)
+	// Clean connection
+	defer c.Close()
+
+	userBindDN, err := b.getUserBindDN(cfg, c, username)
 	if err != nil {
 		return nil, logical.ErrorResponse(err.Error()), nil
 	}
 
 	if b.Logger().IsDebug() {
-		b.Logger().Debug("auth/ldap: BindDN fetched", "username", username, "binddn", bindDN)
+		b.Logger().Debug("auth/ldap: User BindDN fetched", "username", username, "binddn", userBindDN)
+	}
+
+	if cfg.DenyNullBind && len(password) == 0 {
+		return nil, logical.ErrorResponse("password cannot be of zero length when passwordless binds are being denied"), nil
 	}
 
 	// Try to bind as the login user. This is where the actual authentication takes place.
-	if err = c.Bind(bindDN, password); err != nil {
+	if len(password) > 0 {
+		err = c.Bind(userBindDN, password)
+	} else {
+		err = c.UnauthenticatedBind(userBindDN)
+	}
+	if err != nil {
 		return nil, logical.ErrorResponse(fmt.Sprintf("LDAP bind failed: %v", err)), nil
 	}
 
-	userDN, err := b.getUserDN(cfg, c, bindDN)
+	// We re-bind to the BindDN if it's defined because we assume
+	// the BindDN should be the one to search, not the user logging in.
+	if cfg.BindDN != "" && cfg.BindPassword != "" {
+		if err := c.Bind(cfg.BindDN, cfg.BindPassword); err != nil {
+			return nil, logical.ErrorResponse(fmt.Sprintf("Encountered an error while attempting to re-bind with the BindDN User: %s", err.Error())), nil
+		}
+		if b.Logger().IsDebug() {
+			b.Logger().Debug("auth/ldap: Re-Bound to original BindDN")
+		}
+	}
+
+	userDN, err := b.getUserDN(cfg, c, userBindDN)
 	if err != nil {
 		return nil, logical.ErrorResponse(err.Error()), nil
 	}
@@ -157,11 +186,16 @@ func (b *backend) Login(req *logical.Request, username string, password string) 
 			policies = append(policies, group.Policies...)
 		}
 	}
+	if user != nil && user.Policies != nil {
+		policies = append(policies, user.Policies...)
+	}
+	// Policies from each group may overlap
+	policies = strutil.RemoveDuplicates(policies, true)
 
 	if len(policies) == 0 {
 		errStr := "user is not a member of any authorized group"
-		if len(ldapResponse.Warnings()) > 0 {
-			errStr = fmt.Sprintf("%s; additionally, %s", errStr, ldapResponse.Warnings()[0])
+		if len(ldapResponse.Warnings) > 0 {
+			errStr = fmt.Sprintf("%s; additionally, %s", errStr, ldapResponse.Warnings[0])
 		}
 
 		ldapResponse.Data["error"] = errStr
@@ -205,10 +239,16 @@ func (b *backend) getCN(dn string) string {
  * 2. If upndomain is set, the user dn is constructed as 'username@upndomain'. See https://msdn.microsoft.com/en-us/library/cc223499.aspx
  *
  */
-func (b *backend) getBindDN(cfg *ConfigEntry, c *ldap.Conn, username string) (string, error) {
+func (b *backend) getUserBindDN(cfg *ConfigEntry, c *ldap.Conn, username string) (string, error) {
 	bindDN := ""
 	if cfg.DiscoverDN || (cfg.BindDN != "" && cfg.BindPassword != "") {
-		if err := c.Bind(cfg.BindDN, cfg.BindPassword); err != nil {
+		var err error
+		if cfg.BindPassword != "" {
+			err = c.Bind(cfg.BindDN, cfg.BindPassword)
+		} else {
+			err = c.UnauthenticatedBind(cfg.BindDN)
+		}
+		if err != nil {
 			return bindDN, fmt.Errorf("LDAP bind (service) failed: %v", err)
 		}
 

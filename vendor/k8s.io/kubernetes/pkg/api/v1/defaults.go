@@ -17,41 +17,25 @@ limitations under the License.
 package v1
 
 import (
-	"k8s.io/kubernetes/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/kubernetes/pkg/util"
-	"k8s.io/kubernetes/pkg/util/intstr"
 	"k8s.io/kubernetes/pkg/util/parsers"
 )
 
 func addDefaultingFuncs(scheme *runtime.Scheme) error {
-	return scheme.AddDefaultingFuncs(
-		SetDefaults_PodExecOptions,
-		SetDefaults_PodAttachOptions,
-		SetDefaults_ReplicationController,
-		SetDefaults_Volume,
-		SetDefaults_ContainerPort,
-		SetDefaults_Container,
-		SetDefaults_ServiceSpec,
-		SetDefaults_Pod,
-		SetDefaults_PodSpec,
-		SetDefaults_Probe,
-		SetDefaults_SecretVolumeSource,
-		SetDefaults_ConfigMapVolumeSource,
-		SetDefaults_DownwardAPIVolumeSource,
-		SetDefaults_Secret,
-		SetDefaults_PersistentVolume,
-		SetDefaults_PersistentVolumeClaim,
-		SetDefaults_ISCSIVolumeSource,
-		SetDefaults_Endpoints,
-		SetDefaults_HTTPGetAction,
-		SetDefaults_NamespaceStatus,
-		SetDefaults_Node,
-		SetDefaults_NodeStatus,
-		SetDefaults_ObjectFieldSelector,
-		SetDefaults_LimitRangeItem,
-		SetDefaults_ConfigMap,
-		SetDefaults_RBDVolumeSource,
-	)
+	return RegisterDefaults(scheme)
+}
+
+func SetDefaults_ResourceList(obj *ResourceList) {
+	for key, val := range *obj {
+		// TODO(#18538): We round up resource values to milli scale to maintain API compatibility.
+		// In the future, we should instead reject values that need rounding.
+		const milliScale = -3
+		val.RoundUp(milliScale)
+
+		(*obj)[ResourceName(key)] = val
+	}
 }
 
 func SetDefaults_PodExecOptions(obj *PodExecOptions) {
@@ -99,7 +83,6 @@ func SetDefaults_Container(obj *Container) {
 		_, tag, _, _ := parsers.ParseImageName(obj.Image)
 
 		// Check image tag
-
 		if tag == "latest" {
 			obj.ImagePullPolicy = PullAlways
 		} else {
@@ -109,22 +92,35 @@ func SetDefaults_Container(obj *Container) {
 	if obj.TerminationMessagePath == "" {
 		obj.TerminationMessagePath = TerminationMessagePathDefault
 	}
+	if obj.TerminationMessagePolicy == "" {
+		obj.TerminationMessagePolicy = TerminationMessageReadFile
+	}
 }
-func SetDefaults_ServiceSpec(obj *ServiceSpec) {
-	if obj.SessionAffinity == "" {
-		obj.SessionAffinity = ServiceAffinityNone
+func SetDefaults_Service(obj *Service) {
+	if obj.Spec.SessionAffinity == "" {
+		obj.Spec.SessionAffinity = ServiceAffinityNone
 	}
-	if obj.Type == "" {
-		obj.Type = ServiceTypeClusterIP
+	if obj.Spec.Type == "" {
+		obj.Spec.Type = ServiceTypeClusterIP
 	}
-	for i := range obj.Ports {
-		sp := &obj.Ports[i]
+	for i := range obj.Spec.Ports {
+		sp := &obj.Spec.Ports[i]
 		if sp.Protocol == "" {
 			sp.Protocol = ProtocolTCP
 		}
 		if sp.TargetPort == intstr.FromInt(0) || sp.TargetPort == intstr.FromString("") {
 			sp.TargetPort = intstr.FromInt(int(sp.Port))
 		}
+	}
+	// Defaults ExternalTrafficPolicy field for NodePort / LoadBalancer service
+	// to Global for consistency.
+	if _, ok := obj.Annotations[BetaAnnotationExternalTraffic]; ok {
+		// Don't default this field if beta annotation exists.
+		return
+	} else if (obj.Spec.Type == ServiceTypeNodePort ||
+		obj.Spec.Type == ServiceTypeLoadBalancer) &&
+		obj.Spec.ExternalTrafficPolicy == "" {
+		obj.Spec.ExternalTrafficPolicy = ServiceExternalTrafficPolicyTypeCluster
 	}
 }
 func SetDefaults_Pod(obj *Pod) {
@@ -144,6 +140,18 @@ func SetDefaults_Pod(obj *Pod) {
 			}
 		}
 	}
+	for i := range obj.Spec.InitContainers {
+		if obj.Spec.InitContainers[i].Resources.Limits != nil {
+			if obj.Spec.InitContainers[i].Resources.Requests == nil {
+				obj.Spec.InitContainers[i].Resources.Requests = make(ResourceList)
+			}
+			for key, value := range obj.Spec.InitContainers[i].Resources.Limits {
+				if _, exists := obj.Spec.InitContainers[i].Resources.Requests[key]; !exists {
+					obj.Spec.InitContainers[i].Resources.Requests[key] = *(value.Copy())
+				}
+			}
+		}
+	}
 }
 func SetDefaults_PodSpec(obj *PodSpec) {
 	if obj.DNSPolicy == "" {
@@ -154,6 +162,7 @@ func SetDefaults_PodSpec(obj *PodSpec) {
 	}
 	if obj.HostNetwork {
 		defaultHostNetworkPorts(&obj.Containers)
+		defaultHostNetworkPorts(&obj.InitContainers)
 	}
 	if obj.SecurityContext == nil {
 		obj.SecurityContext = &PodSecurityContext{}
@@ -161,6 +170,9 @@ func SetDefaults_PodSpec(obj *PodSpec) {
 	if obj.TerminationGracePeriodSeconds == nil {
 		period := int64(DefaultTerminationGracePeriodSeconds)
 		obj.TerminationGracePeriodSeconds = &period
+	}
+	if obj.SchedulerName == "" {
+		obj.SchedulerName = DefaultSchedulerName
 	}
 }
 func SetDefaults_Probe(obj *Probe) {
@@ -200,6 +212,12 @@ func SetDefaults_Secret(obj *Secret) {
 		obj.Type = SecretTypeOpaque
 	}
 }
+func SetDefaults_ProjectedVolumeSource(obj *ProjectedVolumeSource) {
+	if obj.DefaultMode == nil {
+		perm := int32(ProjectedVolumeSourceDefaultMode)
+		obj.DefaultMode = &perm
+	}
+}
 func SetDefaults_PersistentVolume(obj *PersistentVolume) {
 	if obj.Status.Phase == "" {
 		obj.Status.Phase = VolumePending
@@ -221,7 +239,11 @@ func SetDefaults_ISCSIVolumeSource(obj *ISCSIVolumeSource) {
 func SetDefaults_AzureDiskVolumeSource(obj *AzureDiskVolumeSource) {
 	if obj.CachingMode == nil {
 		obj.CachingMode = new(AzureDataDiskCachingMode)
-		*obj.CachingMode = AzureDataDiskCachingNone
+		*obj.CachingMode = AzureDataDiskCachingReadWrite
+	}
+	if obj.Kind == nil {
+		obj.Kind = new(AzureDataDiskKind)
+		*obj.Kind = AzureSharedBlobDisk
 	}
 	if obj.FSType == nil {
 		obj.FSType = new(string)
@@ -332,5 +354,20 @@ func SetDefaults_RBDVolumeSource(obj *RBDVolumeSource) {
 	}
 	if obj.Keyring == "" {
 		obj.Keyring = "/etc/ceph/keyring"
+	}
+}
+
+func SetDefaults_ScaleIOVolumeSource(obj *ScaleIOVolumeSource) {
+	if obj.ProtectionDomain == "" {
+		obj.ProtectionDomain = "default"
+	}
+	if obj.StoragePool == "" {
+		obj.StoragePool = "default"
+	}
+	if obj.StorageMode == "" {
+		obj.StorageMode = "ThinProvisioned"
+	}
+	if obj.FSType == "" {
+		obj.FSType = "xfs"
 	}
 }

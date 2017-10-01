@@ -2,11 +2,13 @@ package vault
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/armon/go-metrics"
 	"github.com/hashicorp/errwrap"
 	"github.com/hashicorp/golang-lru"
+	"github.com/hashicorp/vault/helper/consts"
 	"github.com/hashicorp/vault/helper/strutil"
 	"github.com/hashicorp/vault/logical"
 )
@@ -23,9 +25,7 @@ const (
 	responseWrappingPolicyName = "response-wrapping"
 
 	// responseWrappingPolicy is the policy that ensures cubbyhole response
-	// wrapping can always succeed. Note that sys/wrapping/lookup isn't
-	// contained here because using it would revoke the token anyways, so there
-	// isn't much point.
+	// wrapping can always succeed.
 	responseWrappingPolicy = `
 path "cubbyhole/response" {
     capabilities = ["create", "read"]
@@ -58,19 +58,24 @@ path "sys/capabilities-self" {
     capabilities = ["update"]
 }
 
-# Allow a token to renew a lease via lease_id in the request body
+# Allow a token to renew a lease via lease_id in the request body; old path for
+# old clients, new path for newer
 path "sys/renew" {
+    capabilities = ["update"]
+}
+path "sys/leases/renew" {
+    capabilities = ["update"]
+}
+
+# Allow looking up lease properties. This requires knowing the lease ID ahead
+# of time and does not divulge any sensitive information.
+path "sys/leases/lookup" {
     capabilities = ["update"]
 }
 
 # Allow a token to manage its own cubbyhole
 path "cubbyhole/*" {
     capabilities = ["create", "read", "update", "delete", "list"]
-}
-
-# Allow a token to list its cubbyhole (not covered by the splat above)
-path "cubbyhole" {
-    capabilities = ["list"]
 }
 
 # Allow a token to wrap arbitrary values in a response-wrapping token
@@ -137,7 +142,13 @@ func (c *Core) setupPolicyStore() error {
 	view := c.systemBarrierView.SubView(policySubPath)
 
 	// Create the policy store
-	c.policyStore = NewPolicyStore(view, &dynamicSystemView{core: c})
+	sysView := &dynamicSystemView{core: c}
+	c.policyStore = NewPolicyStore(view, sysView)
+
+	if c.replicationState.HasState(consts.ReplicationPerformanceSecondary) {
+		// Policies will sync from the primary
+		return nil
+	}
 
 	// Ensure that the default policy exists, and if not, create it
 	policy, err := c.policyStore.GetPolicy("default")
@@ -173,12 +184,24 @@ func (c *Core) teardownPolicyStore() error {
 	return nil
 }
 
+func (ps *PolicyStore) invalidate(name string) {
+	if ps.lru == nil {
+		// Nothing to do if the cache is not used
+		return
+	}
+
+	// This may come with a prefixed "/" due to joining the file path
+	ps.lru.Remove(strings.TrimPrefix(name, "/"))
+}
+
 // SetPolicy is used to create or update the given policy
 func (ps *PolicyStore) SetPolicy(p *Policy) error {
 	defer metrics.MeasureSince([]string{"policy", "set_policy"}, time.Now())
 	if p.Name == "" {
 		return fmt.Errorf("policy name missing")
 	}
+	// Policies are normalized to lower-case
+	p.Name = strings.ToLower(strings.TrimSpace(p.Name))
 	if strutil.StrListContains(immutablePolicies, p.Name) {
 		return fmt.Errorf("cannot update %s policy", p.Name)
 	}
@@ -209,12 +232,16 @@ func (ps *PolicyStore) setPolicyInternal(p *Policy) error {
 // GetPolicy is used to fetch the named policy
 func (ps *PolicyStore) GetPolicy(name string) (*Policy, error) {
 	defer metrics.MeasureSince([]string{"policy", "get_policy"}, time.Now())
+
 	if ps.lru != nil {
 		// Check for cached policy
 		if raw, ok := ps.lru.Get(name); ok {
 			return raw.(*Policy), nil
 		}
 	}
+
+	// Policies are normalized to lower-case
+	name = strings.ToLower(strings.TrimSpace(name))
 
 	// Special case the root policy
 	if name == "root" {
@@ -275,7 +302,7 @@ func (ps *PolicyStore) ListPolicies() ([]string, error) {
 	defer metrics.MeasureSince([]string{"policy", "list_policies"}, time.Now())
 	// Scan the view, since the policy names are the same as the
 	// key names.
-	keys, err := CollectKeys(ps.view)
+	keys, err := logical.CollectKeys(ps.view)
 
 	for _, nonAssignable := range nonAssignablePolicies {
 		deleteIndex := -1
@@ -299,6 +326,9 @@ func (ps *PolicyStore) ListPolicies() ([]string, error) {
 // DeletePolicy is used to delete the named policy
 func (ps *PolicyStore) DeletePolicy(name string) error {
 	defer metrics.MeasureSince([]string{"policy", "delete_policy"}, time.Now())
+
+	// Policies are normalized to lower-case
+	name = strings.ToLower(strings.TrimSpace(name))
 	if strutil.StrListContains(immutablePolicies, name) {
 		return fmt.Errorf("cannot delete %s policy", name)
 	}

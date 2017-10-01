@@ -56,7 +56,14 @@ kube::version::get_version_vars() {
       #
       # TODO: We continue calling this "git version" because so many
       # downstream consumers are expecting it there.
-      KUBE_GIT_VERSION=$(echo "${KUBE_GIT_VERSION}" | sed "s/-\([0-9]\{1,\}\)-g\([0-9a-f]\{14\}\)$/.\1\+\2/")
+      DASHES_IN_VERSION=$(echo "${KUBE_GIT_VERSION}" | sed "s/[^-]//g")
+      if [[ "${DASHES_IN_VERSION}" == "---" ]] ; then
+        # We have distance to subversion (v1.1.0-subversion-1-gCommitHash)
+        KUBE_GIT_VERSION=$(echo "${KUBE_GIT_VERSION}" | sed "s/-\([0-9]\{1,\}\)-g\([0-9a-f]\{14\}\)$/.\1\+\2/")
+      elif [[ "${DASHES_IN_VERSION}" == "--" ]] ; then
+        # We have distance to base tag (v1.1.0-1-gCommitHash)
+        KUBE_GIT_VERSION=$(echo "${KUBE_GIT_VERSION}" | sed "s/-g\([0-9a-f]\{14\}\)$/+\1/")
+      fi
       if [[ "${KUBE_GIT_TREE_STATE}" == "dirty" ]]; then
         # git describe --dirty only considers changes to existing files, but
         # that is problematic since new untracked .go files affect the build,
@@ -111,11 +118,15 @@ kube::version::ldflag() {
   local key=${1}
   local val=${2}
 
+  # If you update these, also update the list pkg/version/def.bzl.
   echo "-X ${KUBE_GO_PACKAGE}/pkg/version.${key}=${val}"
+  echo "-X ${KUBE_GO_PACKAGE}/vendor/k8s.io/client-go/pkg/version.${key}=${val}"
 }
 
 # Prints the value that needs to be passed to the -ldflags parameter of go build
 # in order to set the Kubernetes based on the git tree status.
+# IMPORTANT: if you update any of these, also update the lists in
+# pkg/version/def.bzl and hack/print-workspace-status.sh.
 kube::version::ldflags() {
   kube::version::get_version_vars
 

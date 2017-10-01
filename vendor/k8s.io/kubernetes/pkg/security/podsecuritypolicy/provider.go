@@ -19,11 +19,11 @@ package podsecuritypolicy
 import (
 	"fmt"
 
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/apis/extensions"
 	psputil "k8s.io/kubernetes/pkg/security/podsecuritypolicy/util"
 	"k8s.io/kubernetes/pkg/util/maps"
-	"k8s.io/kubernetes/pkg/util/validation/field"
 )
 
 // used to pass in the field being validated for reusable group strategies so they
@@ -103,6 +103,18 @@ func (s *simpleProvider) CreatePodSecurityContext(pod *api.Pod) (*api.PodSecurit
 		sc.SELinuxOptions = seLinux
 	}
 
+	// This is only generated on the pod level.  Containers inherit the pod's profile.  If the
+	// container has a specific profile set then it will be caught in the validation step.
+	seccompProfile, err := s.strategies.SeccompStrategy.Generate(annotations, pod)
+	if err != nil {
+		return nil, nil, err
+	}
+	if seccompProfile != "" {
+		if annotations == nil {
+			annotations = map[string]string{}
+		}
+		annotations[api.SeccompPodAnnotationKey] = seccompProfile
+	}
 	return sc, annotations, nil
 }
 
@@ -152,7 +164,7 @@ func (s *simpleProvider) CreateContainerSecurityContext(pod *api.Pod, container 
 	// if we're using the non-root strategy set the marker that this container should not be
 	// run as root which will signal to the kubelet to do a final check either on the runAsUser
 	// or, if runAsUser is not set, the image UID will be checked.
-	if s.psp.Spec.RunAsUser.Rule == extensions.RunAsUserStrategyMustRunAsNonRoot {
+	if sc.RunAsNonRoot == nil && s.psp.Spec.RunAsUser.Rule == extensions.RunAsUserStrategyMustRunAsNonRoot {
 		nonRoot := true
 		sc.RunAsNonRoot = &nonRoot
 	}
@@ -188,6 +200,7 @@ func (s *simpleProvider) ValidatePodSecurityContext(pod *api.Pod, fldPath *field
 	}
 	allErrs = append(allErrs, s.strategies.FSGroupStrategy.Validate(pod, fsGroups)...)
 	allErrs = append(allErrs, s.strategies.SupplementalGroupStrategy.Validate(pod, pod.Spec.SecurityContext.SupplementalGroups)...)
+	allErrs = append(allErrs, s.strategies.SeccompStrategy.ValidatePod(pod)...)
 
 	// make a dummy container context to reuse the selinux strategies
 	container := &api.Container{
@@ -247,6 +260,7 @@ func (s *simpleProvider) ValidateContainerSecurityContext(pod *api.Pod, containe
 	allErrs = append(allErrs, s.strategies.RunAsUserStrategy.Validate(pod, container)...)
 	allErrs = append(allErrs, s.strategies.SELinuxStrategy.Validate(pod, container)...)
 	allErrs = append(allErrs, s.strategies.AppArmorStrategy.Validate(pod, container)...)
+	allErrs = append(allErrs, s.strategies.SeccompStrategy.ValidateContainer(pod, container)...)
 
 	if !s.psp.Spec.Privileged && *sc.Privileged {
 		allErrs = append(allErrs, field.Invalid(fldPath.Child("privileged"), *sc.Privileged, "Privileged containers are not allowed"))

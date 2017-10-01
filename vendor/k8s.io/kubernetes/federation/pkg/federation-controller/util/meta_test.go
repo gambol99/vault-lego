@@ -19,42 +19,55 @@ package util
 import (
 	"testing"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	api_v1 "k8s.io/kubernetes/pkg/api/v1"
 
 	"github.com/stretchr/testify/assert"
 )
 
 func TestObjectMeta(t *testing.T) {
-	o1 := api_v1.ObjectMeta{
+	o1 := metav1.ObjectMeta{
 		Namespace:       "ns1",
 		Name:            "s1",
 		UID:             "1231231412",
 		ResourceVersion: "999",
 	}
-	o2 := CopyObjectMeta(o1)
-	o3 := api_v1.ObjectMeta{
+	o2 := copyObjectMeta(o1)
+	o3 := metav1.ObjectMeta{
 		Namespace:   "ns1",
 		Name:        "s1",
 		UID:         "1231231412",
 		Annotations: map[string]string{"A": "B"},
 	}
-	o4 := api_v1.ObjectMeta{
+	o4 := metav1.ObjectMeta{
 		Namespace:   "ns1",
 		Name:        "s1",
 		UID:         "1231255531412",
 		Annotations: map[string]string{"A": "B"},
 	}
-	o5 := api_v1.ObjectMeta{
+	o5 := metav1.ObjectMeta{
 		Namespace:       "ns1",
 		Name:            "s1",
 		ResourceVersion: "1231231412",
 		Annotations:     map[string]string{"A": "B"},
 	}
-	o6 := api_v1.ObjectMeta{
+	o6 := metav1.ObjectMeta{
 		Namespace:       "ns1",
 		Name:            "s1",
 		ResourceVersion: "1231255531412",
 		Annotations:     map[string]string{"A": "B"},
+	}
+	o7 := metav1.ObjectMeta{
+		Namespace:       "ns1",
+		Name:            "s1",
+		ResourceVersion: "1231255531412",
+		Annotations:     map[string]string{},
+		Labels:          map[string]string{},
+	}
+	o8 := metav1.ObjectMeta{
+		Namespace:       "ns1",
+		Name:            "s1",
+		ResourceVersion: "1231255531412",
 	}
 	assert.Equal(t, 0, len(o2.UID))
 	assert.Equal(t, 0, len(o2.ResourceVersion))
@@ -64,4 +77,41 @@ func TestObjectMeta(t *testing.T) {
 	assert.True(t, ObjectMetaEquivalent(o3, o4))
 	assert.True(t, ObjectMetaEquivalent(o5, o6))
 	assert.True(t, ObjectMetaEquivalent(o3, o5))
+	assert.True(t, ObjectMetaEquivalent(o7, o8))
+	assert.True(t, ObjectMetaEquivalent(o8, o7))
+}
+
+func TestObjectMetaAndSpec(t *testing.T) {
+	s1 := api_v1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "ns1",
+			Name:      "s1",
+		},
+		Spec: api_v1.ServiceSpec{
+			ExternalName: "Service1",
+		},
+	}
+	s1b := s1
+	s2 := api_v1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "ns1",
+			Name:      "s2",
+		},
+		Spec: api_v1.ServiceSpec{
+			ExternalName: "Service1",
+		},
+	}
+	s3 := api_v1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "ns1",
+			Name:      "s1",
+		},
+		Spec: api_v1.ServiceSpec{
+			ExternalName: "Service2",
+		},
+	}
+	assert.True(t, ObjectMetaAndSpecEquivalent(&s1, &s1b))
+	assert.False(t, ObjectMetaAndSpecEquivalent(&s1, &s2))
+	assert.False(t, ObjectMetaAndSpecEquivalent(&s1, &s3))
+	assert.False(t, ObjectMetaAndSpecEquivalent(&s2, &s3))
 }

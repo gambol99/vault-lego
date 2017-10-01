@@ -18,13 +18,15 @@ limitations under the License.
 package policybased
 
 import (
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/errors"
-	"k8s.io/kubernetes/pkg/api/rest"
+	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apiserver/pkg/authorization/authorizer"
+	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
+	"k8s.io/apiserver/pkg/registry/rest"
 	"k8s.io/kubernetes/pkg/apis/rbac"
-	"k8s.io/kubernetes/pkg/apis/rbac/validation"
-	"k8s.io/kubernetes/pkg/auth/user"
-	"k8s.io/kubernetes/pkg/runtime"
+	rbacregistry "k8s.io/kubernetes/pkg/registry/rbac"
+	rbacregistryvalidation "k8s.io/kubernetes/pkg/registry/rbac/validation"
 )
 
 var groupResource = rbac.Resource("clusterrolebindings")
@@ -32,84 +34,58 @@ var groupResource = rbac.Resource("clusterrolebindings")
 type Storage struct {
 	rest.StandardStorage
 
-	ruleResolver validation.AuthorizationRuleResolver
+	authorizer authorizer.Authorizer
 
-	// user which skips privilege escalation checks
-	superUser string
+	ruleResolver rbacregistryvalidation.AuthorizationRuleResolver
 }
 
-func NewStorage(s rest.StandardStorage, ruleResolver validation.AuthorizationRuleResolver, superUser string) *Storage {
-	return &Storage{s, ruleResolver, superUser}
+func NewStorage(s rest.StandardStorage, authorizer authorizer.Authorizer, ruleResolver rbacregistryvalidation.AuthorizationRuleResolver) *Storage {
+	return &Storage{s, authorizer, ruleResolver}
 }
 
-func (s *Storage) Create(ctx api.Context, obj runtime.Object) (runtime.Object, error) {
-	if u, ok := api.UserFrom(ctx); ok {
-		if s.superUser != "" && u.GetName() == s.superUser {
-			return s.StandardStorage.Create(ctx, obj)
-		}
-
-		// system:masters is special because the API server uses it for privileged loopback connections
-		// therefore we know that a member of system:masters can always do anything
-		for _, group := range u.GetGroups() {
-			if group == user.SystemPrivilegedGroup {
-				return s.StandardStorage.Create(ctx, obj)
-			}
-		}
+func (s *Storage) Create(ctx genericapirequest.Context, obj runtime.Object, includeUninitialized bool) (runtime.Object, error) {
+	if rbacregistry.EscalationAllowed(ctx) {
+		return s.StandardStorage.Create(ctx, obj, includeUninitialized)
 	}
 
 	clusterRoleBinding := obj.(*rbac.ClusterRoleBinding)
-	rules, err := s.ruleResolver.GetRoleReferenceRules(ctx, clusterRoleBinding.RoleRef, clusterRoleBinding.Namespace)
+	if rbacregistry.BindingAuthorized(ctx, clusterRoleBinding.RoleRef, metav1.NamespaceNone, s.authorizer) {
+		return s.StandardStorage.Create(ctx, obj, includeUninitialized)
+	}
+
+	rules, err := s.ruleResolver.GetRoleReferenceRules(clusterRoleBinding.RoleRef, metav1.NamespaceNone)
 	if err != nil {
 		return nil, err
 	}
-	if err := validation.ConfirmNoEscalation(ctx, s.ruleResolver, rules); err != nil {
+	if err := rbacregistryvalidation.ConfirmNoEscalation(ctx, s.ruleResolver, rules); err != nil {
 		return nil, errors.NewForbidden(groupResource, clusterRoleBinding.Name, err)
 	}
-	return s.StandardStorage.Create(ctx, obj)
+	return s.StandardStorage.Create(ctx, obj, includeUninitialized)
 }
 
-func (s *Storage) Update(ctx api.Context, name string, obj rest.UpdatedObjectInfo) (runtime.Object, bool, error) {
-	if user, ok := api.UserFrom(ctx); ok {
-		if s.superUser != "" && user.GetName() == s.superUser {
-			return s.StandardStorage.Update(ctx, name, obj)
-		}
+func (s *Storage) Update(ctx genericapirequest.Context, name string, obj rest.UpdatedObjectInfo) (runtime.Object, bool, error) {
+	if rbacregistry.EscalationAllowed(ctx) {
+		return s.StandardStorage.Update(ctx, name, obj)
 	}
 
-	nonEscalatingInfo := wrapUpdatedObjectInfo(obj, func(ctx api.Context, obj runtime.Object, oldObj runtime.Object) (runtime.Object, error) {
+	nonEscalatingInfo := rest.WrapUpdatedObjectInfo(obj, func(ctx genericapirequest.Context, obj runtime.Object, oldObj runtime.Object) (runtime.Object, error) {
 		clusterRoleBinding := obj.(*rbac.ClusterRoleBinding)
 
-		rules, err := s.ruleResolver.GetRoleReferenceRules(ctx, clusterRoleBinding.RoleRef, clusterRoleBinding.Namespace)
+		// if we're explicitly authorized to bind this clusterrole, return
+		if rbacregistry.BindingAuthorized(ctx, clusterRoleBinding.RoleRef, metav1.NamespaceNone, s.authorizer) {
+			return obj, nil
+		}
+
+		// Otherwise, see if we already have all the permissions contained in the referenced clusterrole
+		rules, err := s.ruleResolver.GetRoleReferenceRules(clusterRoleBinding.RoleRef, metav1.NamespaceNone)
 		if err != nil {
 			return nil, err
 		}
-		if err := validation.ConfirmNoEscalation(ctx, s.ruleResolver, rules); err != nil {
+		if err := rbacregistryvalidation.ConfirmNoEscalation(ctx, s.ruleResolver, rules); err != nil {
 			return nil, errors.NewForbidden(groupResource, clusterRoleBinding.Name, err)
 		}
 		return obj, nil
 	})
 
 	return s.StandardStorage.Update(ctx, name, nonEscalatingInfo)
-}
-
-// TODO(ericchiang): This logic is copied from #26240. Replace with once that PR is merged into master.
-type wrappedUpdatedObjectInfo struct {
-	objInfo rest.UpdatedObjectInfo
-
-	transformFunc rest.TransformFunc
-}
-
-func wrapUpdatedObjectInfo(objInfo rest.UpdatedObjectInfo, transformFunc rest.TransformFunc) rest.UpdatedObjectInfo {
-	return &wrappedUpdatedObjectInfo{objInfo, transformFunc}
-}
-
-func (i *wrappedUpdatedObjectInfo) Preconditions() *api.Preconditions {
-	return i.objInfo.Preconditions()
-}
-
-func (i *wrappedUpdatedObjectInfo) UpdatedObject(ctx api.Context, oldObj runtime.Object) (runtime.Object, error) {
-	obj, err := i.objInfo.UpdatedObject(ctx, oldObj)
-	if err != nil {
-		return obj, err
-	}
-	return i.transformFunc(ctx, obj, oldObj)
 }

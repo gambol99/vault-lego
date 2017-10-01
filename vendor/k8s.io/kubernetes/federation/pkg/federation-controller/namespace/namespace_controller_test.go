@@ -21,74 +21,88 @@ import (
 	"testing"
 	"time"
 
-	federation_api "k8s.io/kubernetes/federation/apis/federation/v1beta1"
-	fake_fedclientset "k8s.io/kubernetes/federation/client/clientset_generated/federation_release_1_5/fake"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/discovery"
+	fakediscovery "k8s.io/client-go/discovery/fake"
+	"k8s.io/client-go/dynamic"
+	restclient "k8s.io/client-go/rest"
+	core "k8s.io/client-go/testing"
+	federationapi "k8s.io/kubernetes/federation/apis/federation/v1beta1"
+	fakefedclientset "k8s.io/kubernetes/federation/client/clientset_generated/federation_clientset/fake"
+	"k8s.io/kubernetes/federation/pkg/federation-controller/util"
+	"k8s.io/kubernetes/federation/pkg/federation-controller/util/deletionhelper"
 	. "k8s.io/kubernetes/federation/pkg/federation-controller/util/test"
-	"k8s.io/kubernetes/pkg/api/unversioned"
-	api_v1 "k8s.io/kubernetes/pkg/api/v1"
-	extensionsv1 "k8s.io/kubernetes/pkg/apis/extensions/v1beta1"
-	kubeclientset "k8s.io/kubernetes/pkg/client/clientset_generated/release_1_5"
-	fake_kubeclientset "k8s.io/kubernetes/pkg/client/clientset_generated/release_1_5/fake"
-	"k8s.io/kubernetes/pkg/client/testing/core"
-	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/util/wait"
+	apiv1 "k8s.io/kubernetes/pkg/api/v1"
+	kubeclientset "k8s.io/kubernetes/pkg/client/clientset_generated/clientset"
+	fakekubeclientset "k8s.io/kubernetes/pkg/client/clientset_generated/clientset/fake"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
+const (
+	namespaces string = "namespaces"
+	clusters   string = "clusters"
+)
+
+type fakeDiscoveryForFedNSTest struct {
+	fakediscovery.FakeDiscovery
+}
+
+// ServerPreferredNamespacedResources here overrides the fakeDiscovery ServerPreferredNamespacedResources()
+// implementation only for this federated unit test.
+func (f *fakeDiscoveryForFedNSTest) ServerPreferredNamespacedResources() ([]*metav1.APIResourceList, error) {
+	preferredFakeResources := []*metav1.APIResourceList{}
+	preferredFakeResources = append(preferredFakeResources, &metav1.APIResourceList{})
+
+	return preferredFakeResources, nil
+}
+
+type fakeClientSetForFedNSTest struct {
+	fakefedclientset.Clientset
+}
+
+// Discovery overrides the fakefedclientset Discovery() method only for this federated unit test.
+func (fc *fakeClientSetForFedNSTest) Discovery() discovery.DiscoveryInterface {
+	return &fakeDiscoveryForFedNSTest{FakeDiscovery: fakediscovery.FakeDiscovery{Fake: &fc.Fake}}
+}
+
 func TestNamespaceController(t *testing.T) {
-	cluster1 := NewCluster("cluster1", api_v1.ConditionTrue)
-	cluster2 := NewCluster("cluster2", api_v1.ConditionTrue)
-	ns1 := api_v1.Namespace{
-		ObjectMeta: api_v1.ObjectMeta{
+	cluster1 := NewCluster("cluster1", apiv1.ConditionTrue)
+	cluster2 := NewCluster("cluster2", apiv1.ConditionTrue)
+	ns1 := apiv1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
 			Name:     "test-namespace",
 			SelfLink: "/api/v1/namespaces/test-namespace",
 		},
+		Spec: apiv1.NamespaceSpec{
+			Finalizers: []apiv1.FinalizerName{apiv1.FinalizerKubernetes},
+		},
 	}
 
-	fakeClient := &fake_fedclientset.Clientset{}
-	RegisterFakeList("clusters", &fakeClient.Fake, &federation_api.ClusterList{Items: []federation_api.Cluster{*cluster1}})
-	RegisterFakeList("namespaces", &fakeClient.Fake, &api_v1.NamespaceList{Items: []api_v1.Namespace{}})
-	namespaceWatch := RegisterFakeWatch("namespaces", &fakeClient.Fake)
-	clusterWatch := RegisterFakeWatch("clusters", &fakeClient.Fake)
+	fakeClient := &fakeClientSetForFedNSTest{}
+	RegisterFakeList(clusters, &fakeClient.Fake, &federationapi.ClusterList{Items: []federationapi.Cluster{*cluster1}})
+	RegisterFakeList(namespaces, &fakeClient.Fake, &apiv1.NamespaceList{Items: []apiv1.Namespace{}})
+	namespaceWatch := RegisterFakeWatch(namespaces, &fakeClient.Fake)
+	namespaceUpdateChan := RegisterFakeCopyOnUpdate(namespaces, &fakeClient.Fake, namespaceWatch)
+	clusterWatch := RegisterFakeWatch(clusters, &fakeClient.Fake)
 
-	cluster1Client := &fake_kubeclientset.Clientset{}
-	cluster1Watch := RegisterFakeWatch("namespaces", &cluster1Client.Fake)
-	RegisterFakeList("namespaces", &cluster1Client.Fake, &api_v1.NamespaceList{Items: []api_v1.Namespace{}})
-	cluster1CreateChan := RegisterFakeCopyOnCreate("namespaces", &cluster1Client.Fake, cluster1Watch)
-	cluster1UpdateChan := RegisterFakeCopyOnUpdate("namespaces", &cluster1Client.Fake, cluster1Watch)
+	cluster1Client := &fakekubeclientset.Clientset{}
+	cluster1Watch := RegisterFakeWatch(namespaces, &cluster1Client.Fake)
+	RegisterFakeList(namespaces, &cluster1Client.Fake, &apiv1.NamespaceList{Items: []apiv1.Namespace{}})
+	cluster1CreateChan := RegisterFakeCopyOnCreate(namespaces, &cluster1Client.Fake, cluster1Watch)
+	cluster1UpdateChan := RegisterFakeCopyOnUpdate(namespaces, &cluster1Client.Fake, cluster1Watch)
 
-	cluster2Client := &fake_kubeclientset.Clientset{}
-	cluster2Watch := RegisterFakeWatch("namespaces", &cluster2Client.Fake)
-	RegisterFakeList("namespaces", &cluster2Client.Fake, &api_v1.NamespaceList{Items: []api_v1.Namespace{}})
-	cluster2CreateChan := RegisterFakeCopyOnCreate("namespaces", &cluster2Client.Fake, cluster2Watch)
+	cluster2Client := &fakekubeclientset.Clientset{}
+	cluster2Watch := RegisterFakeWatch(namespaces, &cluster2Client.Fake)
+	RegisterFakeList(namespaces, &cluster2Client.Fake, &apiv1.NamespaceList{Items: []apiv1.Namespace{}})
+	cluster2CreateChan := RegisterFakeCopyOnCreate(namespaces, &cluster2Client.Fake, cluster2Watch)
 
-	RegisterFakeList("replicasets", &fakeClient.Fake, &extensionsv1.ReplicaSetList{Items: []extensionsv1.ReplicaSet{
-		{
-			ObjectMeta: api_v1.ObjectMeta{
-				Name:      "test-rs",
-				Namespace: ns1.Namespace,
-			}}}})
-	RegisterFakeList("secrets", &fakeClient.Fake, &api_v1.SecretList{Items: []api_v1.Secret{
-		{
-			ObjectMeta: api_v1.ObjectMeta{
-				Name:      "test-secret",
-				Namespace: ns1.Namespace,
-			}}}})
-	RegisterFakeList("services", &fakeClient.Fake, &api_v1.ServiceList{Items: []api_v1.Service{
-		{
-			ObjectMeta: api_v1.ObjectMeta{
-				Name:      "test-service",
-				Namespace: ns1.Namespace,
-			}}}})
-	nsDeleteChan := RegisterDelete(&fakeClient.Fake, "namespaces")
-	rsDeleteChan := RegisterDeleteCollection(&fakeClient.Fake, "replicasets")
-	serviceDeleteChan := RegisterDeleteCollection(&fakeClient.Fake, "services")
-	secretDeleteChan := RegisterDeleteCollection(&fakeClient.Fake, "secrets")
-
-	namespaceController := NewNamespaceController(fakeClient)
-	informer := ToFederatedInformerForTestOnly(namespaceController.namespaceFederatedInformer)
-	informer.SetClientFactory(func(cluster *federation_api.Cluster) (kubeclientset.Interface, error) {
+	nsDeleteChan := RegisterDelete(&fakeClient.Fake, namespaces)
+	namespaceController := NewNamespaceController(fakeClient, dynamic.NewDynamicClientPool(&restclient.Config{}))
+	informerClientFactory := func(cluster *federationapi.Cluster) (kubeclientset.Interface, error) {
 		switch cluster.Name {
 		case cluster1.Name:
 			return cluster1Client, nil
@@ -97,7 +111,8 @@ func TestNamespaceController(t *testing.T) {
 		default:
 			return nil, fmt.Errorf("Unknown cluster")
 		}
-	})
+	}
+	setClientFactory(namespaceController.namespaceFederatedInformer, informerClientFactory)
 	namespaceController.clusterAvailableDelay = time.Second
 	namespaceController.namespaceReviewDelay = 50 * time.Millisecond
 	namespaceController.smallDelay = 20 * time.Millisecond
@@ -108,11 +123,18 @@ func TestNamespaceController(t *testing.T) {
 
 	// Test add federated namespace.
 	namespaceWatch.Add(&ns1)
+	// Verify that the DeleteFromUnderlyingClusters finalizer is added to the namespace.
+	updatedNamespace := GetNamespaceFromChan(namespaceUpdateChan)
+	require.NotNil(t, updatedNamespace)
+	AssertHasFinalizer(t, updatedNamespace, deletionhelper.FinalizerDeleteFromUnderlyingClusters)
+	ns1 = *updatedNamespace
+
+	// Verify that the namespace is created in underlying cluster1.
 	createdNamespace := GetNamespaceFromChan(cluster1CreateChan)
-	assert.NotNil(t, createdNamespace)
+	require.NotNil(t, createdNamespace)
 	assert.Equal(t, ns1.Name, createdNamespace.Name)
 
-	// Wait for the secret to appear in the informer store
+	// Wait for the namespace to appear in the informer store
 	err := WaitForStoreUpdate(
 		namespaceController.namespaceFederatedInformer.GetTargetStore(),
 		cluster1.Name, ns1.Name, wait.ForeverTestTimeout)
@@ -123,26 +145,34 @@ func TestNamespaceController(t *testing.T) {
 		"A": "B",
 	}
 	namespaceWatch.Modify(&ns1)
-	updatedNamespace := GetNamespaceFromChan(cluster1UpdateChan)
-	assert.NotNil(t, updatedNamespace)
-	assert.Equal(t, ns1.Name, updatedNamespace.Name)
-	// assert.Contains(t, updatedNamespace.Annotations, "A")
+	assert.NoError(t, CheckObjectFromChan(cluster1UpdateChan, MetaAndSpecCheckingFunction(&ns1)))
 
 	// Test add cluster
 	clusterWatch.Add(cluster2)
 	createdNamespace2 := GetNamespaceFromChan(cluster2CreateChan)
-	assert.NotNil(t, createdNamespace2)
+	require.NotNil(t, createdNamespace2)
 	assert.Equal(t, ns1.Name, createdNamespace2.Name)
-	// assert.Contains(t, createdNamespace2.Annotations, "A")
+	assert.Contains(t, createdNamespace2.Annotations, "A")
 
-	ns1.DeletionTimestamp = &unversioned.Time{Time: time.Now()}
+	// Delete the namespace with orphan finalizer (let namespaces
+	// in underlying clusters be as is).
+	// TODO: Add a test without orphan finalizer.
+	ns1.ObjectMeta.Finalizers = append(ns1.ObjectMeta.Finalizers, metav1.FinalizerOrphanDependents)
+	ns1.DeletionTimestamp = &metav1.Time{Time: time.Now()}
 	namespaceWatch.Modify(&ns1)
 	assert.Equal(t, ns1.Name, GetStringFromChan(nsDeleteChan))
-	assert.Equal(t, "all", GetStringFromChan(rsDeleteChan))
-	assert.Equal(t, "all", GetStringFromChan(serviceDeleteChan))
-	assert.Equal(t, "all", GetStringFromChan(secretDeleteChan))
-
+	// TODO: Add a test for verifying that resources in the namespace are deleted
+	// when the namespace is deleted.
+	// Need a fake dynamic client to mock list and delete actions to be able to test this.
+	// TODO: Add a fake dynamic client and test this.
+	// In the meantime, e2e test verify that the resources in a namespace are
+	// deleted when the namespace is deleted.
 	close(stop)
+}
+
+func setClientFactory(informer util.FederatedInformer, informerClientFactory func(*federationapi.Cluster) (kubeclientset.Interface, error)) {
+	testInformer := ToFederatedInformerForTestOnly(informer)
+	testInformer.SetClientFactory(informerClientFactory)
 }
 
 func RegisterDeleteCollection(client *core.Fake, resource string) chan string {
@@ -169,12 +199,14 @@ func GetStringFromChan(c chan string) string {
 	case str := <-c:
 		return str
 	case <-time.After(5 * time.Second):
-		return ""
+		return "timedout"
 	}
 }
 
-func GetNamespaceFromChan(c chan runtime.Object) *api_v1.Namespace {
-	namespace := GetObjectFromChan(c).(*api_v1.Namespace)
-	return namespace
-
+func GetNamespaceFromChan(c chan runtime.Object) *apiv1.Namespace {
+	if namespace := GetObjectFromChan(c); namespace == nil {
+		return nil
+	} else {
+		return namespace.(*apiv1.Namespace)
+	}
 }

@@ -39,6 +39,12 @@ func pathCerts(b *backend) *framework.Path {
 Must be x509 PEM encoded.`,
 			},
 
+			"allowed_names": &framework.FieldSchema{
+				Type: framework.TypeCommaStringSlice,
+				Description: `A comma-separated list of names.
+At least one must exist in either the Common Name or SANs. Supports globbing.`,
+			},
+
 			"display_name": &framework.FieldSchema{
 				Type: framework.TypeString,
 				Description: `The display name to use for clients using this
@@ -46,7 +52,7 @@ certificate.`,
 			},
 
 			"policies": &framework.FieldSchema{
-				Type:        framework.TypeString,
+				Type:        framework.TypeCommaStringSlice,
 				Description: "Comma-seperated list of policies.",
 			},
 
@@ -127,7 +133,7 @@ func (b *backend) pathCertRead(
 		Data: map[string]interface{}{
 			"certificate":  cert.Certificate,
 			"display_name": cert.DisplayName,
-			"policies":     strings.Join(cert.Policies, ","),
+			"policies":     cert.Policies,
 			"ttl":          duration / time.Second,
 		},
 	}, nil
@@ -138,7 +144,8 @@ func (b *backend) pathCertWrite(
 	name := strings.ToLower(d.Get("name").(string))
 	certificate := d.Get("certificate").(string)
 	displayName := d.Get("display_name").(string)
-	policies := policyutil.ParsePolicies(d.Get("policies").(string))
+	policies := policyutil.ParsePolicies(d.Get("policies"))
+	allowedNames := d.Get("allowed_names").([]string)
 
 	// Default the display name to the certificate name if not given
 	if displayName == "" {
@@ -165,10 +172,11 @@ func (b *backend) pathCertWrite(
 	}
 
 	certEntry := &CertEntry{
-		Name:        name,
-		Certificate: certificate,
-		DisplayName: displayName,
-		Policies:    policies,
+		Name:         name,
+		Certificate:  certificate,
+		DisplayName:  displayName,
+		Policies:     policies,
+		AllowedNames: allowedNames,
 	}
 
 	// Parse the lease duration or default to backend/system default
@@ -196,11 +204,12 @@ func (b *backend) pathCertWrite(
 }
 
 type CertEntry struct {
-	Name        string
-	Certificate string
-	DisplayName string
-	Policies    []string
-	TTL         time.Duration
+	Name         string
+	Certificate  string
+	DisplayName  string
+	Policies     []string
+	TTL          time.Duration
+	AllowedNames []string
 }
 
 const pathCertHelpSyn = `

@@ -13,7 +13,11 @@ import (
 
 // Factory creates and configures the backend
 func Factory(conf *logical.BackendConfig) (logical.Backend, error) {
-	return Backend().Setup(conf)
+	b := Backend()
+	if err := b.Setup(conf); err != nil {
+		return nil, err
+	}
+	return b, nil
 }
 
 // Creates a new backend with all the paths and secrets belonging to it
@@ -34,7 +38,9 @@ func Backend() *backend {
 			secretCreds(&b),
 		},
 
-		Clean: b.resetClient,
+		Clean:       b.resetClient,
+		Invalidate:  b.invalidate,
+		BackendType: logical.TypeLogical,
 	}
 
 	return &b
@@ -97,6 +103,13 @@ func (b *backend) resetClient() {
 	defer b.lock.Unlock()
 
 	b.client = nil
+}
+
+func (b *backend) invalidate(key string) {
+	switch key {
+	case "config/connection":
+		b.resetClient()
+	}
 }
 
 // Lease returns the lease information

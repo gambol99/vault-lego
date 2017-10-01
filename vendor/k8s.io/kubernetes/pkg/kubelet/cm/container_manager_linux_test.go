@@ -47,6 +47,14 @@ func (mi *fakeMountInterface) List() ([]mount.MountPoint, error) {
 	return mi.mountPoints, nil
 }
 
+func (mi *fakeMountInterface) IsMountPointMatch(mp mount.MountPoint, dir string) bool {
+	return (mp.Path == dir)
+}
+
+func (mi *fakeMountInterface) IsNotMountPoint(dir string) (bool, error) {
+	return false, fmt.Errorf("unsupported")
+}
+
 func (mi *fakeMountInterface) IsLikelyNotMountPoint(file string) (bool, error) {
 	return false, fmt.Errorf("unsupported")
 }
@@ -124,7 +132,7 @@ func TestCgroupMountValidationMemoryMissing(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestCgroupMountValidationMultipleSubsytem(t *testing.T) {
+func TestCgroupMountValidationMultipleSubsystem(t *testing.T) {
 	mountInt := &fakeMountInterface{
 		[]mount.MountPoint{
 			{
@@ -152,6 +160,7 @@ func TestSoftRequirementsValidationSuccess(t *testing.T) {
 	req := require.New(t)
 	tempDir, err := ioutil.TempDir("", "")
 	req.NoError(err)
+	defer os.RemoveAll(tempDir)
 	req.NoError(ioutil.WriteFile(path.Join(tempDir, "cpu.cfs_period_us"), []byte("0"), os.ModePerm))
 	req.NoError(ioutil.WriteFile(path.Join(tempDir, "cpu.cfs_quota_us"), []byte("0"), os.ModePerm))
 	mountInt := &fakeMountInterface{

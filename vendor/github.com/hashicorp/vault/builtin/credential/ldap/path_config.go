@@ -3,6 +3,7 @@ package ldap
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"net"
 	"net/url"
@@ -11,9 +12,11 @@ import (
 
 	"github.com/fatih/structs"
 	"github.com/go-ldap/ldap"
+	multierror "github.com/hashicorp/go-multierror"
 	"github.com/hashicorp/vault/helper/tlsutil"
 	"github.com/hashicorp/vault/logical"
 	"github.com/hashicorp/vault/logical/framework"
+	log "github.com/mgutz/logxi/v1"
 )
 
 func pathConfig(b *backend) *framework.Path {
@@ -23,7 +26,7 @@ func pathConfig(b *backend) *framework.Path {
 			"url": &framework.FieldSchema{
 				Type:        framework.TypeString,
 				Default:     "ldap://127.0.0.1",
-				Description: "ldap URL to connect to (default: ldap://127.0.0.1)",
+				Description: "LDAP URL to connect to (default: ldap://127.0.0.1). Multiple URLs can be specified by concatenating them with commas; they will be tried in-order.",
 			},
 
 			"userdn": &framework.FieldSchema{
@@ -100,6 +103,17 @@ Default: cn`,
 				Default:     "tls12",
 				Description: "Minimum TLS version to use. Accepted values are 'tls10', 'tls11' or 'tls12'. Defaults to 'tls12'",
 			},
+
+			"tls_max_version": &framework.FieldSchema{
+				Type:        framework.TypeString,
+				Default:     "tls12",
+				Description: "Maximum TLS version to use. Accepted values are 'tls10', 'tls11' or 'tls12'. Defaults to 'tls12'",
+			},
+			"deny_null_bind": &framework.FieldSchema{
+				Type:        framework.TypeBool,
+				Default:     true,
+				Description: "Denies an unauthenticated LDAP bind request if the user's password is empty; defaults to true",
+			},
 		},
 
 		Callbacks: map[logical.Operation]framework.OperationFunc{
@@ -144,6 +158,8 @@ func (b *backend) Config(req *logical.Request) (*ConfigEntry, error) {
 		return nil, err
 	}
 
+	result.logger = b.Logger()
+
 	return result, nil
 }
 
@@ -171,6 +187,8 @@ func (b *backend) pathConfigRead(
  */
 func (b *backend) newConfigEntry(d *framework.FieldData) (*ConfigEntry, error) {
 	cfg := new(ConfigEntry)
+
+	cfg.logger = b.Logger()
 
 	url := d.Get("url").(string)
 	if url != "" {
@@ -208,6 +226,15 @@ func (b *backend) newConfigEntry(d *framework.FieldData) (*ConfigEntry, error) {
 	}
 	certificate := d.Get("certificate").(string)
 	if certificate != "" {
+		block, _ := pem.Decode([]byte(certificate))
+
+		if block == nil || block.Type != "CERTIFICATE" {
+			return nil, fmt.Errorf("failed to decode PEM block in the certificate")
+		}
+		_, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse certificate %s", err.Error())
+		}
 		cfg.Certificate = certificate
 	}
 	insecureTLS := d.Get("insecure_tls").(bool)
@@ -225,6 +252,19 @@ func (b *backend) newConfigEntry(d *framework.FieldData) (*ConfigEntry, error) {
 		return nil, fmt.Errorf("invalid 'tls_min_version'")
 	}
 
+	cfg.TLSMaxVersion = d.Get("tls_max_version").(string)
+	if cfg.TLSMaxVersion == "" {
+		return nil, fmt.Errorf("failed to get 'tls_max_version' value")
+	}
+
+	_, ok = tlsutil.TLSLookup[cfg.TLSMaxVersion]
+	if !ok {
+		return nil, fmt.Errorf("invalid 'tls_max_version'")
+	}
+	if cfg.TLSMaxVersion < cfg.TLSMinVersion {
+		return nil, fmt.Errorf("'tls_max_version' must be greater than or equal to 'tls_min_version'")
+	}
+
 	startTLS := d.Get("starttls").(bool)
 	if startTLS {
 		cfg.StartTLS = startTLS
@@ -236,6 +276,10 @@ func (b *backend) newConfigEntry(d *framework.FieldData) (*ConfigEntry, error) {
 	bindPass := d.Get("bindpass").(string)
 	if bindPass != "" {
 		cfg.BindPassword = bindPass
+	}
+	denyNullBind := d.Get("deny_null_bind").(bool)
+	if denyNullBind {
+		cfg.DenyNullBind = denyNullBind
 	}
 	discoverDN := d.Get("discoverdn").(bool)
 	if discoverDN {
@@ -266,6 +310,7 @@ func (b *backend) pathConfigWrite(
 }
 
 type ConfigEntry struct {
+	logger        log.Logger
 	Url           string `json:"url" structs:"url" mapstructure:"url"`
 	UserDN        string `json:"userdn" structs:"userdn" mapstructure:"userdn"`
 	GroupDN       string `json:"groupdn" structs:"groupdn" mapstructure:"groupdn"`
@@ -278,8 +323,10 @@ type ConfigEntry struct {
 	StartTLS      bool   `json:"starttls" structs:"starttls" mapstructure:"starttls"`
 	BindDN        string `json:"binddn" structs:"binddn" mapstructure:"binddn"`
 	BindPassword  string `json:"bindpass" structs:"bindpass" mapstructure:"bindpass"`
+	DenyNullBind  bool   `json:"deny_null_bind" structs:"deny_null_bind" mapstructure:"deny_null_bind"`
 	DiscoverDN    bool   `json:"discoverdn" structs:"discoverdn" mapstructure:"discoverdn"`
 	TLSMinVersion string `json:"tls_min_version" structs:"tls_min_version" mapstructure:"tls_min_version"`
+	TLSMaxVersion string `json:"tls_max_version" structs:"tls_max_version" mapstructure:"tls_max_version"`
 }
 
 func (c *ConfigEntry) GetTLSConfig(host string) (*tls.Config, error) {
@@ -293,6 +340,14 @@ func (c *ConfigEntry) GetTLSConfig(host string) (*tls.Config, error) {
 			return nil, fmt.Errorf("invalid 'tls_min_version' in config")
 		}
 		tlsConfig.MinVersion = tlsMinVersion
+	}
+
+	if c.TLSMaxVersion != "" {
+		tlsMaxVersion, ok := tlsutil.TLSLookup[c.TLSMaxVersion]
+		if !ok {
+			return nil, fmt.Errorf("invalid 'tls_max_version' in config")
+		}
+		tlsConfig.MaxVersion = tlsMaxVersion
 	}
 
 	if c.InsecureTLS {
@@ -310,48 +365,67 @@ func (c *ConfigEntry) GetTLSConfig(host string) (*tls.Config, error) {
 }
 
 func (c *ConfigEntry) DialLDAP() (*ldap.Conn, error) {
-
-	u, err := url.Parse(c.Url)
-	if err != nil {
-		return nil, err
-	}
-	host, port, err := net.SplitHostPort(u.Host)
-	if err != nil {
-		host = u.Host
-	}
-
+	var retErr *multierror.Error
 	var conn *ldap.Conn
-	var tlsConfig *tls.Config
-	switch u.Scheme {
-	case "ldap":
-		if port == "" {
-			port = "389"
+	urls := strings.Split(c.Url, ",")
+	for _, uut := range urls {
+		u, err := url.Parse(uut)
+		if err != nil {
+			retErr = multierror.Append(retErr, fmt.Errorf("error parsing url %q: %s", uut, err.Error()))
+			continue
 		}
-		conn, err = ldap.Dial("tcp", host+":"+port)
-		if c.StartTLS {
+		host, port, err := net.SplitHostPort(u.Host)
+		if err != nil {
+			host = u.Host
+		}
+
+		var tlsConfig *tls.Config
+		switch u.Scheme {
+		case "ldap":
+			if port == "" {
+				port = "389"
+			}
+			conn, err = ldap.Dial("tcp", net.JoinHostPort(host, port))
+			if err != nil {
+				break
+			}
+			if conn == nil {
+				err = fmt.Errorf("empty connection after dialing")
+				break
+			}
+			if c.StartTLS {
+				tlsConfig, err = c.GetTLSConfig(host)
+				if err != nil {
+					break
+				}
+				err = conn.StartTLS(tlsConfig)
+			}
+		case "ldaps":
+			if port == "" {
+				port = "636"
+			}
 			tlsConfig, err = c.GetTLSConfig(host)
 			if err != nil {
 				break
 			}
-			err = conn.StartTLS(tlsConfig)
+			conn, err = ldap.DialTLS("tcp", net.JoinHostPort(host, port), tlsConfig)
+		default:
+			retErr = multierror.Append(retErr, fmt.Errorf("invalid LDAP scheme in url %q", net.JoinHostPort(host, port)))
+			continue
 		}
-	case "ldaps":
-		if port == "" {
-			port = "636"
-		}
-		tlsConfig, err = c.GetTLSConfig(host)
-		if err != nil {
+		if err == nil {
+			if retErr != nil {
+				if c.logger.IsDebug() {
+					c.logger.Debug("ldap: errors connecting to some hosts: %s", retErr.Error())
+				}
+			}
+			retErr = nil
 			break
 		}
-		conn, err = ldap.DialTLS("tcp", host+":"+port, tlsConfig)
-	default:
-		return nil, fmt.Errorf("invalid LDAP scheme")
-	}
-	if err != nil {
-		return nil, fmt.Errorf("cannot connect to LDAP: %v", err)
+		retErr = multierror.Append(retErr, fmt.Errorf("error connecting to host %q: %s", uut, err.Error()))
 	}
 
-	return conn, nil
+	return conn, retErr.ErrorOrNil()
 }
 
 /*

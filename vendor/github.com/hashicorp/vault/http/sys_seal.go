@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	"github.com/hashicorp/errwrap"
+	"github.com/hashicorp/vault/helper/consts"
 	"github.com/hashicorp/vault/logical"
 	"github.com/hashicorp/vault/vault"
 	"github.com/hashicorp/vault/version"
@@ -15,7 +16,7 @@ import (
 
 func handleSysSeal(core *vault.Core) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		req, statusCode, err := buildLogicalRequest(w, r)
+		req, statusCode, err := buildLogicalRequest(core, w, r)
 		if err != nil || statusCode != 0 {
 			respondError(w, statusCode, err)
 			return
@@ -30,8 +31,13 @@ func handleSysSeal(core *vault.Core) http.Handler {
 
 		// Seal with the token above
 		if err := core.SealWithRequest(req); err != nil {
-			respondError(w, http.StatusInternalServerError, err)
-			return
+			if errwrap.Contains(err, logical.ErrPermissionDenied.Error()) {
+				respondError(w, http.StatusForbidden, err)
+				return
+			} else {
+				respondError(w, http.StatusInternalServerError, err)
+				return
+			}
 		}
 
 		respondOk(w, nil)
@@ -40,7 +46,7 @@ func handleSysSeal(core *vault.Core) http.Handler {
 
 func handleSysStepDown(core *vault.Core) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		req, statusCode, err := buildLogicalRequest(w, r)
+		req, statusCode, err := buildLogicalRequest(core, w, r)
 		if err != nil || statusCode != 0 {
 			respondError(w, statusCode, err)
 			return
@@ -75,14 +81,14 @@ func handleSysUnseal(core *vault.Core) http.Handler {
 
 		// Parse the request
 		var req UnsealRequest
-		if err := parseRequest(r, &req); err != nil {
+		if err := parseRequest(r, w, &req); err != nil {
 			respondError(w, http.StatusBadRequest, err)
 			return
 		}
 		if !req.Reset && req.Key == "" {
 			respondError(
 				w, http.StatusBadRequest,
-				errors.New("'key' must specified in request body as JSON, or 'reset' set to true"))
+				errors.New("'key' must be specified in request body as JSON, or 'reset' set to true"))
 			return
 		}
 
@@ -121,7 +127,7 @@ func handleSysUnseal(core *vault.Core) http.Handler {
 				case errwrap.Contains(err, vault.ErrBarrierInvalidKey.Error()):
 				case errwrap.Contains(err, vault.ErrBarrierNotInit.Error()):
 				case errwrap.Contains(err, vault.ErrBarrierSealed.Error()):
-				case errwrap.Contains(err, vault.ErrStandby.Error()):
+				case errwrap.Contains(err, consts.ErrStandby.Error()):
 				default:
 					respondError(w, http.StatusInternalServerError, err)
 					return
@@ -181,11 +187,14 @@ func handleSysSealStatusRaw(core *vault.Core, w http.ResponseWriter, r *http.Req
 		clusterID = cluster.ID
 	}
 
+	progress, nonce := core.SecretProgress()
+
 	respondOk(w, &SealStatusResponse{
 		Sealed:      sealed,
 		T:           sealConfig.SecretThreshold,
 		N:           sealConfig.SecretShares,
-		Progress:    core.SecretProgress(),
+		Progress:    progress,
+		Nonce:       nonce,
 		Version:     version.GetVersion().VersionNumber(),
 		ClusterName: clusterName,
 		ClusterID:   clusterID,
@@ -197,6 +206,7 @@ type SealStatusResponse struct {
 	T           int    `json:"t"`
 	N           int    `json:"n"`
 	Progress    int    `json:"progress"`
+	Nonce       string `json:"nonce"`
 	Version     string `json:"version"`
 	ClusterName string `json:"cluster_name,omitempty"`
 	ClusterID   string `json:"cluster_id,omitempty"`

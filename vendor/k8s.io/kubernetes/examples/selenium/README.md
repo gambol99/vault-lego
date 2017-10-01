@@ -1,44 +1,10 @@
-<!-- BEGIN MUNGE: UNVERSIONED_WARNING -->
-
-<!-- BEGIN STRIP_FOR_RELEASE -->
-
-<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
-     width="25" height="25">
-<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
-     width="25" height="25">
-<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
-     width="25" height="25">
-<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
-     width="25" height="25">
-<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
-     width="25" height="25">
-
-<h2>PLEASE NOTE: This document applies to the HEAD of the source tree</h2>
-
-If you are using a released version of Kubernetes, you should
-refer to the docs that go with that version.
-
-<!-- TAG RELEASE_LINK, added by the munger automatically -->
-<strong>
-The latest release of this document can be found
-[here](http://releases.k8s.io/release-1.4/examples/selenium/README.md).
-
-Documentation for other releases can be found at
-[releases.k8s.io](http://releases.k8s.io).
-</strong>
---
-
-<!-- END STRIP_FOR_RELEASE -->
-
-<!-- END MUNGE: UNVERSIONED_WARNING -->
-
 ## Selenium on Kubernetes
 
 Selenium is a browser automation tool used primarily for testing web applications. However when Selenium is used in a CI pipeline to test applications, there is often contention around the use of Selenium resources. This example shows you how to deploy Selenium to Kubernetes in a scalable fashion.
 
 ### Prerequisites
 
-This example assumes you have a working Kubernetes cluster and a properly configured kubectl client. See the [Getting Started Guides](../../docs/getting-started-guides/) for details.
+This example assumes you have a working Kubernetes cluster and a properly configured kubectl client. See the [Getting Started Guides](https://kubernetes.io/docs/getting-started-guides/) for details.
 
 Google Container Engine is also a quick way to get Kubernetes up and running: https://cloud.google.com/container-engine/
 
@@ -79,7 +45,7 @@ If you cannot reach your Kubernetes nodes from your network, you can proxy via k
 
 ```console
 export PODNAME=`kubectl get pods --selector="app=selenium-hub" --output=template --template="{{with index .items 0}}{{.metadata.name}}{{end}}"`
-kubectl port-forward --pod=$PODNAME 4444:4444
+kubectl port-forward $PODNAME 4444:4444
 ```
 
 In a separate terminal, you can now check the status.
@@ -93,7 +59,7 @@ curl http://localhost:4444
 If you are using Google Container Engine, you can expose your hub via the internet. This is a bad idea for many reasons, but you can do it as follows:
 
 ```console
-kubectl expose rc selenium-hub --name=selenium-hub-external --labels="app=selenium-hub,external=true" --create-external-load-balancer=true
+kubectl expose rc selenium-hub --name=selenium-hub-external --labels="app=selenium-hub,external=true" --type=LoadBalancer
 ```
 
 Then wait a few minutes, eventually your new `selenium-hub-external` service will be assigned a load balanced IP from gcloud. Once `kubectl get svc selenium-hub-external` shows two IPs, run this snippet.
@@ -113,13 +79,13 @@ Now that the Hub is up, we can deploy workers.
 This will deploy 2 Chrome nodes.
 
 ```console
-kubectl create --file=examples/selenium/selenium-node-chrome-rc.yaml
+kubectl create --filename=examples/selenium/selenium-node-chrome-rc.yaml
 ```
 
 And 2 Firefox nodes to match.
 
 ```console
-kubectl create --file=examples/selenium/selenium-node-firefox-rc.yaml
+kubectl create --filename=examples/selenium/selenium-node-firefox-rc.yaml
 ```
 
 Once the pods start, you will see them show up in the Selenium Hub interface.
@@ -202,10 +168,10 @@ You now have 10 Firefox and 10 Chrome nodes, happy Seleniuming!
 
 ### Debugging
 
-Sometimes it is neccessary to check on a hung test. Each pod is running VNC. To check on one of the browser nodes via VNC, it's recommended that you proxy, since we don't want to expose a service for every pod, and the containers have a weak VNC password. Replace POD_NAME with the name of the pod you want to connect to.
+Sometimes it is necessary to check on a hung test. Each pod is running VNC. To check on one of the browser nodes via VNC, it's recommended that you proxy, since we don't want to expose a service for every pod, and the containers have a weak VNC password. Replace POD_NAME with the name of the pod you want to connect to.
 
 ```console
-kubectl port-forward --pod=POD_NAME 5900:5900
+kubectl port-forward $POD_NAME 5900:5900
 ```
 
 Then connect to localhost:5900 with your VNC client using the password "secret"

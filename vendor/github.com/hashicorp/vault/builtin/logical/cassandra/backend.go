@@ -12,7 +12,11 @@ import (
 
 // Factory creates a new backend
 func Factory(conf *logical.BackendConfig) (logical.Backend, error) {
-	return Backend().Setup(conf)
+	b := Backend()
+	if err := b.Setup(conf); err != nil {
+		return nil, err
+	}
+	return b, nil
 }
 
 // Backend contains the base information for the backend's functionality
@@ -30,6 +34,13 @@ func Backend() *backend {
 		Secrets: []*framework.Secret{
 			secretCreds(&b),
 		},
+
+		Invalidate: b.invalidate,
+
+		Clean: func() {
+			b.ResetDB(nil)
+		},
+		BackendType: logical.TypeLogical,
 	}
 
 	return &b
@@ -101,6 +112,13 @@ func (b *backend) ResetDB(newSession *gocql.Session) {
 	}
 
 	b.session = newSession
+}
+
+func (b *backend) invalidate(key string) {
+	switch key {
+	case "config/connection":
+		b.ResetDB(nil)
+	}
 }
 
 const backendHelp = `

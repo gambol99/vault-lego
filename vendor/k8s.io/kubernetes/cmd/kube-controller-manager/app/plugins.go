@@ -31,23 +31,30 @@ import (
 	"github.com/golang/glog"
 	"k8s.io/kubernetes/pkg/cloudprovider"
 	"k8s.io/kubernetes/pkg/cloudprovider/providers/aws"
+	"k8s.io/kubernetes/pkg/cloudprovider/providers/azure"
 	"k8s.io/kubernetes/pkg/cloudprovider/providers/gce"
 	"k8s.io/kubernetes/pkg/cloudprovider/providers/openstack"
+	"k8s.io/kubernetes/pkg/cloudprovider/providers/photon"
 	"k8s.io/kubernetes/pkg/cloudprovider/providers/vsphere"
-	utilconfig "k8s.io/kubernetes/pkg/util/config"
 	"k8s.io/kubernetes/pkg/util/io"
 	"k8s.io/kubernetes/pkg/volume"
 	"k8s.io/kubernetes/pkg/volume/aws_ebs"
 	"k8s.io/kubernetes/pkg/volume/azure_dd"
+	"k8s.io/kubernetes/pkg/volume/azure_file"
 	"k8s.io/kubernetes/pkg/volume/cinder"
 	"k8s.io/kubernetes/pkg/volume/flexvolume"
 	"k8s.io/kubernetes/pkg/volume/flocker"
 	"k8s.io/kubernetes/pkg/volume/gce_pd"
 	"k8s.io/kubernetes/pkg/volume/glusterfs"
 	"k8s.io/kubernetes/pkg/volume/host_path"
+	"k8s.io/kubernetes/pkg/volume/local"
 	"k8s.io/kubernetes/pkg/volume/nfs"
+	"k8s.io/kubernetes/pkg/volume/photon_pd"
+	"k8s.io/kubernetes/pkg/volume/portworx"
 	"k8s.io/kubernetes/pkg/volume/quobyte"
 	"k8s.io/kubernetes/pkg/volume/rbd"
+	"k8s.io/kubernetes/pkg/volume/scaleio"
+	"k8s.io/kubernetes/pkg/volume/storageos"
 	"k8s.io/kubernetes/pkg/volume/vsphere_volume"
 )
 
@@ -64,8 +71,12 @@ func ProbeAttachableVolumePlugins(config componentconfig.VolumeConfiguration) []
 	allPlugins = append(allPlugins, gce_pd.ProbeVolumePlugins()...)
 	allPlugins = append(allPlugins, cinder.ProbeVolumePlugins()...)
 	allPlugins = append(allPlugins, flexvolume.ProbeVolumePlugins(config.FlexVolumePluginDir)...)
+	allPlugins = append(allPlugins, portworx.ProbeVolumePlugins()...)
 	allPlugins = append(allPlugins, vsphere_volume.ProbeVolumePlugins()...)
 	allPlugins = append(allPlugins, azure_dd.ProbeVolumePlugins()...)
+	allPlugins = append(allPlugins, photon_pd.ProbeVolumePlugins()...)
+	allPlugins = append(allPlugins, scaleio.ProbeVolumePlugins()...)
+	allPlugins = append(allPlugins, storageos.ProbeVolumePlugins()...)
 	return allPlugins
 }
 
@@ -108,8 +119,13 @@ func ProbeControllerVolumePlugins(cloud cloudprovider.Interface, config componen
 	// add rbd provisioner
 	allPlugins = append(allPlugins, rbd.ProbeVolumePlugins()...)
 	allPlugins = append(allPlugins, quobyte.ProbeVolumePlugins()...)
+	allPlugins = append(allPlugins, azure_file.ProbeVolumePlugins()...)
 
 	allPlugins = append(allPlugins, flocker.ProbeVolumePlugins()...)
+	allPlugins = append(allPlugins, portworx.ProbeVolumePlugins()...)
+	allPlugins = append(allPlugins, scaleio.ProbeVolumePlugins()...)
+	allPlugins = append(allPlugins, local.ProbeVolumePlugins()...)
+	allPlugins = append(allPlugins, storageos.ProbeVolumePlugins()...)
 
 	if cloud != nil {
 		switch {
@@ -121,45 +137,14 @@ func ProbeControllerVolumePlugins(cloud cloudprovider.Interface, config componen
 			allPlugins = append(allPlugins, cinder.ProbeVolumePlugins()...)
 		case vsphere.ProviderName == cloud.ProviderName():
 			allPlugins = append(allPlugins, vsphere_volume.ProbeVolumePlugins()...)
+		case azure.CloudProviderName == cloud.ProviderName():
+			allPlugins = append(allPlugins, azure_dd.ProbeVolumePlugins()...)
+		case photon.ProviderName == cloud.ProviderName():
+			allPlugins = append(allPlugins, photon_pd.ProbeVolumePlugins()...)
 		}
 	}
 
 	return allPlugins
-}
-
-// NewAlphaVolumeProvisioner returns a volume provisioner to use when running in
-// a cloud or development environment. The alpha implementation of provisioning
-// allows 1 implied provisioner per cloud and is here only for compatibility
-// with Kubernetes 1.3
-// TODO: remove in Kubernetes 1.5
-func NewAlphaVolumeProvisioner(cloud cloudprovider.Interface, config componentconfig.VolumeConfiguration) (volume.ProvisionableVolumePlugin, error) {
-	switch {
-	case !utilconfig.DefaultFeatureGate.DynamicVolumeProvisioning():
-		return nil, nil
-	case cloud == nil && config.EnableHostPathProvisioning:
-		return getProvisionablePluginFromVolumePlugins(host_path.ProbeVolumePlugins(
-			volume.VolumeConfig{
-				ProvisioningEnabled: true,
-			}))
-	case cloud != nil && aws.ProviderName == cloud.ProviderName():
-		return getProvisionablePluginFromVolumePlugins(aws_ebs.ProbeVolumePlugins())
-	case cloud != nil && gce.ProviderName == cloud.ProviderName():
-		return getProvisionablePluginFromVolumePlugins(gce_pd.ProbeVolumePlugins())
-	case cloud != nil && openstack.ProviderName == cloud.ProviderName():
-		return getProvisionablePluginFromVolumePlugins(cinder.ProbeVolumePlugins())
-	case cloud != nil && vsphere.ProviderName == cloud.ProviderName():
-		return getProvisionablePluginFromVolumePlugins(vsphere_volume.ProbeVolumePlugins())
-	}
-	return nil, nil
-}
-
-func getProvisionablePluginFromVolumePlugins(plugins []volume.VolumePlugin) (volume.ProvisionableVolumePlugin, error) {
-	for _, plugin := range plugins {
-		if provisonablePlugin, ok := plugin.(volume.ProvisionableVolumePlugin); ok {
-			return provisonablePlugin, nil
-		}
-	}
-	return nil, fmt.Errorf("ProvisionablePlugin expected but not found in %#v: ", plugins)
 }
 
 // AttemptToLoadRecycler tries decoding a pod from a filepath for use as a recycler for a volume.
@@ -170,6 +155,9 @@ func AttemptToLoadRecycler(path string, config *volume.VolumeConfig) error {
 		recyclerPod, err := io.LoadPodFromFile(path)
 		if err != nil {
 			return err
+		}
+		if err = volume.ValidateRecyclerPodTemplate(recyclerPod); err != nil {
+			return fmt.Errorf("Pod specification (%v): %v", path, err)
 		}
 		config.RecyclerPodTemplate = recyclerPod
 	}

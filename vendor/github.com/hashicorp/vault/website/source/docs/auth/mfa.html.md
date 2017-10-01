@@ -12,7 +12,7 @@ Several authentication backends support multi-factor authentication (MFA). Once 
 a backend, users are required to provide additional verification, like a one-time passcode,
 before being authenticated.
 
-Currently, the "ldap" and "userpass" backends support MFA.
+Currently, the "ldap", "radius" and "userpass" backends support MFA.
 
 ## Authentication
 
@@ -88,5 +88,8 @@ transformed before authenticating with Duo. This field is a format string
 that is passed the original username as its first argument and outputs
 the new username. For example "%s@example.com" would append "@example.com"
 to the provided username before connecting to Duo.
+
+`push_info` is a string of URL-encoded key/value pairs that provides additional
+context about the authentication attempt in the Duo Mobile application.
 
 More information can be found through the CLI `path-help` command.

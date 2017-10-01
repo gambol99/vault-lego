@@ -48,9 +48,8 @@ func TestBackend_Config(t *testing.T) {
 	}
 
 	logicaltest.Test(t, logicaltest.TestCase{
-		AcceptanceTest: true,
-		PreCheck:       func() { testAccPreCheck(t) },
-		Backend:        b,
+		PreCheck: func() { testAccPreCheck(t) },
+		Backend:  b,
 		Steps: []logicaltest.TestStep{
 			testConfigWrite(t, config_data1),
 			testLoginWrite(t, login_data, expectedTTL1.Nanoseconds(), false),
@@ -105,37 +104,40 @@ func TestBackend_basic(t *testing.T) {
 	}
 
 	logicaltest.Test(t, logicaltest.TestCase{
-		AcceptanceTest: true,
-		PreCheck:       func() { testAccPreCheck(t) },
-		Backend:        b,
+		PreCheck: func() { testAccPreCheck(t) },
+		Backend:  b,
 		Steps: []logicaltest.TestStep{
 			testAccStepConfig(t, false),
-			testAccMap(t, "default", "root"),
-			testAccMap(t, "oWnErs", "root"),
-			testAccLogin(t, []string{"root"}),
+			testAccMap(t, "default", "fakepol"),
+			testAccMap(t, "oWnErs", "fakepol"),
+			testAccLogin(t, []string{"default", "fakepol"}),
 			testAccStepConfig(t, true),
-			testAccMap(t, "default", "root"),
-			testAccMap(t, "oWnErs", "root"),
-			testAccLogin(t, []string{"root"}),
+			testAccMap(t, "default", "fakepol"),
+			testAccMap(t, "oWnErs", "fakepol"),
+			testAccLogin(t, []string{"default", "fakepol"}),
 			testAccStepConfigWithBaseURL(t),
-			testAccMap(t, "default", "root"),
-			testAccMap(t, "oWnErs", "root"),
-			testAccLogin(t, []string{"root"}),
+			testAccMap(t, "default", "fakepol"),
+			testAccMap(t, "oWnErs", "fakepol"),
+			testAccLogin(t, []string{"default", "fakepol"}),
+			testAccMap(t, "default", "fakepol"),
+			testAccStepConfig(t, true),
+			mapUserToPolicy(t, os.Getenv("GITHUB_USER"), "userpolicy"),
+			testAccLogin(t, []string{"default", "fakepol", "userpolicy"}),
 		},
 	})
 }
 
 func testAccPreCheck(t *testing.T) {
 	if v := os.Getenv("GITHUB_TOKEN"); v == "" {
-		t.Fatal("GITHUB_TOKEN must be set for acceptance tests")
+		t.Skip("GITHUB_TOKEN must be set for acceptance tests")
 	}
 
 	if v := os.Getenv("GITHUB_ORG"); v == "" {
-		t.Fatal("GITHUB_ORG must be set for acceptance tests")
+		t.Skip("GITHUB_ORG must be set for acceptance tests")
 	}
 
 	if v := os.Getenv("GITHUB_BASEURL"); v == "" {
-		t.Fatal("GITHUB_BASEURL must be set for acceptance tests (use 'https://api.github.com' if you don't know what you're doing)")
+		t.Skip("GITHUB_BASEURL must be set for acceptance tests (use 'https://api.github.com' if you don't know what you're doing)")
 	}
 }
 
@@ -174,7 +176,17 @@ func testAccMap(t *testing.T, k string, v string) logicaltest.TestStep {
 	}
 }
 
-func testAccLogin(t *testing.T, keys []string) logicaltest.TestStep {
+func mapUserToPolicy(t *testing.T, k string, v string) logicaltest.TestStep {
+	return logicaltest.TestStep{
+		Operation: logical.UpdateOperation,
+		Path:      "map/users/" + k,
+		Data: map[string]interface{}{
+			"value": v,
+		},
+	}
+}
+
+func testAccLogin(t *testing.T, policies []string) logicaltest.TestStep {
 	return logicaltest.TestStep{
 		Operation: logical.UpdateOperation,
 		Path:      "login",
@@ -183,6 +195,6 @@ func testAccLogin(t *testing.T, keys []string) logicaltest.TestStep {
 		},
 		Unauthenticated: true,
 
-		Check: logicaltest.TestCheckAuth(keys),
+		Check: logicaltest.TestCheckAuth(policies),
 	}
 }

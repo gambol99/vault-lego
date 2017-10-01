@@ -14,24 +14,61 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package api
+package kubeadm
 
-import "k8s.io/kubernetes/pkg/api/unversioned"
+import (
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+type EnvParams struct {
+	KubernetesDir    string
+	HyperkubeImage   string
+	RepositoryPrefix string
+	EtcdImage        string
+}
 
 type MasterConfiguration struct {
-	unversioned.TypeMeta
+	metav1.TypeMeta
 
-	Secrets           Secrets
-	API               API
-	Etcd              Etcd
-	Networking        Networking
-	KubernetesVersion string
-	CloudProvider     string
+	API                API
+	Etcd               Etcd
+	Networking         Networking
+	KubernetesVersion  string
+	CloudProvider      string
+	NodeName           string
+	AuthorizationModes []string
+
+	Token    string
+	TokenTTL time.Duration
+
+	// SelfHosted enables an alpha deployment type where the apiserver, scheduler, and
+	// controller manager are managed by Kubernetes itself. This option is likely to
+	// become the default in the future.
+	SelfHosted bool
+
+	APIServerExtraArgs         map[string]string
+	ControllerManagerExtraArgs map[string]string
+	SchedulerExtraArgs         map[string]string
+
+	// APIServerCertSANs sets extra Subject Alternative Names for the API Server signing cert
+	APIServerCertSANs []string
+	// CertificatesDir specifies where to store or look for all required certificates
+	CertificatesDir string
 }
 
 type API struct {
-	AdvertiseAddresses []string
-	ExternalDNSNames   []string
+	// AdvertiseAddress sets the address for the API server to advertise.
+	AdvertiseAddress string
+	// BindPort sets the secure port for the API Server to bind to
+	BindPort int32
+}
+
+type TokenDiscovery struct {
+	ID        string
+	Secret    string
+	Addresses []string
 }
 
 type Networking struct {
@@ -45,26 +82,19 @@ type Etcd struct {
 	CAFile    string
 	CertFile  string
 	KeyFile   string
-}
-
-type Secrets struct {
-	GivenToken  string // dot-separated `<TokenID>.<Token>` set by the user
-	TokenID     string // optional on master side, will be generated if not specified
-	Token       []byte // optional on master side, will be generated if not specified
-	BearerToken string // set based on Token
+	DataDir   string
+	ExtraArgs map[string]string
 }
 
 type NodeConfiguration struct {
-	unversioned.TypeMeta
+	metav1.TypeMeta
 
-	MasterAddresses []string
-	Secrets         Secrets
-}
-
-// ClusterInfo TODO add description
-type ClusterInfo struct {
-	unversioned.TypeMeta
-	// TODO(phase1+) this may become simply `api.Config`
-	CertificateAuthorities []string `json:"certificateAuthorities"`
-	Endpoints              []string `json:"endpoints"`
+	CACertPath     string
+	DiscoveryFile  string
+	DiscoveryToken string
+	// Currently we only pay attention to one api server but hope to support >1 in the future
+	DiscoveryTokenAPIServers []string
+	NodeName                 string
+	TLSBootstrapToken        string
+	Token                    string
 }

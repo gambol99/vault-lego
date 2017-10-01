@@ -20,18 +20,19 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/renstrom/dedent"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/kubernetes/pkg/kubectl"
+	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	"k8s.io/kubernetes/pkg/kubectl/resource"
+	"k8s.io/kubernetes/pkg/util/i18n"
 	"k8s.io/kubernetes/pkg/util/interrupt"
-	"k8s.io/kubernetes/pkg/watch"
 
 	"github.com/spf13/cobra"
 )
 
 var (
-	status_long = dedent.Dedent(`
+	status_long = templates.LongDesc(`
 		Show the status of the rollout.
 
 		By default 'rollout status' will watch the status of the latest rollout
@@ -40,20 +41,21 @@ var (
 		'rollout status' will continue watching the latest revision. If you want to
 		pin to a specific revision and abort if it is rolled over by another revision,
 		use --revision=N where N is the revision you need to watch for.`)
-	status_example = dedent.Dedent(`
+
+	status_example = templates.Examples(`
 		# Watch the rollout status of a deployment
 		kubectl rollout status deployment/nginx`)
 )
 
-func NewCmdRolloutStatus(f *cmdutil.Factory, out io.Writer) *cobra.Command {
+func NewCmdRolloutStatus(f cmdutil.Factory, out io.Writer) *cobra.Command {
 	options := &resource.FilenameOptions{}
 
-	validArgs := []string{"deployment"}
+	validArgs := []string{"deployment", "daemonset"}
 	argAliases := kubectl.ResourceAliases(validArgs)
 
 	cmd := &cobra.Command{
 		Use:     "status (TYPE NAME | TYPE/NAME) [flags]",
-		Short:   "Show the status of the rollout",
+		Short:   i18n.T("Show the status of the rollout"),
 		Long:    status_long,
 		Example: status_example,
 		Run: func(cmd *cobra.Command, args []string) {
@@ -70,19 +72,17 @@ func NewCmdRolloutStatus(f *cmdutil.Factory, out io.Writer) *cobra.Command {
 	return cmd
 }
 
-func RunStatus(f *cmdutil.Factory, cmd *cobra.Command, out io.Writer, args []string, options *resource.FilenameOptions) error {
+func RunStatus(f cmdutil.Factory, cmd *cobra.Command, out io.Writer, args []string, options *resource.FilenameOptions) error {
 	if len(args) == 0 && cmdutil.IsFilenameEmpty(options.Filenames) {
 		return cmdutil.UsageError(cmd, "Required resource not specified.")
 	}
-
-	mapper, typer := f.Object()
 
 	cmdNamespace, enforceNamespace, err := f.DefaultNamespace()
 	if err != nil {
 		return err
 	}
 
-	r := resource.NewBuilder(mapper, typer, resource.ClientMapperFunc(f.ClientForMapping), f.Decoder(true)).
+	r := f.NewBuilder(true).
 		NamespaceParam(cmdNamespace).DefaultNamespace().
 		FilenameParam(enforceNamespace, options).
 		ResourceTypeOrNameArgs(true, args...).

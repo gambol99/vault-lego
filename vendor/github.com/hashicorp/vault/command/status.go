@@ -40,11 +40,13 @@ func (c *StatusCommand) Run(args []string) int {
 			"Key Shares: %d\n"+
 			"Key Threshold: %d\n"+
 			"Unseal Progress: %d\n"+
+			"Unseal Nonce: %v\n"+
 			"Version: %s",
 		sealStatus.Sealed,
 		sealStatus.N,
 		sealStatus.T,
 		sealStatus.Progress,
+		sealStatus.Nonce,
 		sealStatus.Version)
 
 	if sealStatus.ClusterName != "" && sealStatus.ClusterID != "" {
@@ -82,7 +84,10 @@ func (c *StatusCommand) Run(args []string) int {
 			if leaderStatus.LeaderAddress == "" {
 				leaderStatus.LeaderAddress = "<none>"
 			}
-			c.Ui.Output(fmt.Sprintf("\tLeader: %s", leaderStatus.LeaderAddress))
+			if leaderStatus.LeaderClusterAddress == "" {
+				leaderStatus.LeaderClusterAddress = "<none>"
+			}
+			c.Ui.Output(fmt.Sprintf("\tLeader Cluster Address: %s", leaderStatus.LeaderClusterAddress))
 		}
 	}
 

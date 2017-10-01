@@ -21,16 +21,18 @@ import (
 	"net/http"
 	"testing"
 
+	"k8s.io/client-go/rest/fake"
 	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/client/unversioned/fake"
+	cmdtesting "k8s.io/kubernetes/pkg/kubectl/cmd/testing"
 )
 
 func TestCreateNamespace(t *testing.T) {
 	namespaceObject := &api.Namespace{}
 	namespaceObject.Name = "my-namespace"
-	f, tf, codec, ns := NewAPIFactory()
+	f, tf, codec, ns := cmdtesting.NewAPIFactory()
 	tf.Printer = &testPrinter{}
 	tf.Client = &fake.RESTClient{
+		APIRegistry:          api.Registry,
 		NegotiatedSerializer: ns,
 		Client: fake.CreateHTTPClient(func(req *http.Request) (*http.Response, error) {
 			switch p, m := req.URL.Path, req.Method; {
@@ -48,6 +50,6 @@ func TestCreateNamespace(t *testing.T) {
 	cmd.Run(cmd, []string{namespaceObject.Name})
 	expectedOutput := "namespace/" + namespaceObject.Name + "\n"
 	if buf.String() != expectedOutput {
-		t.Errorf("expected output: %s, but got: %s", buf.String(), expectedOutput)
+		t.Errorf("expected output: %s, but got: %s", expectedOutput, buf.String())
 	}
 }

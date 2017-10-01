@@ -34,12 +34,16 @@ var _ = framework.KubeDescribe("SSH", func() {
 	BeforeEach(func() {
 		// When adding more providers here, also implement their functionality in util.go's framework.GetSigner(...).
 		framework.SkipUnlessProviderIs(framework.ProvidersWithSSH...)
+
+		// This test SSH's into the node for which it needs the $HOME/.ssh/id_rsa key to be present. So
+		// we should skip if the environment does not have the key (not all CI systems support this use case)
+		framework.SkipUnlessSSHKeyPresent()
 	})
 
 	It("should SSH to all nodes and run commands", func() {
 		// Get all nodes' external IPs.
 		By("Getting all nodes' SSH-able IP addresses")
-		hosts, err := framework.NodeSSHHosts(f.Client)
+		hosts, err := framework.NodeSSHHosts(f.ClientSet)
 		if err != nil {
 			framework.Failf("Error getting node hostnames: %v", err)
 		}

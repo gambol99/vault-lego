@@ -12,7 +12,11 @@ import (
 )
 
 func Factory(conf *logical.BackendConfig) (logical.Backend, error) {
-	return Backend().Setup(conf)
+	b := Backend()
+	if err := b.Setup(conf); err != nil {
+		return nil, err
+	}
+	return b, nil
 }
 
 func Backend() *backend {
@@ -31,6 +35,10 @@ func Backend() *backend {
 		Secrets: []*framework.Secret{
 			secretCreds(&b),
 		},
+
+		Invalidate:  b.invalidate,
+		Clean:       b.ResetDB,
+		BackendType: logical.TypeLogical,
 	}
 
 	return &b
@@ -74,7 +82,7 @@ func (b *backend) DB(s logical.Storage) (*sql.DB, error) {
 	}
 	connString := connConfig.ConnectionString
 
-	db, err := sql.Open("mssql", connString)
+	db, err := sql.Open("sqlserver", connString)
 	if err != nil {
 		return nil, err
 	}
@@ -108,6 +116,13 @@ func (b *backend) ResetDB() {
 	}
 
 	b.db = nil
+}
+
+func (b *backend) invalidate(key string) {
+	switch key {
+	case "config/connection":
+		b.ResetDB()
+	}
 }
 
 // LeaseConfig returns the lease configuration

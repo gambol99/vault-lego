@@ -11,7 +11,7 @@ import (
 
 type CLIHandler struct{}
 
-func (h *CLIHandler) Auth(c *api.Client, m map[string]string) (string, error) {
+func (h *CLIHandler) Auth(c *api.Client, m map[string]string) (*api.Secret, error) {
 	mount, ok := m["mount"]
 	if !ok {
 		mount = "ldap"
@@ -19,7 +19,10 @@ func (h *CLIHandler) Auth(c *api.Client, m map[string]string) (string, error) {
 
 	username, ok := m["username"]
 	if !ok {
-		return "", fmt.Errorf("'username' var must be set")
+		username = usernameFromEnv()
+		if username == "" {
+			return nil, fmt.Errorf("'username' not supplied and neither 'LOGNAME' nor 'USER' env vars set")
+		}
 	}
 	password, ok := m["password"]
 	if !ok {
@@ -28,7 +31,7 @@ func (h *CLIHandler) Auth(c *api.Client, m map[string]string) (string, error) {
 		password, err = pwd.Read(os.Stdin)
 		fmt.Println()
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 	}
 
@@ -48,13 +51,13 @@ func (h *CLIHandler) Auth(c *api.Client, m map[string]string) (string, error) {
 	path := fmt.Sprintf("auth/%s/login/%s", mount, username)
 	secret, err := c.Logical().Write(path, data)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if secret == nil {
-		return "", fmt.Errorf("empty response from credential provider")
+		return nil, fmt.Errorf("empty response from credential provider")
 	}
 
-	return secret.Auth.ClientToken, nil
+	return secret, nil
 }
 
 func (h *CLIHandler) Help() string {
@@ -73,4 +76,14 @@ which MFA backend is in use, read "auth/[mount]/mfa_config".
     `
 
 	return strings.TrimSpace(help)
+}
+
+func usernameFromEnv() string {
+	if logname := os.Getenv("LOGNAME"); logname != "" {
+		return logname
+	}
+	if user := os.Getenv("USER"); user != "" {
+		return user
+	}
+	return ""
 }

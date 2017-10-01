@@ -17,9 +17,9 @@ limitations under the License.
 package generators
 
 import (
+	"fmt"
 	"io"
 	"path/filepath"
-	"strings"
 
 	"k8s.io/gengo/generator"
 	"k8s.io/gengo/namer"
@@ -29,11 +29,12 @@ import (
 // genClientForType produces a file for each top-level type.
 type genClientForType struct {
 	generator.DefaultGen
-	outputPackage string
-	group         string
-	version       string
-	typeToMatch   *types.Type
-	imports       namer.ImportTracker
+	outputPackage    string
+	clientsetPackage string
+	group            string
+	version          string
+	typeToMatch      *types.Type
+	imports          namer.ImportTracker
 }
 
 var _ generator.Generator = &genClientForType{}
@@ -51,16 +52,25 @@ func (g *genClientForType) Imports(c *generator.Context) (imports []string) {
 	return g.imports.ImportLines()
 }
 
-// Ideally, we'd like hasStatus to return true if there is a subresource path
+// Ideally, we'd like genStatus to return true if there is a subresource path
 // registered for "status" in the API server, but we do not have that
-// information, so hasStatus returns true if the type has a status field.
-func hasStatus(t *types.Type) bool {
+// information, so genStatus returns true if the type has a status field.
+func genStatus(t *types.Type) bool {
+	// Default to true if we have a Status member
+	hasStatus := false
 	for _, m := range t.Members {
-		if m.Name == "Status" && strings.Contains(m.Tags, `json:"status`) {
-			return true
+		if m.Name == "Status" {
+			hasStatus = true
+			break
 		}
 	}
-	return false
+
+	// Allow overriding via a comment on the type
+	genStatus, err := types.ExtractSingleBoolCommentTag("+", "genclientstatus", hasStatus, t.SecondClosestCommentLines)
+	if err != nil {
+		fmt.Printf("error looking up +genclientstatus: %v\n", err)
+	}
+	return genStatus
 }
 
 // GenerateType makes the body of a file implementing the individual typed client for type t.
@@ -69,22 +79,19 @@ func (g *genClientForType) GenerateType(c *generator.Context, t *types.Type, w i
 	pkg := filepath.Base(t.Name.Package)
 	namespaced := !extractBoolTagOrDie("nonNamespaced", t.SecondClosestCommentLines)
 	m := map[string]interface{}{
-		"type":              t,
-		"package":           pkg,
-		"Package":           namer.IC(pkg),
-		"Group":             namer.IC(g.group),
-		"watchInterface":    c.Universe.Type(types.Name{Package: "k8s.io/kubernetes/pkg/watch", Name: "Interface"}),
-		"apiParameterCodec": c.Universe.Type(types.Name{Package: "k8s.io/kubernetes/pkg/api", Name: "ParameterCodec"}),
-		"PatchType":         c.Universe.Type(types.Name{Package: "k8s.io/kubernetes/pkg/api", Name: "PatchType"}),
-		"namespaced":        namespaced,
-	}
-
-	if g.version == "unversioned" {
-		m["DeleteOptions"] = c.Universe.Type(types.Name{Package: "k8s.io/kubernetes/pkg/api", Name: "DeleteOptions"})
-		m["ListOptions"] = c.Universe.Type(types.Name{Package: "k8s.io/kubernetes/pkg/api", Name: "ListOptions"})
-	} else {
-		m["DeleteOptions"] = c.Universe.Type(types.Name{Package: "k8s.io/kubernetes/pkg/api/v1", Name: "DeleteOptions"})
-		m["ListOptions"] = c.Universe.Type(types.Name{Package: "k8s.io/kubernetes/pkg/api/v1", Name: "ListOptions"})
+		"type":                 t,
+		"package":              pkg,
+		"Package":              namer.IC(pkg),
+		"namespaced":           namespaced,
+		"Group":                namer.IC(g.group),
+		"GroupVersion":         namer.IC(g.group) + namer.IC(g.version),
+		"DeleteOptions":        c.Universe.Type(types.Name{Package: "k8s.io/apimachinery/pkg/apis/meta/v1", Name: "DeleteOptions"}),
+		"ListOptions":          c.Universe.Type(types.Name{Package: "k8s.io/apimachinery/pkg/apis/meta/v1", Name: "ListOptions"}),
+		"GetOptions":           c.Universe.Type(types.Name{Package: "k8s.io/apimachinery/pkg/apis/meta/v1", Name: "GetOptions"}),
+		"PatchType":            c.Universe.Type(types.Name{Package: "k8s.io/apimachinery/pkg/types", Name: "PatchType"}),
+		"watchInterface":       c.Universe.Type(types.Name{Package: "k8s.io/apimachinery/pkg/watch", Name: "Interface"}),
+		"RESTClientInterface":  c.Universe.Type(types.Name{Package: "k8s.io/client-go/rest", Name: "Interface"}),
+		"schemeParameterCodec": c.Universe.Variable(types.Name{Package: filepath.Join(g.clientsetPackage, "scheme"), Name: "ParameterCodec"}),
 	}
 
 	sw.Do(getterComment, m)
@@ -95,14 +102,20 @@ func (g *genClientForType) GenerateType(c *generator.Context, t *types.Type, w i
 	}
 	noMethods := extractBoolTagOrDie("noMethods", t.SecondClosestCommentLines) == true
 
+	readonly := extractBoolTagOrDie("readonly", t.SecondClosestCommentLines) == true
+
 	sw.Do(interfaceTemplate1, m)
 	if !noMethods {
-		sw.Do(interfaceTemplate2, m)
-		// Include the UpdateStatus method if the type has a status
-		if hasStatus(t) {
-			sw.Do(interfaceUpdateStatusTemplate, m)
+		if readonly {
+			sw.Do(interfaceTemplateReadonly, m)
+		} else {
+			sw.Do(interfaceTemplate2, m)
+			// Include the UpdateStatus method if the type has a status
+			if genStatus(t) {
+				sw.Do(interfaceUpdateStatusTemplate, m)
+			}
+			sw.Do(interfaceTemplate3, m)
 		}
-		sw.Do(interfaceTemplate3, m)
 	}
 	sw.Do(interfaceTemplate4, m)
 
@@ -114,18 +127,24 @@ func (g *genClientForType) GenerateType(c *generator.Context, t *types.Type, w i
 		sw.Do(newStructNonNamespaced, m)
 	}
 
-	if !noMethods {
+	if !noMethods && !readonly {
 		sw.Do(createTemplate, m)
 		sw.Do(updateTemplate, m)
 		// Generate the UpdateStatus method if the type has a status
-		if hasStatus(t) {
+		if genStatus(t) {
 			sw.Do(updateStatusTemplate, m)
 		}
 		sw.Do(deleteTemplate, m)
 		sw.Do(deleteCollectionTemplate, m)
+	}
+
+	if !noMethods {
 		sw.Do(getTemplate, m)
 		sw.Do(listTemplate, m)
 		sw.Do(watchTemplate, m)
+	}
+
+	if !noMethods && !readonly {
 		sw.Do(patchTemplate, m)
 	}
 
@@ -134,7 +153,7 @@ func (g *genClientForType) GenerateType(c *generator.Context, t *types.Type, w i
 
 // group client will implement this interface.
 var getterComment = `
-// $.type|publicPlural$Getter has a method to return a $.type|public$Interface. 
+// $.type|publicPlural$Getter has a method to return a $.type|public$Interface.
 // A group's client should implement this interface.`
 
 var getterNamesapced = `
@@ -165,10 +184,15 @@ var interfaceUpdateStatusTemplate = `
 var interfaceTemplate3 = `
 	Delete(name string, options *$.DeleteOptions|raw$) error
 	DeleteCollection(options *$.DeleteOptions|raw$, listOptions $.ListOptions|raw$) error
-	Get(name string) (*$.type|raw$, error)
+	Get(name string, options $.GetOptions|raw$) (*$.type|raw$, error)
 	List(opts $.ListOptions|raw$) (*$.type|raw$List, error)
 	Watch(opts $.ListOptions|raw$) ($.watchInterface|raw$, error)
 	Patch(name string, pt $.PatchType|raw$, data []byte, subresources ...string) (result *$.type|raw$, err error)`
+
+var interfaceTemplateReadonly = `
+	Get(name string, options $.GetOptions|raw$) (*$.type|raw$, error)
+	List(opts $.ListOptions|raw$) (*$.type|raw$List, error)
+	Watch(opts $.ListOptions|raw$) ($.watchInterface|raw$, error)`
 
 var interfaceTemplate4 = `
 	$.type|public$Expansion
@@ -179,7 +203,7 @@ var interfaceTemplate4 = `
 var structNamespaced = `
 // $.type|privatePlural$ implements $.type|public$Interface
 type $.type|privatePlural$ struct {
-	client *$.Group$Client
+	client $.RESTClientInterface|raw$
 	ns     string
 }
 `
@@ -188,15 +212,15 @@ type $.type|privatePlural$ struct {
 var structNonNamespaced = `
 // $.type|privatePlural$ implements $.type|public$Interface
 type $.type|privatePlural$ struct {
-	client *$.Group$Client
+	client $.RESTClientInterface|raw$
 }
 `
 
 var newStructNamespaced = `
 // new$.type|publicPlural$ returns a $.type|publicPlural$
-func new$.type|publicPlural$(c *$.Group$Client, namespace string) *$.type|privatePlural$ {
+func new$.type|publicPlural$(c *$.GroupVersion$Client, namespace string) *$.type|privatePlural$ {
 	return &$.type|privatePlural${
-		client: c,
+		client: c.RESTClient(),
 		ns:     namespace,
 	}
 }
@@ -204,9 +228,9 @@ func new$.type|publicPlural$(c *$.Group$Client, namespace string) *$.type|privat
 
 var newStructNonNamespaced = `
 // new$.type|publicPlural$ returns a $.type|publicPlural$
-func new$.type|publicPlural$(c *$.Group$Client) *$.type|privatePlural$ {
+func new$.type|publicPlural$(c *$.GroupVersion$Client) *$.type|privatePlural$ {
 	return &$.type|privatePlural${
-		client: c,
+		client: c.RESTClient(),
 	}
 }
 `
@@ -217,8 +241,8 @@ func (c *$.type|privatePlural$) List(opts $.ListOptions|raw$) (result *$.type|ra
 	result = &$.type|raw$List{}
 	err = c.client.Get().
 		$if .namespaced$Namespace(c.ns).$end$
-		Resource("$.type|allLowercasePlural$").
-		VersionedParams(&opts, $.apiParameterCodec|raw$).
+		Resource("$.type|resource$").
+		VersionedParams(&opts, $.schemeParameterCodec|raw$).
 		Do().
 		Into(result)
 	return
@@ -226,12 +250,13 @@ func (c *$.type|privatePlural$) List(opts $.ListOptions|raw$) (result *$.type|ra
 `
 var getTemplate = `
 // Get takes name of the $.type|private$, and returns the corresponding $.type|private$ object, and an error if there is any.
-func (c *$.type|privatePlural$) Get(name string) (result *$.type|raw$, err error) {
+func (c *$.type|privatePlural$) Get(name string, options $.GetOptions|raw$) (result *$.type|raw$, err error) {
 	result = &$.type|raw${}
 	err = c.client.Get().
 		$if .namespaced$Namespace(c.ns).$end$
-		Resource("$.type|allLowercasePlural$").
+		Resource("$.type|resource$").
 		Name(name).
+		VersionedParams(&options, $.schemeParameterCodec|raw$).
 		Do().
 		Into(result)
 	return
@@ -243,7 +268,7 @@ var deleteTemplate = `
 func (c *$.type|privatePlural$) Delete(name string, options *$.DeleteOptions|raw$) error {
 	return c.client.Delete().
 		$if .namespaced$Namespace(c.ns).$end$
-		Resource("$.type|allLowercasePlural$").
+		Resource("$.type|resource$").
 		Name(name).
 		Body(options).
 		Do().
@@ -256,8 +281,8 @@ var deleteCollectionTemplate = `
 func (c *$.type|privatePlural$) DeleteCollection(options *$.DeleteOptions|raw$, listOptions $.ListOptions|raw$) error {
 	return c.client.Delete().
 		$if .namespaced$Namespace(c.ns).$end$
-		Resource("$.type|allLowercasePlural$").
-		VersionedParams(&listOptions, $.apiParameterCodec|raw$).
+		Resource("$.type|resource$").
+		VersionedParams(&listOptions, $.schemeParameterCodec|raw$).
 		Body(options).
 		Do().
 		Error()
@@ -270,7 +295,7 @@ func (c *$.type|privatePlural$) Create($.type|private$ *$.type|raw$) (result *$.
 	result = &$.type|raw${}
 	err = c.client.Post().
 		$if .namespaced$Namespace(c.ns).$end$
-		Resource("$.type|allLowercasePlural$").
+		Resource("$.type|resource$").
 		Body($.type|private$).
 		Do().
 		Into(result)
@@ -284,7 +309,7 @@ func (c *$.type|privatePlural$) Update($.type|private$ *$.type|raw$) (result *$.
 	result = &$.type|raw${}
 	err = c.client.Put().
 		$if .namespaced$Namespace(c.ns).$end$
-		Resource("$.type|allLowercasePlural$").
+		Resource("$.type|resource$").
 		Name($.type|private$.Name).
 		Body($.type|private$).
 		Do().
@@ -294,11 +319,14 @@ func (c *$.type|privatePlural$) Update($.type|private$ *$.type|raw$) (result *$.
 `
 
 var updateStatusTemplate = `
+// UpdateStatus was generated because the type contains a Status member.
+// Add a +genclientstatus=false comment above the type to avoid generating UpdateStatus().
+
 func (c *$.type|privatePlural$) UpdateStatus($.type|private$ *$.type|raw$) (result *$.type|raw$, err error) {
 	result = &$.type|raw${}
 	err = c.client.Put().
 		$if .namespaced$Namespace(c.ns).$end$
-		Resource("$.type|allLowercasePlural$").
+		Resource("$.type|resource$").
 		Name($.type|private$.Name).
 		SubResource("status").
 		Body($.type|private$).
@@ -311,11 +339,11 @@ func (c *$.type|privatePlural$) UpdateStatus($.type|private$ *$.type|raw$) (resu
 var watchTemplate = `
 // Watch returns a $.watchInterface|raw$ that watches the requested $.type|privatePlural$.
 func (c *$.type|privatePlural$) Watch(opts $.ListOptions|raw$) ($.watchInterface|raw$, error) {
+	opts.Watch = true
 	return c.client.Get().
-		Prefix("watch").
 		$if .namespaced$Namespace(c.ns).$end$
-		Resource("$.type|allLowercasePlural$").
-		VersionedParams(&opts, $.apiParameterCodec|raw$).
+		Resource("$.type|resource$").
+		VersionedParams(&opts, $.schemeParameterCodec|raw$).
 		Watch()
 }
 `
@@ -326,7 +354,7 @@ func (c *$.type|privatePlural$) Patch(name string, pt $.PatchType|raw$, data []b
 	result = &$.type|raw${}
 	err = c.client.Patch(pt).
 		$if .namespaced$Namespace(c.ns).$end$
-		Resource("$.type|allLowercasePlural$").
+		Resource("$.type|resource$").
 		SubResource(subresources...).
 		Name(name).
 		Body(data).

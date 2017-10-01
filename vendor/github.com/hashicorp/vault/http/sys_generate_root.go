@@ -80,7 +80,7 @@ func handleSysGenerateRootAttemptGet(core *vault.Core, w http.ResponseWriter, r 
 func handleSysGenerateRootAttemptPut(core *vault.Core, w http.ResponseWriter, r *http.Request) {
 	// Parse the request
 	var req GenerateRootInitRequest
-	if err := parseRequest(r, &req); err != nil {
+	if err := parseRequest(r, w, &req); err != nil {
 		respondError(w, http.StatusBadRequest, err)
 		return
 	}
@@ -113,14 +113,14 @@ func handleSysGenerateRootUpdate(core *vault.Core) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Parse the request
 		var req GenerateRootUpdateRequest
-		if err := parseRequest(r, &req); err != nil {
+		if err := parseRequest(r, w, &req); err != nil {
 			respondError(w, http.StatusBadRequest, err)
 			return
 		}
 		if req.Key == "" {
 			respondError(
 				w, http.StatusBadRequest,
-				errors.New("'key' must specified in request body as JSON"))
+				errors.New("'key' must be specified in request body as JSON"))
 			return
 		}
 

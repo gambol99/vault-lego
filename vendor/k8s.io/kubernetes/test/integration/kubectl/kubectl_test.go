@@ -1,5 +1,3 @@
-// +build integration,!no-etcd
-
 /*
 Copyright 2015 The Kubernetes Authors.
 
@@ -21,8 +19,8 @@ package kubectl
 import (
 	"testing"
 
-	"k8s.io/kubernetes/pkg/client/unversioned/clientcmd"
-	clientcmdapi "k8s.io/kubernetes/pkg/client/unversioned/clientcmd/api"
+	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	"k8s.io/kubernetes/pkg/kubectl/cmd/util"
 	"k8s.io/kubernetes/test/integration/framework"
 )
@@ -30,24 +28,23 @@ import (
 func TestKubectlValidation(t *testing.T) {
 	testCases := []struct {
 		data string
-		err  bool
+		// Validation should not fail on missing type information.
+		err bool
 	}{
 		{`{"apiVersion": "v1", "kind": "thisObjectShouldNotExistInAnyGroup"}`, true},
-		{`{"apiVersion": "invalidVersion", "kind": "Pod"}`, true},
+		{`{"apiVersion": "invalidVersion", "kind": "Pod"}`, false},
 		{`{"apiVersion": "v1", "kind": "Pod"}`, false},
 
 		// The following test the experimental api.
 		// TODO: Replace with something more robust. These may move.
 		{`{"apiVersion": "extensions/v1beta1", "kind": "Ingress"}`, false},
-		{`{"apiVersion": "extensions/v1beta1", "kind": "Job"}`, false},
-		{`{"apiVersion": "vNotAVersion", "kind": "Job"}`, true},
+		{`{"apiVersion": "extensions/v1beta1", "kind": "DaemonSet"}`, false},
+		{`{"apiVersion": "vNotAVersion", "kind": "DaemonSet"}`, false},
 	}
 	components := framework.NewMasterComponents(&framework.Config{})
 	defer components.Stop(true, true)
 	ctx := clientcmdapi.NewContext()
 	cfg := clientcmdapi.NewConfig()
-	// Enable swagger api on master.
-	components.KubeMaster.InstallSwaggerAPI()
 	cluster := clientcmdapi.NewCluster()
 
 	cluster.Server = components.ApiServer.URL

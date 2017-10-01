@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Copyright 2016 The Kubernetes Authors.
 #
@@ -14,7 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This script downloads and installs the Kubernetes client and server binaries.
+# This script downloads and installs the Kubernetes client and server
+# (and optionally test) binaries,
 # It is intended to be called from an extracted Kubernetes release tarball.
 #
 # We automatically choose the correct client binaries to download.
@@ -26,10 +27,13 @@
 #    * arm
 #    * arm64
 #    * ppc64le
+#    * s390x
 #
 #  Set KUBERNETES_SKIP_CONFIRM to skip the installation confirmation prompt.
 #  Set KUBERNETES_RELEASE_URL to choose where to download binaries from.
 #    (Defaults to https://storage.googleapis.com/kubernetes-release/release).
+#  Set KUBERNETES_DOWNLOAD_TESTS to additionally download and extract the test
+#    binaries tarball.
 
 set -o errexit
 set -o nounset
@@ -37,18 +41,21 @@ set -o pipefail
 
 KUBE_ROOT=$(cd $(dirname "${BASH_SOURCE}")/.. && pwd)
 
-KUBERNETES_RELEASE_URL="${KUBERNETES_RELEASE_URL:-https://storage.googleapis.com/kubernetes-release/release}"
+KUBERNETES_RELEASE_URL="${KUBERNETES_RELEASE_URL:-https://dl.k8s.io}"
 
 function detect_kube_release() {
+  if [[ -n "${KUBE_VERSION:-}" ]]; then
+    return 0  # Allow caller to explicitly set version
+  fi
+
   if [[ ! -e "${KUBE_ROOT}/version" ]]; then
     echo "Can't determine Kubernetes release." >&2
-    echo "This script should only be run from a prebuilt Kubernetes release." >&2
+    echo "${BASH_SOURCE} should only be run from a prebuilt Kubernetes release." >&2
     echo "Did you mean to use get-kube.sh instead?" >&2
     exit 1
   fi
 
-  KUBERNETES_RELEASE=$(cat "${KUBE_ROOT}/version")
-  DOWNLOAD_URL_PREFIX="${KUBERNETES_RELEASE_URL}/${KUBERNETES_RELEASE}"
+  KUBE_VERSION=$(cat "${KUBE_ROOT}/version")
 }
 
 function detect_client_info() {
@@ -83,9 +90,12 @@ function detect_client_info() {
     i?86*)
       CLIENT_ARCH="386"
       ;;
+    s390x*)
+      CLIENT_ARCH="s390x"
+      ;;	  
     *)
       echo "Unknown, unsupported architecture (${machine})." >&2
-      echo "Supported architectures x86_64, i686, arm, arm64." >&2
+      echo "Supported architectures x86_64, i686, arm, arm64, s390x." >&2
       echo "Bailing out." >&2
       exit 3
       ;;
@@ -101,10 +111,10 @@ function md5sum_file() {
 }
 
 function sha1sum_file() {
-  if which shasum >/dev/null 2>&1; then
-    shasum -a1 "$1" | awk '{ print $1 }'
-  else
+  if which sha1sum >/dev/null 2>&1; then
     sha1sum "$1" | awk '{ print $1 }'
+  else
+    shasum -a1 "$1" | awk '{ print $1 }'
   fi
 }
 
@@ -114,7 +124,7 @@ function download_tarball() {
   url="${DOWNLOAD_URL_PREFIX}/${file}"
   mkdir -p "${download_path}"
   if [[ $(which curl) ]]; then
-    curl -L "${url}" -o "${download_path}/${file}"
+    curl -fL --retry 3 --keepalive-time 2 "${url}" -o "${download_path}/${file}"
   elif [[ $(which wget) ]]; then
     wget "${url}" -O "${download_path}/${file}"
   else
@@ -130,7 +140,7 @@ function download_tarball() {
   # TODO: add actual verification
 }
 
-function extract_tarball() {
+function extract_arch_tarball() {
   local -r tarfile="$1"
   local -r platform="$2"
   local -r arch="$3"
@@ -146,6 +156,7 @@ function extract_tarball() {
 }
 
 detect_kube_release
+DOWNLOAD_URL_PREFIX="${KUBERNETES_RELEASE_URL}/${KUBE_VERSION}"
 
 SERVER_PLATFORM="linux"
 SERVER_ARCH="${KUBERNETES_SERVER_ARCH:-amd64}"
@@ -154,9 +165,9 @@ SERVER_TAR="kubernetes-server-${SERVER_PLATFORM}-${SERVER_ARCH}.tar.gz"
 detect_client_info
 CLIENT_TAR="kubernetes-client-${CLIENT_PLATFORM}-${CLIENT_ARCH}.tar.gz"
 
-echo "Kubernetes release: ${KUBERNETES_RELEASE}"
-echo "Server: ${SERVER_PLATFORM}/${SERVER_ARCH}"
-echo "Client: ${CLIENT_PLATFORM}/${CLIENT_ARCH}"
+echo "Kubernetes release: ${KUBE_VERSION}"
+echo "Server: ${SERVER_PLATFORM}/${SERVER_ARCH}  (to override, set KUBERNETES_SERVER_ARCH)"
+echo "Client: ${CLIENT_PLATFORM}/${CLIENT_ARCH}  (autodetected)"
 echo
 
 # TODO: remove this check and default to true when we stop shipping server
@@ -175,7 +186,16 @@ if [[ ! -x "${KUBE_ROOT}/platforms/${CLIENT_PLATFORM}/${CLIENT_ARCH}/kubectl" ]]
   echo "Will download and extract ${CLIENT_TAR} from ${DOWNLOAD_URL_PREFIX}"
 fi
 
-if [[ "${DOWNLOAD_CLIENT_TAR}" == false && "${DOWNLOAD_SERVER_TAR}" == false ]]; then
+TESTS_TAR="kubernetes-test.tar.gz"
+DOWNLOAD_TESTS_TAR=false
+if [[ -n "${KUBERNETES_DOWNLOAD_TESTS-}" ]]; then
+  DOWNLOAD_TESTS_TAR=true
+  echo "Will download and extract ${TESTS_TAR} from ${DOWNLOAD_URL_PREFIX}"
+fi
+
+if [[ "${DOWNLOAD_CLIENT_TAR}" == false && \
+      "${DOWNLOAD_SERVER_TAR}" == false && \
+      "${DOWNLOAD_TESTS_TAR}" == false ]]; then
   echo "Nothing additional to download."
   exit 0
 fi
@@ -185,15 +205,22 @@ if [[ -z "${KUBERNETES_SKIP_CONFIRM-}" ]]; then
   read confirm
   if [[ "${confirm}" =~ ^[nN]$ ]]; then
     echo "Aborting."
-    exit 0
+    exit 1
   fi
 fi
 
 if "${DOWNLOAD_SERVER_TAR}"; then
-download_tarball "${KUBE_ROOT}/server" "${SERVER_TAR}"
+  download_tarball "${KUBE_ROOT}/server" "${SERVER_TAR}"
 fi
 
 if "${DOWNLOAD_CLIENT_TAR}"; then
   download_tarball "${KUBE_ROOT}/client" "${CLIENT_TAR}"
-  extract_tarball "${KUBE_ROOT}/client/${CLIENT_TAR}" "${CLIENT_PLATFORM}" "${CLIENT_ARCH}"
+  extract_arch_tarball "${KUBE_ROOT}/client/${CLIENT_TAR}" "${CLIENT_PLATFORM}" "${CLIENT_ARCH}"
+fi
+
+if "${DOWNLOAD_TESTS_TAR}"; then
+  download_tarball "${KUBE_ROOT}/test" "${TESTS_TAR}"
+  echo "Extracting ${TESTS_TAR} into ${KUBE_ROOT}"
+  # Strip leading "kubernetes/"
+  tar -xzf "${KUBE_ROOT}/test/${TESTS_TAR}" --strip-components 1 -C "${KUBE_ROOT}"
 fi

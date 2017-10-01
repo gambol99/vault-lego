@@ -65,9 +65,9 @@ func (g *MetricsGrabber) getMetricsFromNode(nodeName string, kubeletPort int) (s
 	var err error
 	var rawOutput []byte
 	go func() {
-		rawOutput, err = g.client.Get().
-			Prefix("proxy").
+		rawOutput, err = g.client.Core().RESTClient().Get().
 			Resource("nodes").
+			SubResource("proxy").
 			Name(fmt.Sprintf("%v:%v", nodeName, kubeletPort)).
 			Suffix("metrics").
 			Do().Raw()

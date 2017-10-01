@@ -1,6 +1,6 @@
 ---
 layout: "intro"
-page_title: "Deploy Vault"
+page_title: "Deploy Vault - Getting Started"
 sidebar_current: "gettingstarted-deploy"
 description: |-
   Learn how to deploy Vault into production, how to initialize it, configure it, etc.
@@ -23,7 +23,7 @@ As a reminder, JSON files are also fully HCL-compatible; HCL is a superset of JS
 The configuration file for Vault is relatively simple. An example is shown below:
 
 ```javascript
-backend "consul" {
+storage "consul" {
   address = "127.0.0.1:8500"
   path = "vault"
 }
@@ -36,25 +36,26 @@ listener "tcp" {
 
 Within the configuration file, there are two primary configurations:
 
-  * `backend` - This is the physical backend that Vault uses for
-    storage. Up to this point the dev server has used "inmem" (in memory),
-    but in the example above we're using [Consul](https://www.consul.io),
-    a much more production-ready backend.
+  * `storage` - This is the physical backend that Vault uses for storage. Up to
+    this point the dev server has used "inmem" (in memory), but in the example
+    above we're using [Consul](https://www.consul.io), a much more
+    production-ready backend.
 
-  * `listener` - One or more listeners determine how Vault listens for
-    API requests. In the example above we're listening on localhost port
-    8200 without TLS. In your environment set `VAULT_ADDR=http://127.0.0.1:8200`
-    so the Vault client will connect without TLS. 
+  * `listener` - One or more listeners determine how Vault listens for API
+    requests. In the example above we're listening on localhost port 8200
+    without TLS. In your environment set `VAULT_ADDR=http://127.0.0.1:8200` so
+    the Vault client will connect without TLS.
 
-For now, copy and paste the configuration above to `example.hcl`. It will
-configure Vault to expect an instance of Consul running locally.
+For now, copy and paste the configuration above to a file called
+`example.hcl`. It will configure Vault to expect an instance of Consul
+running locally.
 
 Starting a local Consul instance takes only a few minutes. Just follow the
 [Consul Getting Started Guide](https://www.consul.io/intro/getting-started/install.html)
 up to the point where you have installed Consul and started it with this command:
 
 ```shell
-$ consul agent -server -bootstrap-expect 1 -data-dir /tmp/consul
+$ consul agent -server -bootstrap-expect 1 -data-dir /tmp/consul -bind 127.0.0.1
 ```
 
 ## Starting the Server
@@ -68,7 +69,7 @@ $ vault server -config=example.hcl
 ==> Vault server configuration:
 
          Log Level: info
-           Backend: consul
+           Storage: consul
         Listener 1: tcp (addr: "127.0.0.1:8200", tls: "disabled")
 
 ==> Vault server started! Log data will stream in below:
@@ -98,7 +99,7 @@ file.
 ```
 
 For guidance on dealing with this issue, see the discussion of
-`disable_mlock` in [Server Configuration](/docs/config/index.html).
+`disable_mlock` in [Server Configuration](/docs/configuration/index.html).
 
 ## Initializing the Vault
 
@@ -181,9 +182,10 @@ keys are required to unseal the Vault. The Vault can be unsealed from
 multiple computers and the keys should never be together. A single malicious
 operator does not have enough keys to be malicious.
 
-Continue with `vault unseal` to complete unsealing the Vault. Note that
-all 3 keys must be different, but they can be any other keys. As long as
-they're correct, you should soon see output like this:
+Continue with `vault unseal` to complete unsealing the Vault. To unseal
+the vault you must use three _different_ keys, the same key repeated
+will not work. As you use keys, as long as they are correct, you should
+soon see output like this:
 
 ```
 $ vault unseal

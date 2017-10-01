@@ -14,36 +14,38 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package api
+package kubeadm
 
 import (
 	"fmt"
 	"os"
-	"runtime"
+	"path"
 	"strings"
 )
 
-// TODO(phase2) use componentconfig
+var GlobalEnvParams = SetEnvParams()
+
+// TODO(phase1+) Move these paramaters to the API group
 // we need some params for testing etc, let's keep these hidden for now
-func GetEnvParams() map[string]string {
+func SetEnvParams() *EnvParams {
 
 	envParams := map[string]string{
-		// TODO(phase1+): Mode prefix and host_pki_path to another place as constants, and use them everywhere
-		// Right now they're used here and there, but not consequently
-		"kubernetes_dir":     "/etc/kubernetes",
-		"host_pki_path":      "/etc/kubernetes/pki",
-		"host_etcd_path":     "/var/lib/etcd",
-		"hyperkube_image":    "",
-		"discovery_image":    fmt.Sprintf("gcr.io/google_containers/kube-discovery-%s:%s", runtime.GOARCH, "1.0"),
-		"etcd_image":         "",
-		"component_loglevel": "--v=4",
+		"kubernetes_dir":  "/etc/kubernetes",
+		"hyperkube_image": "",
+		"repo_prefix":     "gcr.io/google_containers",
+		"etcd_image":      "",
 	}
 
 	for k := range envParams {
-		if v := os.Getenv(fmt.Sprintf("KUBE_%s", strings.ToUpper(k))); v != "" {
+		if v := strings.TrimSpace(os.Getenv(fmt.Sprintf("KUBE_%s", strings.ToUpper(k)))); v != "" {
 			envParams[k] = v
 		}
 	}
 
-	return envParams
+	return &EnvParams{
+		KubernetesDir:    path.Clean(envParams["kubernetes_dir"]),
+		HyperkubeImage:   envParams["hyperkube_image"],
+		RepositoryPrefix: envParams["repo_prefix"],
+		EtcdImage:        envParams["etcd_image"],
+	}
 }

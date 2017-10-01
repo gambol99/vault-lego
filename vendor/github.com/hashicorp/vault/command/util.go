@@ -57,6 +57,8 @@ func PrintRawField(ui cli.Ui, secret *api.Secret, field string) int {
 			val = secret.WrapInfo.TTL
 		case "wrapping_token_creation_time":
 			val = secret.WrapInfo.CreationTime.Format(time.RFC3339Nano)
+		case "wrapping_token_creation_path":
+			val = secret.WrapInfo.CreationPath
 		case "wrapped_accessor":
 			val = secret.WrapInfo.WrappedAccessor
 		default:
@@ -79,7 +81,7 @@ func PrintRawField(ui cli.Ui, secret *api.Secret, field string) int {
 		// directly print the message. If mitchellh/cli exposes method
 		// to print without CR, this check needs to be removed.
 		if reflect.TypeOf(ui).String() == "*cli.BasicUi" {
-			fmt.Fprintf(os.Stdout, fmt.Sprintf("%v", val))
+			fmt.Fprintf(os.Stdout, "%v", val)
 		} else {
 			ui.Output(fmt.Sprintf("%v", val))
 		}

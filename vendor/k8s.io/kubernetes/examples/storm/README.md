@@ -1,37 +1,3 @@
-<!-- BEGIN MUNGE: UNVERSIONED_WARNING -->
-
-<!-- BEGIN STRIP_FOR_RELEASE -->
-
-<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
-     width="25" height="25">
-<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
-     width="25" height="25">
-<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
-     width="25" height="25">
-<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
-     width="25" height="25">
-<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
-     width="25" height="25">
-
-<h2>PLEASE NOTE: This document applies to the HEAD of the source tree</h2>
-
-If you are using a released version of Kubernetes, you should
-refer to the docs that go with that version.
-
-<!-- TAG RELEASE_LINK, added by the munger automatically -->
-<strong>
-The latest release of this document can be found
-[here](http://releases.k8s.io/release-1.4/examples/storm/README.md).
-
-Documentation for other releases can be found at
-[releases.k8s.io](http://releases.k8s.io).
-</strong>
---
-
-<!-- END STRIP_FOR_RELEASE -->
-
-<!-- END MUNGE: UNVERSIONED_WARNING -->
-
 # Storm example
 
 Following this example, you will create a functional [Apache
@@ -56,15 +22,15 @@ Source is freely available at:
 This example assumes you have a Kubernetes cluster installed and
 running, and that you have installed the ```kubectl``` command line
 tool somewhere in your path. Please see the [getting
-started](../../docs/getting-started-guides/) for installation
+started](https://kubernetes.io/docs/getting-started-guides/) for installation
 instructions for your platform.
 
 ## Step One: Start your ZooKeeper service
 
-ZooKeeper is a distributed coordination [service](../../docs/user-guide/services.md) that Storm uses as a
+ZooKeeper is a distributed coordination [service](https://kubernetes.io/docs/user-guide/services.md) that Storm uses as a
 bootstrap and for state storage.
 
-Use the [`examples/storm/zookeeper.json`](zookeeper.json) file to create a [pod](../../docs/user-guide/pods.md) running
+Use the [`examples/storm/zookeeper.json`](zookeeper.json) file to create a [pod](https://kubernetes.io/docs/user-guide/pods.md) running
 the ZooKeeper service.
 
 ```sh
@@ -148,7 +114,7 @@ The Storm workers need both the ZooKeeper and Nimbus services to be
 running.
 
 Use the [`examples/storm/storm-worker-controller.json`](storm-worker-controller.json) file to create a
-[replication controller](../../docs/user-guide/replication-controller.md) that manages the worker pods.
+[replication controller](https://kubernetes.io/docs/user-guide/replication-controller.md) that manages the worker pods.
 
 ```sh
 $ kubectl create -f examples/storm/storm-worker-controller.json

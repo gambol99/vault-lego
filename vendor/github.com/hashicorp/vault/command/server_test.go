@@ -15,7 +15,10 @@ import (
 	"time"
 
 	"github.com/hashicorp/vault/meta"
+	"github.com/hashicorp/vault/physical"
 	"github.com/mitchellh/cli"
+
+	physFile "github.com/hashicorp/vault/physical/file"
 )
 
 var (
@@ -58,93 +61,13 @@ disable_mlock = true
 
 listener "tcp" {
     address = "127.0.0.1:8203"
-    tls_cert_file = "TMPDIR/reload_FILE.pem"
-    tls_key_file = "TMPDIR/reload_FILE.key"
+    tls_cert_file = "TMPDIR/reload_cert.pem"
+    tls_key_file = "TMPDIR/reload_key.pem"
 }
 `
 )
 
 // The following tests have a go-metrics/exp manager race condition
-func TestServer_CommonHA(t *testing.T) {
-	ui := new(cli.MockUi)
-	c := &ServerCommand{
-		Meta: meta.Meta{
-			Ui: ui,
-		},
-	}
-
-	tmpfile, err := ioutil.TempFile("", "")
-	if err != nil {
-		t.Fatalf("error creating temp dir: %v", err)
-	}
-
-	tmpfile.WriteString(basehcl + consulhcl)
-	tmpfile.Close()
-	defer os.Remove(tmpfile.Name())
-
-	args := []string{"-config", tmpfile.Name(), "-verify-only", "true"}
-
-	if code := c.Run(args); code != 0 {
-		t.Fatalf("bad: %d\n\n%s", code, ui.ErrorWriter.String())
-	}
-
-	if !strings.Contains(ui.OutputWriter.String(), "(HA available)") {
-		t.Fatalf("did not find HA available: %s", ui.OutputWriter.String())
-	}
-}
-
-func TestServer_GoodSeparateHA(t *testing.T) {
-	ui := new(cli.MockUi)
-	c := &ServerCommand{
-		Meta: meta.Meta{
-			Ui: ui,
-		},
-	}
-
-	tmpfile, err := ioutil.TempFile("", "")
-	if err != nil {
-		t.Fatalf("error creating temp dir: %v", err)
-	}
-
-	tmpfile.WriteString(basehcl + consulhcl + haconsulhcl)
-	tmpfile.Close()
-	defer os.Remove(tmpfile.Name())
-
-	args := []string{"-config", tmpfile.Name(), "-verify-only", "true"}
-
-	if code := c.Run(args); code != 0 {
-		t.Fatalf("bad: %d\n\n%s", code, ui.ErrorWriter.String())
-	}
-
-	if !strings.Contains(ui.OutputWriter.String(), "HA Backend:") {
-		t.Fatalf("did not find HA Backend: %s", ui.OutputWriter.String())
-	}
-}
-
-func TestServer_BadSeparateHA(t *testing.T) {
-	ui := new(cli.MockUi)
-	c := &ServerCommand{
-		Meta: meta.Meta{
-			Ui: ui,
-		},
-	}
-
-	tmpfile, err := ioutil.TempFile("", "")
-	if err != nil {
-		t.Fatalf("error creating temp dir: %v", err)
-	}
-
-	tmpfile.WriteString(basehcl + consulhcl + badhaconsulhcl)
-	tmpfile.Close()
-	defer os.Remove(tmpfile.Name())
-
-	args := []string{"-config", tmpfile.Name()}
-
-	if code := c.Run(args); code == 0 {
-		t.Fatalf("bad: should have gotten an error on a bad HA config")
-	}
-}
-
 func TestServer_ReloadListener(t *testing.T) {
 	wd, _ := os.Getwd()
 	wd += "/server/test-fixtures/reload/"
@@ -159,15 +82,11 @@ func TestServer_ReloadListener(t *testing.T) {
 
 	// Setup initial certs
 	inBytes, _ := ioutil.ReadFile(wd + "reload_foo.pem")
-	ioutil.WriteFile(td+"/reload_foo.pem", inBytes, 0777)
+	ioutil.WriteFile(td+"/reload_cert.pem", inBytes, 0777)
 	inBytes, _ = ioutil.ReadFile(wd + "reload_foo.key")
-	ioutil.WriteFile(td+"/reload_foo.key", inBytes, 0777)
-	inBytes, _ = ioutil.ReadFile(wd + "reload_bar.pem")
-	ioutil.WriteFile(td+"/reload_bar.pem", inBytes, 0777)
-	inBytes, _ = ioutil.ReadFile(wd + "reload_bar.key")
-	ioutil.WriteFile(td+"/reload_bar.key", inBytes, 0777)
+	ioutil.WriteFile(td+"/reload_key.pem", inBytes, 0777)
 
-	relhcl := strings.Replace(strings.Replace(reloadhcl, "TMPDIR", td, -1), "FILE", "foo", -1)
+	relhcl := strings.Replace(reloadhcl, "TMPDIR", td, -1)
 	ioutil.WriteFile(td+"/reload.hcl", []byte(relhcl), 0777)
 
 	inBytes, _ = ioutil.ReadFile(wd + "reload_ca.pem")
@@ -184,6 +103,9 @@ func TestServer_ReloadListener(t *testing.T) {
 		},
 		ShutdownCh: MakeShutdownCh(),
 		SighupCh:   MakeSighupCh(),
+		PhysicalBackends: map[string]physical.Factory{
+			"file": physFile.NewFileBackend,
+		},
 	}
 
 	finished := false
@@ -204,7 +126,7 @@ func TestServer_ReloadListener(t *testing.T) {
 	checkFinished := func() {
 		finishedMutex.Lock()
 		if finished {
-			t.Fatal(fmt.Sprintf("finished early; relhcl was\n%s\nstdout was\n%s\nstderr was\n%s\n", relhcl, ui.OutputWriter.String(), ui.ErrorWriter.String()))
+			t.Fatalf(fmt.Sprintf("finished early; relhcl was\n%s\nstdout was\n%s\nstderr was\n%s\n", relhcl, ui.OutputWriter.String(), ui.ErrorWriter.String()))
 		}
 		finishedMutex.Unlock()
 	}
@@ -235,7 +157,11 @@ func TestServer_ReloadListener(t *testing.T) {
 		t.Fatalf("certificate name didn't check out: %s", err)
 	}
 
-	relhcl = strings.Replace(strings.Replace(reloadhcl, "TMPDIR", td, -1), "FILE", "bar", -1)
+	relhcl = strings.Replace(reloadhcl, "TMPDIR", td, -1)
+	inBytes, _ = ioutil.ReadFile(wd + "reload_bar.pem")
+	ioutil.WriteFile(td+"/reload_cert.pem", inBytes, 0777)
+	inBytes, _ = ioutil.ReadFile(wd + "reload_bar.key")
+	ioutil.WriteFile(td+"/reload_key.pem", inBytes, 0777)
 	ioutil.WriteFile(td+"/reload.hcl", []byte(relhcl), 0777)
 
 	c.SighupCh <- struct{}{}

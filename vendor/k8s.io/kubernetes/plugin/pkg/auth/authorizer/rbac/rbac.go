@@ -18,14 +18,17 @@ limitations under the License.
 package rbac
 
 import (
+	"fmt"
+
+	"github.com/golang/glog"
+
+	"bytes"
+
+	utilerrors "k8s.io/apimachinery/pkg/util/errors"
+	"k8s.io/apiserver/pkg/authentication/user"
+	"k8s.io/apiserver/pkg/authorization/authorizer"
 	"k8s.io/kubernetes/pkg/apis/rbac"
-	"k8s.io/kubernetes/pkg/apis/rbac/validation"
-	"k8s.io/kubernetes/pkg/auth/authorizer"
-	"k8s.io/kubernetes/pkg/auth/user"
-	"k8s.io/kubernetes/pkg/registry/rbac/clusterrole"
-	"k8s.io/kubernetes/pkg/registry/rbac/clusterrolebinding"
-	"k8s.io/kubernetes/pkg/registry/rbac/role"
-	"k8s.io/kubernetes/pkg/registry/rbac/rolebinding"
+	rbacregistryvalidation "k8s.io/kubernetes/pkg/registry/rbac/validation"
 )
 
 type RequestToRuleMapper interface {
@@ -34,43 +37,102 @@ type RequestToRuleMapper interface {
 	// supplied, you do not have to fail the request.  If you cannot, you should indicate the error along
 	// with your denial.
 	RulesFor(subject user.Info, namespace string) ([]rbac.PolicyRule, error)
+
+	// VisitRulesFor invokes visitor() with each rule that applies to a given user in a given namespace,
+	// and each error encountered resolving those rules. Rule may be nil if err is non-nil.
+	// If visitor() returns false, visiting is short-circuited.
+	VisitRulesFor(user user.Info, namespace string, visitor func(rule *rbac.PolicyRule, err error) bool)
 }
 
 type RBACAuthorizer struct {
-	superUser string
-
 	authorizationRuleResolver RequestToRuleMapper
 }
 
-func (r *RBACAuthorizer) Authorize(requestAttributes authorizer.Attributes) (bool, string, error) {
-	if r.superUser != "" && requestAttributes.GetUser() != nil && requestAttributes.GetUser().GetName() == r.superUser {
-		return true, "", nil
-	}
+// authorizingVisitor short-circuits once allowed, and collects any resolution errors encountered
+type authorizingVisitor struct {
+	requestAttributes authorizer.Attributes
 
-	rules, ruleResolutionError := r.authorizationRuleResolver.RulesFor(requestAttributes.GetUser(), requestAttributes.GetNamespace())
-	if RulesAllow(requestAttributes, rules...) {
-		return true, "", nil
-	}
-
-	return false, "", ruleResolutionError
+	allowed bool
+	errors  []error
 }
 
-func New(roleRegistry role.Registry, roleBindingRegistry rolebinding.Registry, clusterRoleRegistry clusterrole.Registry, clusterRoleBindingRegistry clusterrolebinding.Registry, superUser string) *RBACAuthorizer {
+func (v *authorizingVisitor) visit(rule *rbac.PolicyRule, err error) bool {
+	if rule != nil && RuleAllows(v.requestAttributes, rule) {
+		v.allowed = true
+		return false
+	}
+	if err != nil {
+		v.errors = append(v.errors, err)
+	}
+	return true
+}
+
+func (r *RBACAuthorizer) Authorize(requestAttributes authorizer.Attributes) (bool, string, error) {
+	ruleCheckingVisitor := &authorizingVisitor{requestAttributes: requestAttributes}
+
+	r.authorizationRuleResolver.VisitRulesFor(requestAttributes.GetUser(), requestAttributes.GetNamespace(), ruleCheckingVisitor.visit)
+	if ruleCheckingVisitor.allowed {
+		return true, "", nil
+	}
+
+	// Build a detailed log of the denial.
+	// Make the whole block conditional so we don't do a lot of string-building we won't use.
+	if glog.V(2) {
+		var operation string
+		if requestAttributes.IsResourceRequest() {
+			b := &bytes.Buffer{}
+			b.WriteString(`"`)
+			b.WriteString(requestAttributes.GetVerb())
+			b.WriteString(`" resource "`)
+			b.WriteString(requestAttributes.GetResource())
+			if len(requestAttributes.GetAPIGroup()) > 0 {
+				b.WriteString(`.`)
+				b.WriteString(requestAttributes.GetAPIGroup())
+			}
+			if len(requestAttributes.GetSubresource()) > 0 {
+				b.WriteString(`/`)
+				b.WriteString(requestAttributes.GetSubresource())
+			}
+			b.WriteString(`"`)
+			if len(requestAttributes.GetName()) > 0 {
+				b.WriteString(` named "`)
+				b.WriteString(requestAttributes.GetName())
+				b.WriteString(`"`)
+			}
+			operation = b.String()
+		} else {
+			operation = fmt.Sprintf("%q nonResourceURL %q", requestAttributes.GetVerb(), requestAttributes.GetPath())
+		}
+
+		var scope string
+		if ns := requestAttributes.GetNamespace(); len(ns) > 0 {
+			scope = fmt.Sprintf("in namespace %q", ns)
+		} else {
+			scope = "cluster-wide"
+		}
+
+		glog.Infof("RBAC DENY: user %q groups %q cannot %s %s", requestAttributes.GetUser().GetName(), requestAttributes.GetUser().GetGroups(), operation, scope)
+	}
+
+	reason := ""
+	if len(ruleCheckingVisitor.errors) > 0 {
+		reason = fmt.Sprintf("%v", utilerrors.NewAggregate(ruleCheckingVisitor.errors))
+	}
+	return false, reason, nil
+}
+
+func New(roles rbacregistryvalidation.RoleGetter, roleBindings rbacregistryvalidation.RoleBindingLister, clusterRoles rbacregistryvalidation.ClusterRoleGetter, clusterRoleBindings rbacregistryvalidation.ClusterRoleBindingLister) *RBACAuthorizer {
 	authorizer := &RBACAuthorizer{
-		superUser: superUser,
-		authorizationRuleResolver: validation.NewDefaultRuleResolver(
-			roleRegistry,
-			roleBindingRegistry,
-			clusterRoleRegistry,
-			clusterRoleBindingRegistry,
+		authorizationRuleResolver: rbacregistryvalidation.NewDefaultRuleResolver(
+			roles, roleBindings, clusterRoles, clusterRoleBindings,
 		),
 	}
 	return authorizer
 }
 
 func RulesAllow(requestAttributes authorizer.Attributes, rules ...rbac.PolicyRule) bool {
-	for _, rule := range rules {
-		if RuleAllows(requestAttributes, rule) {
+	for i := range rules {
+		if RuleAllows(requestAttributes, &rules[i]) {
 			return true
 		}
 	}
@@ -78,7 +140,7 @@ func RulesAllow(requestAttributes authorizer.Attributes, rules ...rbac.PolicyRul
 	return false
 }
 
-func RuleAllows(requestAttributes authorizer.Attributes, rule rbac.PolicyRule) bool {
+func RuleAllows(requestAttributes authorizer.Attributes, rule *rbac.PolicyRule) bool {
 	if requestAttributes.IsResourceRequest() {
 		resource := requestAttributes.GetResource()
 		if len(requestAttributes.GetSubresource()) > 0 {

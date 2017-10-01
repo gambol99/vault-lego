@@ -17,12 +17,23 @@ limitations under the License.
 package dockershim
 
 import (
+	"fmt"
+	"io/ioutil"
+	"os"
+	"path"
+	"path/filepath"
 	"testing"
 
+	"github.com/blang/semver"
+	dockertypes "github.com/docker/engine-api/types"
+	dockernat "github.com/docker/go-connections/nat"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
-	"k8s.io/kubernetes/pkg/api"
-	runtimeApi "k8s.io/kubernetes/pkg/kubelet/api/v1alpha1/runtime"
+	"k8s.io/kubernetes/pkg/api/v1"
+
+	runtimeapi "k8s.io/kubernetes/pkg/kubelet/apis/cri/v1alpha1/runtime"
+	"k8s.io/kubernetes/pkg/kubelet/dockershim/libdocker"
 	"k8s.io/kubernetes/pkg/security/apparmor"
 )
 
@@ -37,18 +48,15 @@ func TestLabelsAndAnnotationsRoundTrip(t *testing.T) {
 	assert.Equal(t, expectedAnnotations, actualAnnotations)
 }
 
-// TestGetContainerSecurityOpts tests the logic of generating container security options from sandbox annotations.
-// The actual profile loading logic is tested in dockertools.
-// TODO: Migrate the corresponding test to dockershim.
-func TestGetContainerSecurityOpts(t *testing.T) {
+func TestGetSeccompSecurityOpts(t *testing.T) {
 	containerName := "bar"
-	makeConfig := func(annotations map[string]string) *runtimeApi.PodSandboxConfig {
+	makeConfig := func(annotations map[string]string) *runtimeapi.PodSandboxConfig {
 		return makeSandboxConfigWithLabelsAndAnnotations("pod", "ns", "1234", 1, nil, annotations)
 	}
 
 	tests := []struct {
 		msg          string
-		config       *runtimeApi.PodSandboxConfig
+		config       *runtimeapi.PodSandboxConfig
 		expectedOpts []string
 	}{{
 		msg:          "No security annotations",
@@ -57,44 +65,25 @@ func TestGetContainerSecurityOpts(t *testing.T) {
 	}, {
 		msg: "Seccomp unconfined",
 		config: makeConfig(map[string]string{
-			api.SeccompContainerAnnotationKeyPrefix + containerName: "unconfined",
+			v1.SeccompContainerAnnotationKeyPrefix + containerName: "unconfined",
 		}),
 		expectedOpts: []string{"seccomp=unconfined"},
 	}, {
 		msg: "Seccomp default",
 		config: makeConfig(map[string]string{
-			api.SeccompContainerAnnotationKeyPrefix + containerName: "docker/default",
+			v1.SeccompContainerAnnotationKeyPrefix + containerName: "docker/default",
 		}),
 		expectedOpts: nil,
 	}, {
 		msg: "Seccomp pod default",
 		config: makeConfig(map[string]string{
-			api.SeccompPodAnnotationKey: "docker/default",
+			v1.SeccompPodAnnotationKey: "docker/default",
 		}),
 		expectedOpts: nil,
-	}, {
-		msg: "AppArmor runtime/default",
-		config: makeConfig(map[string]string{
-			apparmor.ContainerAnnotationKeyPrefix + containerName: apparmor.ProfileRuntimeDefault,
-		}),
-		expectedOpts: []string{"seccomp=unconfined"},
-	}, {
-		msg: "AppArmor local profile",
-		config: makeConfig(map[string]string{
-			apparmor.ContainerAnnotationKeyPrefix + containerName: apparmor.ProfileNamePrefix + "foo",
-		}),
-		expectedOpts: []string{"seccomp=unconfined", "apparmor=foo"},
-	}, {
-		msg: "AppArmor and seccomp profile",
-		config: makeConfig(map[string]string{
-			api.SeccompContainerAnnotationKeyPrefix + containerName: "docker/default",
-			apparmor.ContainerAnnotationKeyPrefix + containerName:   apparmor.ProfileNamePrefix + "foo",
-		}),
-		expectedOpts: []string{"apparmor=foo"},
 	}}
 
 	for i, test := range tests {
-		opts, err := getContainerSecurityOpts(containerName, test.config, "test/seccomp/profile/root")
+		opts, err := getSeccompSecurityOpts(containerName, test.config, "test/seccomp/profile/root", '=')
 		assert.NoError(t, err, "TestCase[%d]: %s", i, test.msg)
 		assert.Len(t, opts, len(test.expectedOpts), "TestCase[%d]: %s", i, test.msg)
 		for _, opt := range test.expectedOpts {
@@ -103,47 +92,309 @@ func TestGetContainerSecurityOpts(t *testing.T) {
 	}
 }
 
-// TestGetSandboxSecurityOpts tests the logic of generating sandbox security options from sandbox annotations.
-func TestGetSandboxSecurityOpts(t *testing.T) {
-	makeConfig := func(annotations map[string]string) *runtimeApi.PodSandboxConfig {
+func TestLoadSeccompLocalhostProfiles(t *testing.T) {
+	containerName := "bar"
+	makeConfig := func(annotations map[string]string) *runtimeapi.PodSandboxConfig {
 		return makeSandboxConfigWithLabelsAndAnnotations("pod", "ns", "1234", 1, nil, annotations)
 	}
 
 	tests := []struct {
 		msg          string
-		config       *runtimeApi.PodSandboxConfig
+		config       *runtimeapi.PodSandboxConfig
 		expectedOpts []string
+		expectErr    bool
 	}{{
-		msg:          "No security annotations",
-		config:       makeConfig(nil),
-		expectedOpts: []string{"seccomp=unconfined"},
-	}, {
-		msg: "Seccomp default",
+		msg: "Seccomp localhost/test profile",
 		config: makeConfig(map[string]string{
-			api.SeccompPodAnnotationKey: "docker/default",
+			v1.SeccompPodAnnotationKey: "localhost/test",
+		}),
+		expectedOpts: []string{`seccomp={"foo":"bar"}`},
+		expectErr:    false,
+	}, {
+		msg: "Seccomp localhost/sub/subtest profile",
+		config: makeConfig(map[string]string{
+			v1.SeccompPodAnnotationKey: "localhost/sub/subtest",
+		}),
+		expectedOpts: []string{`seccomp={"abc":"def"}`},
+		expectErr:    false,
+	}, {
+		msg: "Seccomp non-existent",
+		config: makeConfig(map[string]string{
+			v1.SeccompPodAnnotationKey: "localhost/non-existent",
 		}),
 		expectedOpts: nil,
-	}, {
-		msg: "Seccomp unconfined",
-		config: makeConfig(map[string]string{
-			api.SeccompPodAnnotationKey: "unconfined",
-		}),
-		expectedOpts: []string{"seccomp=unconfined"},
-	}, {
-		msg: "Seccomp pod and container profile",
-		config: makeConfig(map[string]string{
-			api.SeccompContainerAnnotationKeyPrefix + "test-container": "unconfined",
-			api.SeccompPodAnnotationKey:                                "docker/default",
-		}),
-		expectedOpts: nil,
+		expectErr:    true,
 	}}
 
+	profileRoot := path.Join("fixtures", "seccomp")
 	for i, test := range tests {
-		opts, err := getSandboxSecurityOpts(test.config, "test/seccomp/profile/root")
+		opts, err := getSeccompSecurityOpts(containerName, test.config, profileRoot, '=')
+		if test.expectErr {
+			assert.Error(t, err, fmt.Sprintf("TestCase[%d]: %s", i, test.msg))
+			continue
+		}
 		assert.NoError(t, err, "TestCase[%d]: %s", i, test.msg)
 		assert.Len(t, opts, len(test.expectedOpts), "TestCase[%d]: %s", i, test.msg)
 		for _, opt := range test.expectedOpts {
 			assert.Contains(t, opts, opt, "TestCase[%d]: %s", i, test.msg)
 		}
+	}
+}
+
+// TestGetApparmorSecurityOpts tests the logic of generating container apparmor options from sandbox annotations.
+func TestGetApparmorSecurityOpts(t *testing.T) {
+	makeConfig := func(profile string) *runtimeapi.LinuxContainerSecurityContext {
+		return &runtimeapi.LinuxContainerSecurityContext{
+			ApparmorProfile: profile,
+		}
+	}
+
+	tests := []struct {
+		msg          string
+		config       *runtimeapi.LinuxContainerSecurityContext
+		expectedOpts []string
+	}{{
+		msg:          "No AppArmor options",
+		config:       makeConfig(""),
+		expectedOpts: nil,
+	}, {
+		msg:          "AppArmor runtime/default",
+		config:       makeConfig("runtime/default"),
+		expectedOpts: []string{},
+	}, {
+		msg:          "AppArmor local profile",
+		config:       makeConfig(apparmor.ProfileNamePrefix + "foo"),
+		expectedOpts: []string{"apparmor=foo"},
+	}}
+
+	for i, test := range tests {
+		opts, err := getApparmorSecurityOpts(test.config, '=')
+		assert.NoError(t, err, "TestCase[%d]: %s", i, test.msg)
+		assert.Len(t, opts, len(test.expectedOpts), "TestCase[%d]: %s", i, test.msg)
+		for _, opt := range test.expectedOpts {
+			assert.Contains(t, opts, opt, "TestCase[%d]: %s", i, test.msg)
+		}
+	}
+}
+
+// TestGetUserFromImageUser tests the logic of getting image uid or user name of image user.
+func TestGetUserFromImageUser(t *testing.T) {
+	newI64 := func(i int64) *int64 { return &i }
+	for c, test := range map[string]struct {
+		user string
+		uid  *int64
+		name string
+	}{
+		"no gid": {
+			user: "0",
+			uid:  newI64(0),
+		},
+		"uid/gid": {
+			user: "0:1",
+			uid:  newI64(0),
+		},
+		"empty user": {
+			user: "",
+		},
+		"multiple spearators": {
+			user: "1:2:3",
+			uid:  newI64(1),
+		},
+		"root username": {
+			user: "root:root",
+			name: "root",
+		},
+		"username": {
+			user: "test:test",
+			name: "test",
+		},
+	} {
+		t.Logf("TestCase - %q", c)
+		actualUID, actualName := getUserFromImageUser(test.user)
+		assert.Equal(t, test.uid, actualUID)
+		assert.Equal(t, test.name, actualName)
+	}
+}
+
+func TestParsingCreationConflictError(t *testing.T) {
+	// Expected error message from docker.
+	msg := "Conflict. The name \"/k8s_POD_pfpod_e2e-tests-port-forwarding-dlxt2_81a3469e-99e1-11e6-89f2-42010af00002_0\" is already in use by container 24666ab8c814d16f986449e504ea0159468ddf8da01897144a770f66dce0e14e. You have to remove (or rename) that container to be able to reuse that name."
+
+	matches := conflictRE.FindStringSubmatch(msg)
+	require.Len(t, matches, 2)
+	require.Equal(t, matches[1], "24666ab8c814d16f986449e504ea0159468ddf8da01897144a770f66dce0e14e")
+}
+
+func TestGetSecurityOptSeparator(t *testing.T) {
+	for c, test := range map[string]struct {
+		desc     string
+		version  *semver.Version
+		expected rune
+	}{
+		"older docker version": {
+			version:  &semver.Version{Major: 1, Minor: 22, Patch: 0},
+			expected: ':',
+		},
+		"changed docker version": {
+			version:  &semver.Version{Major: 1, Minor: 23, Patch: 0},
+			expected: '=',
+		},
+		"newer docker version": {
+			version:  &semver.Version{Major: 1, Minor: 24, Patch: 0},
+			expected: '=',
+		},
+	} {
+		actual := getSecurityOptSeparator(test.version)
+		assert.Equal(t, test.expected, actual, c)
+	}
+}
+
+// writeDockerConfig will write a config file into a temporary dir, and return that dir.
+// Caller is responsible for deleting the dir and its contents.
+func writeDockerConfig(cfg string) (string, error) {
+	tmpdir, err := ioutil.TempDir("", "dockershim=helpers_test.go=")
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(tmpdir, ".docker")
+	if err := os.Mkdir(dir, 0755); err != nil {
+		return "", err
+	}
+	return tmpdir, ioutil.WriteFile(filepath.Join(dir, "config.json"), []byte(cfg), 0644)
+}
+
+func TestEnsureSandboxImageExists(t *testing.T) {
+	sandboxImage := "gcr.io/test/image"
+	authConfig := dockertypes.AuthConfig{Username: "user", Password: "pass"}
+	for desc, test := range map[string]struct {
+		injectImage  bool
+		imgNeedsAuth bool
+		injectErr    error
+		calls        []string
+		err          bool
+		configJSON   string
+	}{
+		"should not pull image when it already exists": {
+			injectImage: true,
+			injectErr:   nil,
+			calls:       []string{"inspect_image"},
+		},
+		"should pull image when it doesn't exist": {
+			injectImage: false,
+			injectErr:   libdocker.ImageNotFoundError{ID: "image_id"},
+			calls:       []string{"inspect_image", "pull"},
+		},
+		"should return error when inspect image fails": {
+			injectImage: false,
+			injectErr:   fmt.Errorf("arbitrary error"),
+			calls:       []string{"inspect_image"},
+			err:         true,
+		},
+		"should return error when image pull needs private auth, but none provided": {
+			injectImage:  true,
+			imgNeedsAuth: true,
+			injectErr:    libdocker.ImageNotFoundError{ID: "image_id"},
+			calls:        []string{"inspect_image", "pull"},
+			err:          true,
+		},
+	} {
+		t.Logf("TestCase: %q", desc)
+		_, fakeDocker, _ := newTestDockerService()
+		if test.injectImage {
+			images := []dockertypes.Image{{ID: sandboxImage}}
+			fakeDocker.InjectImages(images)
+			if test.imgNeedsAuth {
+				fakeDocker.MakeImagesPrivate(images, authConfig)
+			}
+		}
+		fakeDocker.InjectError("inspect_image", test.injectErr)
+
+		err := ensureSandboxImageExists(fakeDocker, sandboxImage)
+		assert.NoError(t, fakeDocker.AssertCalls(test.calls))
+		assert.Equal(t, test.err, err != nil)
+	}
+}
+
+func TestMakePortsAndBindings(t *testing.T) {
+	for desc, test := range map[string]struct {
+		pm           []*runtimeapi.PortMapping
+		exposedPorts map[dockernat.Port]struct{}
+		portmappings map[dockernat.Port][]dockernat.PortBinding
+	}{
+		"no port mapping": {
+			pm:           nil,
+			exposedPorts: map[dockernat.Port]struct{}{},
+			portmappings: map[dockernat.Port][]dockernat.PortBinding{},
+		},
+		"tcp port mapping": {
+			pm: []*runtimeapi.PortMapping{
+				{
+					Protocol:      runtimeapi.Protocol_TCP,
+					ContainerPort: 80,
+					HostPort:      80,
+				},
+			},
+			exposedPorts: map[dockernat.Port]struct{}{
+				"80/tcp": {},
+			},
+			portmappings: map[dockernat.Port][]dockernat.PortBinding{
+				"80/tcp": {
+					{
+						HostPort: "80",
+					},
+				},
+			},
+		},
+		"udp port mapping": {
+			pm: []*runtimeapi.PortMapping{
+				{
+					Protocol:      runtimeapi.Protocol_UDP,
+					ContainerPort: 80,
+					HostPort:      80,
+				},
+			},
+			exposedPorts: map[dockernat.Port]struct{}{
+				"80/udp": {},
+			},
+			portmappings: map[dockernat.Port][]dockernat.PortBinding{
+				"80/udp": {
+					{
+						HostPort: "80",
+					},
+				},
+			},
+		},
+		"multipe port mappings": {
+			pm: []*runtimeapi.PortMapping{
+				{
+					Protocol:      runtimeapi.Protocol_TCP,
+					ContainerPort: 80,
+					HostPort:      80,
+				},
+				{
+					Protocol:      runtimeapi.Protocol_TCP,
+					ContainerPort: 80,
+					HostPort:      81,
+				},
+			},
+			exposedPorts: map[dockernat.Port]struct{}{
+				"80/tcp": {},
+			},
+			portmappings: map[dockernat.Port][]dockernat.PortBinding{
+				"80/tcp": {
+					{
+						HostPort: "80",
+					},
+					{
+						HostPort: "81",
+					},
+				},
+			},
+		},
+	} {
+		t.Logf("TestCase: %s", desc)
+		actualExposedPorts, actualPortMappings := makePortsAndBindings(test.pm)
+		assert.Equal(t, test.exposedPorts, actualExposedPorts)
+		assert.Equal(t, test.portmappings, actualPortMappings)
 	}
 }

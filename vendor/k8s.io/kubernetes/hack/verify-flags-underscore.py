@@ -67,6 +67,8 @@ def get_all_files(rootdir):
             dirs.remove('.git')
         if '.make' in dirs:
             dirs.remove('.make')
+        if 'BUILD' in files:
+           files.remove('BUILD')
         if 'exceptions.txt' in files:
             files.remove('exceptions.txt')
         if 'known-flags.txt' in files:
@@ -117,6 +119,26 @@ def line_has_bad_flag(line, flagre):
             return False
         return True
     return False
+
+def check_known_flags(rootdir):
+    pathname = os.path.join(rootdir, "hack/verify-flags/known-flags.txt")
+    f = open(pathname, 'r')
+    flags = set(f.read().splitlines())
+    f.close()
+
+    illegal_known_flags = set()
+    for flag in flags:
+        if len(flag) > 0:
+            if not "-" in flag:
+                illegal_known_flags.add(flag)
+
+    if len(illegal_known_flags) != 0:
+        print("All flags in hack/verify-flags/known-flags.txt should contain character -, found these flags without -")
+        l = list(illegal_known_flags)
+        l.sort()
+        print("%s" % "\n".join(l))
+        sys.exit(1)
+
 
 # The list of files might not be the whole repo. If someone only changed a
 # couple of files we don't want to run all of the golang files looking for
@@ -172,7 +194,7 @@ def get_flags(rootdir, files):
         print("%s" % "\n".join(l))
         sys.exit(1)
     if len(new_flags) != 0:
-        print("Found flags in golang files not in the list of known flags. Please add these to hack/verify-flags/known-flags.txt")
+        print("Found flags with character - in golang files not in the list of known flags. Please add these to hack/verify-flags/known-flags.txt")
         l = list(new_flags)
         l.sort()
         print("%s" % "\n".join(l))
@@ -220,6 +242,8 @@ def main():
     else:
         files = get_all_files(rootdir)
     files = normalize_files(rootdir, files)
+
+    check_known_flags(rootdir)
 
     flags = get_flags(rootdir, files)
     flagRE = flags_to_re(flags)

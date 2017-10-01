@@ -40,14 +40,7 @@ if [[ $KUBE_RELEASE_RUN_TESTS =~ ^[yY]$ ]]; then
   kube::build::run_build_command make test-integration
 fi
 
-if [[ "${FEDERATION:-}" == "true" ]];then
-    (
-	source "${KUBE_ROOT}/build/util.sh"
-	# Write federated docker image tag to workspace
-	kube::release::semantic_image_tag_version > "${KUBE_ROOT}/federation/manifests/federated-image.tag"
-    )
-fi
-
 kube::build::copy_output
+
 kube::release::package_tarballs
 kube::release::package_hyperkube

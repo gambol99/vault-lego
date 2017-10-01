@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package admission
+package podsecuritypolicy
 
 import (
 	"fmt"
@@ -24,35 +24,169 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	kadmission "k8s.io/kubernetes/pkg/admission"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/diff"
+	"k8s.io/apimachinery/pkg/util/sets"
+	kadmission "k8s.io/apiserver/pkg/admission"
+	"k8s.io/apiserver/pkg/authentication/user"
+	"k8s.io/apiserver/pkg/authorization/authorizer"
 	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/helper"
 	"k8s.io/kubernetes/pkg/apis/extensions"
-	"k8s.io/kubernetes/pkg/auth/user"
-	"k8s.io/kubernetes/pkg/client/cache"
-	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
-	clientsetfake "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/fake"
+	informers "k8s.io/kubernetes/pkg/client/informers/informers_generated/internalversion"
+	extensionslisters "k8s.io/kubernetes/pkg/client/listers/extensions/internalversion"
+	"k8s.io/kubernetes/pkg/controller"
 	"k8s.io/kubernetes/pkg/security/apparmor"
 	kpsp "k8s.io/kubernetes/pkg/security/podsecuritypolicy"
+	"k8s.io/kubernetes/pkg/security/podsecuritypolicy/seccomp"
 	psputil "k8s.io/kubernetes/pkg/security/podsecuritypolicy/util"
-	"k8s.io/kubernetes/pkg/util/diff"
 )
 
 const defaultContainerName = "test-c"
 
-func NewTestAdmission(store cache.Store, kclient clientset.Interface) kadmission.Interface {
+// NewTestAdmission provides an admission plugin with test implementations of internal structs.  It uses
+// an authorizer that always returns true.
+func NewTestAdmission(lister extensionslisters.PodSecurityPolicyLister) kadmission.Interface {
 	return &podSecurityPolicyPlugin{
 		Handler:         kadmission.NewHandler(kadmission.Create),
-		client:          kclient,
-		store:           store,
 		strategyFactory: kpsp.NewSimpleStrategyFactory(),
 		pspMatcher:      getMatchingPolicies,
+		authz:           &TestAuthorizer{},
+		lister:          lister,
 	}
 }
+
+// TestAlwaysAllowedAuthorizer is a testing struct for testing that fulfills the authorizer interface.
+type TestAuthorizer struct {
+	// usernameToNamespaceToAllowedPSPs contains the map of allowed PSPs.
+	// if nil, all PSPs are allowed.
+	usernameToNamespaceToAllowedPSPs map[string]map[string]map[string]bool
+}
+
+func (t *TestAuthorizer) Authorize(a authorizer.Attributes) (authorized bool, reason string, err error) {
+	if t.usernameToNamespaceToAllowedPSPs == nil {
+		return true, "", nil
+	}
+	allowedInNamespace := t.usernameToNamespaceToAllowedPSPs[a.GetUser().GetName()][a.GetNamespace()][a.GetName()]
+	allowedClusterWide := t.usernameToNamespaceToAllowedPSPs[a.GetUser().GetName()][""][a.GetName()]
+	return (allowedInNamespace || allowedClusterWide), "", nil
+}
+
+var _ authorizer.Authorizer = &TestAuthorizer{}
 
 func useInitContainers(pod *kapi.Pod) *kapi.Pod {
 	pod.Spec.InitContainers = pod.Spec.Containers
 	pod.Spec.Containers = []kapi.Container{}
 	return pod
+}
+
+func TestAdmitSeccomp(t *testing.T) {
+	containerName := "container"
+	tests := map[string]struct {
+		pspAnnotations map[string]string
+		podAnnotations map[string]string
+		shouldAdmit    bool
+	}{
+		"no seccomp, no pod annotations": {
+			pspAnnotations: nil,
+			podAnnotations: nil,
+			shouldAdmit:    true,
+		},
+		"no seccomp, pod annotations": {
+			pspAnnotations: nil,
+			podAnnotations: map[string]string{
+				kapi.SeccompPodAnnotationKey: "foo",
+			},
+			shouldAdmit: false,
+		},
+		"no seccomp, container annotations": {
+			pspAnnotations: nil,
+			podAnnotations: map[string]string{
+				kapi.SeccompContainerAnnotationKeyPrefix + containerName: "foo",
+			},
+			shouldAdmit: false,
+		},
+		"seccomp, allow any no pod annotation": {
+			pspAnnotations: map[string]string{
+				seccomp.AllowedProfilesAnnotationKey: seccomp.AllowAny,
+			},
+			podAnnotations: nil,
+			shouldAdmit:    true,
+		},
+		"seccomp, allow any pod annotation": {
+			pspAnnotations: map[string]string{
+				seccomp.AllowedProfilesAnnotationKey: seccomp.AllowAny,
+			},
+			podAnnotations: map[string]string{
+				kapi.SeccompPodAnnotationKey: "foo",
+			},
+			shouldAdmit: true,
+		},
+		"seccomp, allow any container annotation": {
+			pspAnnotations: map[string]string{
+				seccomp.AllowedProfilesAnnotationKey: seccomp.AllowAny,
+			},
+			podAnnotations: map[string]string{
+				kapi.SeccompContainerAnnotationKeyPrefix + containerName: "foo",
+			},
+			shouldAdmit: true,
+		},
+		"seccomp, allow specific pod annotation failure": {
+			pspAnnotations: map[string]string{
+				seccomp.AllowedProfilesAnnotationKey: "foo",
+			},
+			podAnnotations: map[string]string{
+				kapi.SeccompPodAnnotationKey: "bar",
+			},
+			shouldAdmit: false,
+		},
+		"seccomp, allow specific container annotation failure": {
+			pspAnnotations: map[string]string{
+				// provide a default so we don't have to give the pod annotation
+				seccomp.DefaultProfileAnnotationKey:  "foo",
+				seccomp.AllowedProfilesAnnotationKey: "foo",
+			},
+			podAnnotations: map[string]string{
+				kapi.SeccompContainerAnnotationKeyPrefix + containerName: "bar",
+			},
+			shouldAdmit: false,
+		},
+		"seccomp, allow specific pod annotation pass": {
+			pspAnnotations: map[string]string{
+				seccomp.AllowedProfilesAnnotationKey: "foo",
+			},
+			podAnnotations: map[string]string{
+				kapi.SeccompPodAnnotationKey: "foo",
+			},
+			shouldAdmit: true,
+		},
+		"seccomp, allow specific container annotation pass": {
+			pspAnnotations: map[string]string{
+				// provide a default so we don't have to give the pod annotation
+				seccomp.DefaultProfileAnnotationKey:  "foo",
+				seccomp.AllowedProfilesAnnotationKey: "foo,bar",
+			},
+			podAnnotations: map[string]string{
+				kapi.SeccompContainerAnnotationKeyPrefix + containerName: "bar",
+			},
+			shouldAdmit: true,
+		},
+	}
+	for k, v := range tests {
+		psp := restrictivePSP()
+		psp.Annotations = v.pspAnnotations
+		pod := &kapi.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: v.podAnnotations,
+			},
+			Spec: kapi.PodSpec{
+				Containers: []kapi.Container{
+					{Name: containerName},
+				},
+			},
+		}
+		testPSPAdmit(k, []*extensions.PodSecurityPolicy{psp}, pod, v.shouldAdmit, psp.Name, t)
+	}
 }
 
 func TestAdmitPrivileged(t *testing.T) {
@@ -618,7 +752,7 @@ func TestAdmitSELinux(t *testing.T) {
 func TestAdmitAppArmor(t *testing.T) {
 	createPodWithAppArmor := func(profile string) *kapi.Pod {
 		pod := goodPod()
-		apparmor.SetProfileName(pod, defaultContainerName, profile)
+		apparmor.SetProfileNameFromPodAnnotations(pod.Annotations, defaultContainerName, profile)
 		return pod
 	}
 
@@ -689,7 +823,7 @@ func TestAdmitAppArmor(t *testing.T) {
 		testPSPAdmit(k, []*extensions.PodSecurityPolicy{v.psp}, v.pod, v.shouldPass, v.psp.Name, t)
 
 		if v.shouldPass {
-			assert.Equal(t, v.expectedProfile, apparmor.GetProfileName(v.pod, defaultContainerName), k)
+			assert.Equal(t, v.expectedProfile, apparmor.GetProfileNameFromPodAnnotations(v.pod.Annotations, defaultContainerName), k)
 		}
 	}
 }
@@ -700,7 +834,8 @@ func TestAdmitRunAsUser(t *testing.T) {
 		// doesn't matter if we set it here or on the container, the
 		// admission controller uses DetermineEffectiveSC to get the defaulting
 		// behavior so it can validate what will be applied at runtime
-		pod.Spec.SecurityContext.RunAsUser = &user
+		userID := int64(user)
+		pod.Spec.SecurityContext.RunAsUser = &userID
 		return pod
 	}
 
@@ -719,7 +854,7 @@ func TestAdmitRunAsUser(t *testing.T) {
 		pod               *kapi.Pod
 		psps              []*extensions.PodSecurityPolicy
 		shouldPass        bool
-		expectedRunAsUser *int
+		expectedRunAsUser *int64
 		expectedPSP       string
 	}{
 		"runAsAny no pod request": {
@@ -733,7 +868,7 @@ func TestAdmitRunAsUser(t *testing.T) {
 			pod:               createPodWithRunAsUser(1),
 			psps:              []*extensions.PodSecurityPolicy{runAsAny},
 			shouldPass:        true,
-			expectedRunAsUser: intPtr(1),
+			expectedRunAsUser: userIDPtr(1),
 			expectedPSP:       runAsAny.Name,
 		},
 		"mustRunAs pod request out of range": {
@@ -745,14 +880,14 @@ func TestAdmitRunAsUser(t *testing.T) {
 			pod:               createPodWithRunAsUser(999),
 			psps:              []*extensions.PodSecurityPolicy{mustRunAs},
 			shouldPass:        true,
-			expectedRunAsUser: intPtr(int(mustRunAs.Spec.RunAsUser.Ranges[0].Min)),
+			expectedRunAsUser: &mustRunAs.Spec.RunAsUser.Ranges[0].Min,
 			expectedPSP:       mustRunAs.Name,
 		},
 		"mustRunAs no pod request": {
 			pod:               goodPod(),
 			psps:              []*extensions.PodSecurityPolicy{mustRunAs},
 			shouldPass:        true,
-			expectedRunAsUser: intPtr(int(mustRunAs.Spec.RunAsUser.Ranges[0].Min)),
+			expectedRunAsUser: &mustRunAs.Spec.RunAsUser.Ranges[0].Min,
 			expectedPSP:       mustRunAs.Name,
 		},
 		"runAsNonRoot no pod request": {
@@ -771,7 +906,7 @@ func TestAdmitRunAsUser(t *testing.T) {
 			pod:               createPodWithRunAsUser(1),
 			psps:              []*extensions.PodSecurityPolicy{runAsNonRoot},
 			shouldPass:        true,
-			expectedRunAsUser: intPtr(1),
+			expectedRunAsUser: userIDPtr(1),
 			expectedPSP:       runAsNonRoot.Name,
 		},
 	}
@@ -792,7 +927,7 @@ func TestAdmitRunAsUser(t *testing.T) {
 				t.Errorf("%s expected RunAsUser to be nil but found: %v", k, *v.pod.Spec.Containers[0].SecurityContext.RunAsUser)
 				continue
 			}
-			if int64(*v.expectedRunAsUser) != *v.pod.Spec.Containers[0].SecurityContext.RunAsUser {
+			if *v.expectedRunAsUser != *v.pod.Spec.Containers[0].SecurityContext.RunAsUser {
 				t.Errorf("%s expected RunAsUser to be: %v but found %v", k, *v.expectedRunAsUser, *v.pod.Spec.Containers[0].SecurityContext.RunAsUser)
 			}
 		}
@@ -805,7 +940,8 @@ func TestAdmitSupplementalGroups(t *testing.T) {
 		// doesn't matter if we set it here or on the container, the
 		// admission controller uses DetermineEffectiveSC to get the defaulting
 		// behavior so it can validate what will be applied at runtime
-		pod.Spec.SecurityContext.SupplementalGroups = []int64{group}
+		groupID := int64(group)
+		pod.Spec.SecurityContext.SupplementalGroups = []int64{groupID}
 		return pod
 	}
 
@@ -878,12 +1014,12 @@ func TestAdmitSupplementalGroups(t *testing.T) {
 }
 
 func TestAdmitFSGroup(t *testing.T) {
-	createPodWithFSGroup := func(group int64) *kapi.Pod {
+	createPodWithFSGroup := func(group int) *kapi.Pod {
 		pod := goodPod()
 		// doesn't matter if we set it here or on the container, the
 		// admission controller uses DetermineEffectiveSC to get the defaulting
 		// behavior so it can validate what will be applied at runtime
-		pod.Spec.SecurityContext.FSGroup = &group
+		pod.Spec.SecurityContext.FSGroup = groupIDPtr(group)
 		return pod
 	}
 
@@ -912,7 +1048,7 @@ func TestAdmitFSGroup(t *testing.T) {
 			pod:             createPodWithFSGroup(1),
 			psps:            []*extensions.PodSecurityPolicy{runAsAny},
 			shouldPass:      true,
-			expectedFSGroup: int64Ptr(1),
+			expectedFSGroup: groupIDPtr(1),
 			expectedPSP:     runAsAny.Name,
 		},
 		"mustRunAs no pod request": {
@@ -931,7 +1067,7 @@ func TestAdmitFSGroup(t *testing.T) {
 			pod:             createPodWithFSGroup(999),
 			psps:            []*extensions.PodSecurityPolicy{mustRunAs},
 			shouldPass:      true,
-			expectedFSGroup: int64Ptr(999),
+			expectedFSGroup: groupIDPtr(999),
 			expectedPSP:     mustRunAs.Name,
 		},
 	}
@@ -1039,8 +1175,8 @@ func TestAdmitSysctls(t *testing.T) {
 			}
 			return sysctls
 		}
-		pod.Annotations[kapi.SysctlsPodAnnotationKey] = kapi.PodAnnotationsFromSysctls(dummySysctls(safeSysctls))
-		pod.Annotations[kapi.UnsafeSysctlsPodAnnotationKey] = kapi.PodAnnotationsFromSysctls(dummySysctls(unsafeSysctls))
+		pod.Annotations[kapi.SysctlsPodAnnotationKey] = helper.PodAnnotationsFromSysctls(dummySysctls(safeSysctls))
+		pod.Annotations[kapi.UnsafeSysctlsPodAnnotationKey] = helper.PodAnnotationsFromSysctls(dummySysctls(unsafeSysctls))
 		return pod
 	}
 
@@ -1186,7 +1322,7 @@ func TestAdmitSysctls(t *testing.T) {
 	}
 
 	for k, v := range tests {
-		origSafeSysctls, origUnsafeSysctls, err := kapi.SysctlsFromPodAnnotations(v.pod.Annotations)
+		origSafeSysctls, origUnsafeSysctls, err := helper.SysctlsFromPodAnnotations(v.pod.Annotations)
 		if err != nil {
 			t.Fatalf("invalid sysctl annotation: %v", err)
 		}
@@ -1194,7 +1330,7 @@ func TestAdmitSysctls(t *testing.T) {
 		testPSPAdmit(k, v.psps, v.pod, v.shouldPass, v.expectedPSP, t)
 
 		if v.shouldPass {
-			safeSysctls, unsafeSysctls, _ := kapi.SysctlsFromPodAnnotations(v.pod.Annotations)
+			safeSysctls, unsafeSysctls, _ := helper.SysctlsFromPodAnnotations(v.pod.Annotations)
 			if !reflect.DeepEqual(safeSysctls, origSafeSysctls) {
 				t.Errorf("%s: wrong safe sysctls: expected=%v, got=%v", k, origSafeSysctls, safeSysctls)
 			}
@@ -1206,16 +1342,14 @@ func TestAdmitSysctls(t *testing.T) {
 }
 
 func testPSPAdmit(testCaseName string, psps []*extensions.PodSecurityPolicy, pod *kapi.Pod, shouldPass bool, expectedPSP string, t *testing.T) {
-	namespace := createNamespaceForTest()
-	serviceAccount := createSAForTest()
-	tc := clientsetfake.NewSimpleClientset(namespace, serviceAccount)
-	store := cache.NewStore(cache.MetaNamespaceKeyFunc)
+	informerFactory := informers.NewSharedInformerFactory(nil, controller.NoResyncPeriodFunc())
+	store := informerFactory.Extensions().InternalVersion().PodSecurityPolicies().Informer().GetStore()
 
 	for _, psp := range psps {
 		store.Add(psp)
 	}
 
-	plugin := NewTestAdmission(store, tc)
+	plugin := NewTestAdmission(informerFactory.Extensions().InternalVersion().PodSecurityPolicies().Lister())
 
 	attrs := kadmission.NewAttributesRecord(pod, nil, kapi.Kind("Pod").WithVersion("version"), "namespace", "", kapi.Resource("pods").WithVersion("version"), "", kadmission.Create, &user.DefaultInfo{})
 	err := plugin.Admit(attrs)
@@ -1330,7 +1464,7 @@ func TestCreateProvidersFromConstraints(t *testing.T) {
 		"valid psp": {
 			psp: func() *extensions.PodSecurityPolicy {
 				return &extensions.PodSecurityPolicy{
-					ObjectMeta: kapi.ObjectMeta{
+					ObjectMeta: metav1.ObjectMeta{
 						Name: "valid psp",
 					},
 					Spec: extensions.PodSecurityPolicySpec{
@@ -1353,7 +1487,7 @@ func TestCreateProvidersFromConstraints(t *testing.T) {
 		"bad psp strategy options": {
 			psp: func() *extensions.PodSecurityPolicy {
 				return &extensions.PodSecurityPolicy{
-					ObjectMeta: kapi.ObjectMeta{
+					ObjectMeta: metav1.ObjectMeta{
 						Name: "bad psp user options",
 					},
 					Spec: extensions.PodSecurityPolicySpec{
@@ -1377,13 +1511,8 @@ func TestCreateProvidersFromConstraints(t *testing.T) {
 	}
 
 	for k, v := range testCases {
-		store := cache.NewStore(cache.MetaNamespaceKeyFunc)
-
-		tc := clientsetfake.NewSimpleClientset()
 		admit := &podSecurityPolicyPlugin{
 			Handler:         kadmission.NewHandler(kadmission.Create, kadmission.Update),
-			client:          tc,
-			store:           store,
 			strategyFactory: kpsp.NewSimpleStrategyFactory(),
 		}
 
@@ -1412,17 +1541,176 @@ func TestCreateProvidersFromConstraints(t *testing.T) {
 	}
 }
 
+func TestGetMatchingPolicies(t *testing.T) {
+	policyWithName := func(name string) *extensions.PodSecurityPolicy {
+		p := restrictivePSP()
+		p.Name = name
+		return p
+	}
+
+	tests := map[string]struct {
+		user             user.Info
+		sa               user.Info
+		ns               string
+		expectedPolicies sets.String
+		inPolicies       []*extensions.PodSecurityPolicy
+		allowed          map[string]map[string]map[string]bool
+	}{
+		"policy allowed by user": {
+			user: &user.DefaultInfo{Name: "user"},
+			sa:   &user.DefaultInfo{Name: "sa"},
+			ns:   "test",
+			allowed: map[string]map[string]map[string]bool{
+				"user": {
+					"test": {"policy": true},
+				},
+			},
+			inPolicies:       []*extensions.PodSecurityPolicy{policyWithName("policy")},
+			expectedPolicies: sets.NewString("policy"),
+		},
+		"policy allowed by sa": {
+			user: &user.DefaultInfo{Name: "user"},
+			sa:   &user.DefaultInfo{Name: "sa"},
+			ns:   "test",
+			allowed: map[string]map[string]map[string]bool{
+				"sa": {
+					"test": {"policy": true},
+				},
+			},
+			inPolicies:       []*extensions.PodSecurityPolicy{policyWithName("policy")},
+			expectedPolicies: sets.NewString("policy"),
+		},
+		"no policies allowed": {
+			user:             &user.DefaultInfo{Name: "user"},
+			sa:               &user.DefaultInfo{Name: "sa"},
+			ns:               "test",
+			allowed:          map[string]map[string]map[string]bool{},
+			inPolicies:       []*extensions.PodSecurityPolicy{policyWithName("policy")},
+			expectedPolicies: sets.NewString(),
+		},
+		"multiple policies allowed": {
+			user: &user.DefaultInfo{Name: "user"},
+			sa:   &user.DefaultInfo{Name: "sa"},
+			ns:   "test",
+			allowed: map[string]map[string]map[string]bool{
+				"sa": {
+					"test":  {"policy1": true},
+					"":      {"policy4": true},
+					"other": {"policy6": true},
+				},
+				"user": {
+					"test":  {"policy2": true},
+					"":      {"policy5": true},
+					"other": {"policy7": true},
+				},
+			},
+			inPolicies: []*extensions.PodSecurityPolicy{
+				policyWithName("policy1"), // allowed by sa
+				policyWithName("policy2"), // allowed by user
+				policyWithName("policy3"), // not allowed
+				policyWithName("policy4"), // allowed by sa at cluster level
+				policyWithName("policy5"), // allowed by user at cluster level
+				policyWithName("policy6"), // not allowed in this namespace
+				policyWithName("policy7"), // not allowed in this namespace
+			},
+			expectedPolicies: sets.NewString("policy1", "policy2", "policy4", "policy5"),
+		},
+		"policies are not allowed for nil user info": {
+			user: nil,
+			sa:   &user.DefaultInfo{Name: "sa"},
+			ns:   "test",
+			allowed: map[string]map[string]map[string]bool{
+				"sa": {
+					"test": {"policy1": true},
+				},
+				"user": {
+					"test": {"policy2": true},
+				},
+			},
+			inPolicies: []*extensions.PodSecurityPolicy{
+				policyWithName("policy1"),
+				policyWithName("policy2"),
+				policyWithName("policy3"),
+			},
+			// only the policies for the sa are allowed when user info is nil
+			expectedPolicies: sets.NewString("policy1"),
+		},
+		"policies are not allowed for nil sa info": {
+			user: &user.DefaultInfo{Name: "user"},
+			sa:   nil,
+			ns:   "test",
+			allowed: map[string]map[string]map[string]bool{
+				"sa": {
+					"test": {"policy1": true},
+				},
+				"user": {
+					"test": {"policy2": true},
+				},
+			},
+			inPolicies: []*extensions.PodSecurityPolicy{
+				policyWithName("policy1"),
+				policyWithName("policy2"),
+				policyWithName("policy3"),
+			},
+			// only the policies for the user are allowed when sa info is nil
+			expectedPolicies: sets.NewString("policy2"),
+		},
+		"policies are not allowed for nil sa and user info": {
+			user: nil,
+			sa:   nil,
+			ns:   "test",
+			allowed: map[string]map[string]map[string]bool{
+				"sa": {
+					"test": {"policy1": true},
+				},
+				"user": {
+					"test": {"policy2": true},
+				},
+			},
+			inPolicies: []*extensions.PodSecurityPolicy{
+				policyWithName("policy1"),
+				policyWithName("policy2"),
+				policyWithName("policy3"),
+			},
+			// no policies are allowed if sa and user are both nil
+			expectedPolicies: sets.NewString(),
+		},
+	}
+	for k, v := range tests {
+		informerFactory := informers.NewSharedInformerFactory(nil, controller.NoResyncPeriodFunc())
+		pspInformer := informerFactory.Extensions().InternalVersion().PodSecurityPolicies()
+		store := pspInformer.Informer().GetStore()
+		for _, psp := range v.inPolicies {
+			store.Add(psp)
+		}
+
+		authz := &TestAuthorizer{usernameToNamespaceToAllowedPSPs: v.allowed}
+		allowedPolicies, err := getMatchingPolicies(pspInformer.Lister(), v.user, v.sa, authz, v.ns)
+		if err != nil {
+			t.Errorf("%s got unexpected error %#v", k, err)
+			continue
+		}
+		allowedPolicyNames := sets.NewString()
+		for _, p := range allowedPolicies {
+			allowedPolicyNames.Insert(p.Name)
+		}
+		if !v.expectedPolicies.Equal(allowedPolicyNames) {
+			t.Errorf("%s received unexpected policies.  Expected %#v but got %#v", k, v.expectedPolicies.List(), allowedPolicyNames.List())
+		}
+	}
+}
+
 func restrictivePSP() *extensions.PodSecurityPolicy {
 	return &extensions.PodSecurityPolicy{
-		ObjectMeta: kapi.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name:        "restrictive",
 			Annotations: map[string]string{},
 		},
 		Spec: extensions.PodSecurityPolicySpec{
 			RunAsUser: extensions.RunAsUserStrategyOptions{
 				Rule: extensions.RunAsUserStrategyMustRunAs,
-				Ranges: []extensions.IDRange{
-					{Min: 999, Max: 999},
+				Ranges: []extensions.UserIDRange{
+					{Min: int64(999), Max: int64(999)},
 				},
 			},
 			SELinux: extensions.SELinuxStrategyOptions{
@@ -1433,14 +1721,14 @@ func restrictivePSP() *extensions.PodSecurityPolicy {
 			},
 			FSGroup: extensions.FSGroupStrategyOptions{
 				Rule: extensions.FSGroupStrategyMustRunAs,
-				Ranges: []extensions.IDRange{
-					{Min: 999, Max: 999},
+				Ranges: []extensions.GroupIDRange{
+					{Min: int64(999), Max: int64(999)},
 				},
 			},
 			SupplementalGroups: extensions.SupplementalGroupsStrategyOptions{
 				Rule: extensions.SupplementalGroupsStrategyMustRunAs,
-				Ranges: []extensions.IDRange{
-					{Min: 999, Max: 999},
+				Ranges: []extensions.GroupIDRange{
+					{Min: int64(999), Max: int64(999)},
 				},
 			},
 		},
@@ -1449,7 +1737,7 @@ func restrictivePSP() *extensions.PodSecurityPolicy {
 
 func createNamespaceForTest() *kapi.Namespace {
 	return &kapi.Namespace{
-		ObjectMeta: kapi.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name: "default",
 		},
 	}
@@ -1457,7 +1745,7 @@ func createNamespaceForTest() *kapi.Namespace {
 
 func createSAForTest() *kapi.ServiceAccount {
 	return &kapi.ServiceAccount{
-		ObjectMeta: kapi.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Namespace: "default",
 			Name:      "default",
 		},
@@ -1469,7 +1757,7 @@ func createSAForTest() *kapi.ServiceAccount {
 // psp when defaults are filled in.
 func goodPod() *kapi.Pod {
 	return &kapi.Pod{
-		ObjectMeta: kapi.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Annotations: map[string]string{},
 		},
 		Spec: kapi.PodSpec{
@@ -1485,11 +1773,12 @@ func goodPod() *kapi.Pod {
 	}
 }
 
-func intPtr(i int) *int {
-	return &i
+func userIDPtr(i int) *int64 {
+	userID := int64(i)
+	return &userID
 }
 
-func int64Ptr(i int) *int64 {
-	i64 := int64(i)
-	return &i64
+func groupIDPtr(i int) *int64 {
+	groupID := int64(i)
+	return &groupID
 }

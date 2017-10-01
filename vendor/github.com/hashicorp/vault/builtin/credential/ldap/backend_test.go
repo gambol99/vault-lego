@@ -7,10 +7,99 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hashicorp/vault/helper/policyutil"
 	"github.com/hashicorp/vault/logical"
 	logicaltest "github.com/hashicorp/vault/logical/testing"
 	"github.com/mitchellh/mapstructure"
 )
+
+func createBackendWithStorage(t *testing.T) (*backend, logical.Storage) {
+	config := logical.TestBackendConfig()
+	config.StorageView = &logical.InmemStorage{}
+
+	b := Backend()
+	if b == nil {
+		t.Fatalf("failed to create backend")
+	}
+
+	err := b.Backend.Setup(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return b, config.StorageView
+}
+
+func TestLdapAuthBackend_UserPolicies(t *testing.T) {
+	var resp *logical.Response
+	var err error
+	b, storage := createBackendWithStorage(t)
+
+	configReq := &logical.Request{
+		Operation: logical.UpdateOperation,
+		Path:      "config",
+		Data: map[string]interface{}{
+			// Online LDAP test server
+			// http://www.forumsys.com/tutorials/integration-how-to/ldap/online-ldap-test-server/
+			"url":      "ldap://ldap.forumsys.com",
+			"userattr": "uid",
+			"userdn":   "dc=example,dc=com",
+			"groupdn":  "dc=example,dc=com",
+			"binddn":   "cn=read-only-admin,dc=example,dc=com",
+		},
+		Storage: storage,
+	}
+	resp, err = b.HandleRequest(configReq)
+	if err != nil || (resp != nil && resp.IsError()) {
+		t.Fatalf("err:%v resp:%#v", err, resp)
+	}
+
+	groupReq := &logical.Request{
+		Operation: logical.UpdateOperation,
+		Data: map[string]interface{}{
+			"policies": "grouppolicy",
+		},
+		Path:    "groups/engineers",
+		Storage: storage,
+	}
+	resp, err = b.HandleRequest(groupReq)
+	if err != nil || (resp != nil && resp.IsError()) {
+		t.Fatalf("err:%v resp:%#v", err, resp)
+	}
+
+	userReq := &logical.Request{
+		Operation: logical.UpdateOperation,
+		Data: map[string]interface{}{
+			"groups":   "engineers",
+			"policies": "userpolicy",
+		},
+		Path:    "users/tesla",
+		Storage: storage,
+	}
+
+	resp, err = b.HandleRequest(userReq)
+	if err != nil || (resp != nil && resp.IsError()) {
+		t.Fatalf("err:%v resp:%#v", err, resp)
+	}
+
+	loginReq := &logical.Request{
+		Operation: logical.UpdateOperation,
+		Path:      "login/tesla",
+		Data: map[string]interface{}{
+			"password": "password",
+		},
+		Storage: storage,
+	}
+
+	resp, err = b.HandleRequest(loginReq)
+	if err != nil || (resp != nil && resp.IsError()) {
+		t.Fatalf("err:%v resp:%#v", err, resp)
+	}
+	expected := []string{"grouppolicy", "userpolicy"}
+	if !reflect.DeepEqual(expected, resp.Auth.Policies) {
+		t.Fatalf("bad: policies: expected: %q, actual: %q", expected, resp.Auth.Policies)
+	}
+}
 
 /*
  * Acceptance test for LDAP Auth Backend
@@ -47,8 +136,7 @@ func TestBackend_basic(t *testing.T) {
 	b := factory(t)
 
 	logicaltest.Test(t, logicaltest.TestCase{
-		AcceptanceTest: true,
-		Backend:        b,
+		Backend: b,
 		Steps: []logicaltest.TestStep{
 			testAccStepConfigUrl(t),
 			// Map Scientists group (from LDAP server) with foo policy
@@ -76,8 +164,7 @@ func TestBackend_basic_authbind(t *testing.T) {
 	b := factory(t)
 
 	logicaltest.Test(t, logicaltest.TestCase{
-		AcceptanceTest: true,
-		Backend:        b,
+		Backend: b,
 		Steps: []logicaltest.TestStep{
 			testAccStepConfigUrlWithAuthBind(t),
 			testAccStepGroup(t, "Scientists", "foo"),
@@ -92,8 +179,7 @@ func TestBackend_basic_discover(t *testing.T) {
 	b := factory(t)
 
 	logicaltest.Test(t, logicaltest.TestCase{
-		AcceptanceTest: true,
-		Backend:        b,
+		Backend: b,
 		Steps: []logicaltest.TestStep{
 			testAccStepConfigUrlWithDiscover(t),
 			testAccStepGroup(t, "Scientists", "foo"),
@@ -108,8 +194,7 @@ func TestBackend_basic_nogroupdn(t *testing.T) {
 	b := factory(t)
 
 	logicaltest.Test(t, logicaltest.TestCase{
-		AcceptanceTest: true,
-		Backend:        b,
+		Backend: b,
 		Steps: []logicaltest.TestStep{
 			testAccStepConfigUrlNoGroupDN(t),
 			testAccStepGroup(t, "Scientists", "foo"),
@@ -124,11 +209,10 @@ func TestBackend_groupCrud(t *testing.T) {
 	b := factory(t)
 
 	logicaltest.Test(t, logicaltest.TestCase{
-		AcceptanceTest: true,
-		Backend:        b,
+		Backend: b,
 		Steps: []logicaltest.TestStep{
 			testAccStepGroup(t, "g1", "foo"),
-			testAccStepReadGroup(t, "g1", "default,foo"),
+			testAccStepReadGroup(t, "g1", "foo"),
 			testAccStepDeleteGroup(t, "g1"),
 			testAccStepReadGroup(t, "g1", ""),
 		},
@@ -142,8 +226,7 @@ func TestBackend_configDefaultsAfterUpdate(t *testing.T) {
 	b := factory(t)
 
 	logicaltest.Test(t, logicaltest.TestCase{
-		AcceptanceTest: false,
-		Backend:        b,
+		Backend: b,
 		Steps: []logicaltest.TestStep{
 			logicaltest.TestStep{
 				Operation: logical.UpdateOperation,
@@ -175,6 +258,11 @@ func TestBackend_configDefaultsAfterUpdate(t *testing.T) {
 						t.Errorf("Default mismatch: userattr. Expected: '%s', received :'%s'", defaultUserAttr, cfg["userattr"])
 					}
 
+					defaultDenyNullBind := true
+					if cfg["deny_null_bind"] != defaultDenyNullBind {
+						t.Errorf("Default mismatch: deny_null_bind. Expected: '%s', received :'%s'", defaultDenyNullBind, cfg["deny_null_bind"])
+					}
+
 					return nil
 				},
 			},
@@ -204,7 +292,8 @@ func testAccStepConfigUrlWithAuthBind(t *testing.T) logicaltest.TestStep {
 		Data: map[string]interface{}{
 			// Online LDAP test server
 			// http://www.forumsys.com/tutorials/integration-how-to/ldap/online-ldap-test-server/
-			"url":      "ldap://ldap.forumsys.com",
+			// In this test we also exercise multiple URL support
+			"url":      "foobar://ldap.example.com,ldap://ldap.forumsys.com",
 			"userattr": "uid",
 			"userdn":   "dc=example,dc=com",
 			"groupdn":  "dc=example,dc=com",
@@ -269,13 +358,13 @@ func testAccStepReadGroup(t *testing.T, group string, policies string) logicalte
 			}
 
 			var d struct {
-				Policies string `mapstructure:"policies"`
+				Policies []string `mapstructure:"policies"`
 			}
 			if err := mapstructure.Decode(resp.Data, &d); err != nil {
 				return err
 			}
 
-			if d.Policies != policies {
+			if !reflect.DeepEqual(d.Policies, policyutil.ParsePolicies(policies)) {
 				return fmt.Errorf("bad: %#v", resp)
 			}
 
@@ -295,8 +384,7 @@ func TestBackend_userCrud(t *testing.T) {
 	b := Backend()
 
 	logicaltest.Test(t, logicaltest.TestCase{
-		AcceptanceTest: true,
-		Backend:        b,
+		Backend: b,
 		Steps: []logicaltest.TestStep{
 			testAccStepUser(t, "g1", "bar"),
 			testAccStepReadUser(t, "g1", "bar"),
@@ -376,8 +464,8 @@ func testAccStepLoginNoGroupDN(t *testing.T, user string, pass string) logicalte
 
 		// Verifies a search without defined GroupDN returns a warnting rather than failing
 		Check: func(resp *logical.Response) error {
-			if len(resp.Warnings()) != 1 {
-				return fmt.Errorf("expected a warning due to no group dn, got: %#v", resp.Warnings())
+			if len(resp.Warnings) != 1 {
+				return fmt.Errorf("expected a warning due to no group dn, got: %#v", resp.Warnings)
 			}
 
 			return logicaltest.TestCheckAuth([]string{"bar", "default"})(resp)

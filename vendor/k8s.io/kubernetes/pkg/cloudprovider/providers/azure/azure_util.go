@@ -17,22 +17,28 @@ limitations under the License.
 package azure
 
 import (
+	"errors"
 	"fmt"
+	"hash/crc32"
+	"regexp"
+	"strconv"
 	"strings"
 
-	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/v1"
 	"k8s.io/kubernetes/pkg/cloudprovider"
 
 	"github.com/Azure/azure-sdk-for-go/arm/compute"
 	"github.com/Azure/azure-sdk-for-go/arm/network"
-	"k8s.io/kubernetes/pkg/types"
+	"github.com/golang/glog"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 const (
 	loadBalancerMinimumPriority = 500
 	loadBalancerMaximumPriority = 4096
 
-	machineResourceIDTemplate   = "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Compute/virtualMachines/%s"
+	machineIDTemplate           = "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Compute/virtualMachines/%s"
+	availabilitySetIDTemplate   = "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Compute/availabilitySets/%s"
 	frontendIPConfigIDTemplate  = "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/loadBalancers/%s/frontendIPConfigurations/%s"
 	backendPoolIDTemplate       = "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/loadBalancers/%s/backendAddressPools/%s"
 	loadBalancerRuleIDTemplate  = "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/loadBalancers/%s/loadBalancingRules/%s"
@@ -40,13 +46,24 @@ const (
 	securityRuleIDTemplate      = "/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/networkSecurityGroups/%s/securityRules/%s"
 )
 
+var providerIDRE = regexp.MustCompile(`^` + CloudProviderName + `://(.+)$`)
+
 // returns the full identifier of a machine
 func (az *Cloud) getMachineID(machineName string) string {
 	return fmt.Sprintf(
-		machineResourceIDTemplate,
+		machineIDTemplate,
 		az.SubscriptionID,
 		az.ResourceGroup,
 		machineName)
+}
+
+// returns the full identifier of an availabilitySet
+func (az *Cloud) getAvailabilitySetID(availabilitySetName string) string {
+	return fmt.Sprintf(
+		availabilitySetIDTemplate,
+		az.SubscriptionID,
+		az.ResourceGroup,
+		availabilitySetName)
 }
 
 // returns the full identifier of a loadbalancer frontendipconfiguration.
@@ -112,23 +129,35 @@ func getLastSegment(ID string) (string, error) {
 
 // returns the equivalent LoadBalancerRule, SecurityRule and LoadBalancerProbe
 // protocol types for the given Kubernetes protocol type.
-func getProtocolsFromKubernetesProtocol(protocol api.Protocol) (network.TransportProtocol, network.SecurityRuleProtocol, network.ProbeProtocol, error) {
+func getProtocolsFromKubernetesProtocol(protocol v1.Protocol) (*network.TransportProtocol, *network.SecurityRuleProtocol, *network.ProbeProtocol, error) {
+	var transportProto network.TransportProtocol
+	var securityProto network.SecurityRuleProtocol
+	var probeProto network.ProbeProtocol
+
 	switch protocol {
-	case api.ProtocolTCP:
-		return network.TransportProtocolTCP, network.TCP, network.ProbeProtocolTCP, nil
+	case v1.ProtocolTCP:
+		transportProto = network.TransportProtocolTCP
+		securityProto = network.SecurityRuleProtocolTCP
+		probeProto = network.ProbeProtocolTCP
+		return &transportProto, &securityProto, &probeProto, nil
+	case v1.ProtocolUDP:
+		transportProto = network.TransportProtocolUDP
+		securityProto = network.SecurityRuleProtocolUDP
+		return &transportProto, &securityProto, nil, nil
 	default:
-		return "", "", "", fmt.Errorf("Only TCP is supported for Azure LoadBalancers")
+		return &transportProto, &securityProto, &probeProto, fmt.Errorf("Only TCP and UDP are supported for Azure LoadBalancers")
 	}
+
 }
 
 // This returns the full identifier of the primary NIC for the given VM.
 func getPrimaryInterfaceID(machine compute.VirtualMachine) (string, error) {
-	if len(*machine.Properties.NetworkProfile.NetworkInterfaces) == 1 {
-		return *(*machine.Properties.NetworkProfile.NetworkInterfaces)[0].ID, nil
+	if len(*machine.NetworkProfile.NetworkInterfaces) == 1 {
+		return *(*machine.NetworkProfile.NetworkInterfaces)[0].ID, nil
 	}
 
-	for _, ref := range *machine.Properties.NetworkProfile.NetworkInterfaces {
-		if *ref.Properties.Primary {
+	for _, ref := range *machine.NetworkProfile.NetworkInterfaces {
+		if *ref.Primary {
 			return *ref.ID, nil
 		}
 	}
@@ -137,17 +166,28 @@ func getPrimaryInterfaceID(machine compute.VirtualMachine) (string, error) {
 }
 
 func getPrimaryIPConfig(nic network.Interface) (*network.InterfaceIPConfiguration, error) {
-	if len(*nic.Properties.IPConfigurations) == 1 {
-		return &((*nic.Properties.IPConfigurations)[0]), nil
+	if len(*nic.IPConfigurations) == 1 {
+		return &((*nic.IPConfigurations)[0]), nil
 	}
 
-	// we're here because we either have multiple ipconfigs and can't determine the primary:
-	//   https://github.com/Azure/azure-rest-api-specs/issues/305
-	// or somehow we had zero ipconfigs
+	for _, ref := range *nic.IPConfigurations {
+		if *ref.Primary {
+			return &ref, nil
+		}
+	}
+
 	return nil, fmt.Errorf("failed to determine the determine primary ipconfig. nicname=%q", *nic.Name)
 }
 
-func getLoadBalancerName(clusterName string) string {
+// For a load balancer, all frontend ip should reference either a subnet or publicIpAddress.
+// Thus Azure do not allow mixed type (public and internal) load balancer.
+// So we'd have a separate name for internal load balancer.
+// This would be the name for Azure LoadBalancer resource.
+func getLoadBalancerName(clusterName string, isInternal bool) string {
+	if isInternal {
+		return fmt.Sprintf("%s-internal", clusterName)
+	}
+
 	return clusterName
 }
 
@@ -155,32 +195,37 @@ func getBackendPoolName(clusterName string) string {
 	return clusterName
 }
 
-func getRuleName(service *api.Service, port api.ServicePort) string {
-	return fmt.Sprintf("%s-%s-%d-%d", getRulePrefix(service), port.Protocol, port.Port, port.NodePort)
+func getLoadBalancerRuleName(service *v1.Service, port v1.ServicePort) string {
+	return fmt.Sprintf("%s-%s-%d", getRulePrefix(service), port.Protocol, port.Port)
+}
+
+func getSecurityRuleName(service *v1.Service, port v1.ServicePort, sourceAddrPrefix string) string {
+	safePrefix := strings.Replace(sourceAddrPrefix, "/", "_", -1)
+	return fmt.Sprintf("%s-%s-%d-%s", getRulePrefix(service), port.Protocol, port.Port, safePrefix)
 }
 
 // This returns a human-readable version of the Service used to tag some resources.
 // This is only used for human-readable convenience, and not to filter.
-func getServiceName(service *api.Service) string {
+func getServiceName(service *v1.Service) string {
 	return fmt.Sprintf("%s/%s", service.Namespace, service.Name)
 }
 
 // This returns a prefix for loadbalancer/security rules.
-func getRulePrefix(service *api.Service) string {
+func getRulePrefix(service *v1.Service) string {
 	return cloudprovider.GetLoadBalancerName(service)
 }
 
-func serviceOwnsRule(service *api.Service, rule string) bool {
+func getPublicIPName(clusterName string, service *v1.Service) string {
+	return fmt.Sprintf("%s-%s", clusterName, cloudprovider.GetLoadBalancerName(service))
+}
+
+func serviceOwnsRule(service *v1.Service, rule string) bool {
 	prefix := getRulePrefix(service)
 	return strings.HasPrefix(strings.ToUpper(rule), strings.ToUpper(prefix))
 }
 
-func getFrontendIPConfigName(service *api.Service) string {
+func getFrontendIPConfigName(service *v1.Service) string {
 	return cloudprovider.GetLoadBalancerName(service)
-}
-
-func getPublicIPName(clusterName string, service *api.Service) string {
-	return fmt.Sprintf("%s-%s", clusterName, cloudprovider.GetLoadBalancerName(service))
 }
 
 // This returns the next available rule priority level for a given set of security rules.
@@ -191,7 +236,7 @@ func getNextAvailablePriority(rules []network.SecurityRule) (int32, error) {
 outer:
 	for smallest < loadBalancerMaximumPriority {
 		for _, rule := range rules {
-			if *rule.Properties.Priority == smallest {
+			if *rule.Priority == smallest {
 				smallest += spread
 				continue outer
 			}
@@ -209,29 +254,99 @@ func (az *Cloud) getIPForMachine(nodeName types.NodeName) (string, error) {
 		return "", cloudprovider.InstanceNotFound
 	}
 	if err != nil {
+		glog.Errorf("error: az.getIPForMachine(%s), az.getVirtualMachine(%s), err=%v", nodeName, nodeName, err)
 		return "", err
 	}
 
 	nicID, err := getPrimaryInterfaceID(machine)
 	if err != nil {
+		glog.Errorf("error: az.getIPForMachine(%s), getPrimaryInterfaceID(%v), err=%v", nodeName, machine, err)
 		return "", err
 	}
 
 	nicName, err := getLastSegment(nicID)
 	if err != nil {
+		glog.Errorf("error: az.getIPForMachine(%s), getLastSegment(%s), err=%v", nodeName, nicID, err)
 		return "", err
 	}
 
+	az.operationPollRateLimiter.Accept()
 	nic, err := az.InterfacesClient.Get(az.ResourceGroup, nicName, "")
 	if err != nil {
+		glog.Errorf("error: az.getIPForMachine(%s), az.InterfacesClient.Get(%s, %s, %s), err=%v", nodeName, az.ResourceGroup, nicName, "", err)
 		return "", err
 	}
 
 	ipConfig, err := getPrimaryIPConfig(nic)
 	if err != nil {
+		glog.Errorf("error: az.getIPForMachine(%s), getPrimaryIPConfig(%v), err=%v", nodeName, nic, err)
 		return "", err
 	}
 
-	targetIP := *ipConfig.Properties.PrivateIPAddress
+	targetIP := *ipConfig.PrivateIPAddress
 	return targetIP, nil
+}
+
+// splitProviderID converts a providerID to a NodeName.
+func splitProviderID(providerID string) (types.NodeName, error) {
+	matches := providerIDRE.FindStringSubmatch(providerID)
+	if len(matches) != 2 {
+		return "", errors.New("error splitting providerID")
+	}
+	return types.NodeName(matches[1]), nil
+}
+
+var polyTable = crc32.MakeTable(crc32.Koopman)
+
+//MakeCRC32 : convert string to CRC32 format
+func MakeCRC32(str string) string {
+	crc := crc32.New(polyTable)
+	crc.Write([]byte(str))
+	hash := crc.Sum32()
+	return strconv.FormatUint(uint64(hash), 10)
+}
+
+//ExtractVMData : extract dataDisks, storageProfile from a map struct
+func ExtractVMData(vmData map[string]interface{}) (dataDisks []interface{},
+	storageProfile map[string]interface{},
+	hardwareProfile map[string]interface{}, err error) {
+	props, ok := vmData["properties"].(map[string]interface{})
+	if !ok {
+		return nil, nil, nil, fmt.Errorf("convert vmData(properties) to map error")
+	}
+
+	storageProfile, ok = props["storageProfile"].(map[string]interface{})
+	if !ok {
+		return nil, nil, nil, fmt.Errorf("convert vmData(storageProfile) to map error")
+	}
+
+	hardwareProfile, ok = props["hardwareProfile"].(map[string]interface{})
+	if !ok {
+		return nil, nil, nil, fmt.Errorf("convert vmData(hardwareProfile) to map error")
+	}
+
+	dataDisks, ok = storageProfile["dataDisks"].([]interface{})
+	if !ok {
+		return nil, nil, nil, fmt.Errorf("convert vmData(dataDisks) to map error")
+	}
+	return dataDisks, storageProfile, hardwareProfile, nil
+}
+
+//ExtractDiskData : extract provisioningState, diskState from a map struct
+func ExtractDiskData(diskData interface{}) (provisioningState string, diskState string, err error) {
+	fragment, ok := diskData.(map[string]interface{})
+	if !ok {
+		return "", "", fmt.Errorf("convert diskData to map error")
+	}
+
+	properties, ok := fragment["properties"].(map[string]interface{})
+	if !ok {
+		return "", "", fmt.Errorf("convert diskData(properties) to map error")
+	}
+
+	provisioningState, ok = properties["provisioningState"].(string) // if there is a disk, provisioningState property will be there
+	if ref, ok := properties["diskState"]; ok {
+		diskState = ref.(string)
+	}
+	return provisioningState, diskState, nil
 }

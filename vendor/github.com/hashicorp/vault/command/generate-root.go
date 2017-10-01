@@ -13,6 +13,7 @@ import (
 	"github.com/hashicorp/vault/helper/pgpkeys"
 	"github.com/hashicorp/vault/helper/xor"
 	"github.com/hashicorp/vault/meta"
+	"github.com/posener/complete"
 )
 
 // GenerateRootCommand is a Command that generates a new root token.
@@ -267,7 +268,7 @@ func (c *GenerateRootCommand) dumpStatus(status *api.GenerateRootStatusResponse)
 	statString := fmt.Sprintf(
 		"Nonce: %s\n"+
 			"Started: %v\n"+
-			"Rekey Progress: %d\n"+
+			"Generate Root Progress: %d\n"+
 			"Required Keys: %d\n"+
 			"Complete: %t",
 		status.Nonce,
@@ -295,13 +296,13 @@ Usage: vault generate-root [options] [key]
 
   'generate-root' is used to create a new root token.
 
-  Root generation can only be done when the Vault is already unsealed. The
+  Root generation can only be done when the vault is already unsealed. The
   operation is done online, but requires that a threshold of the current unseal
   keys be provided.
 
-  One (and only one) of the following must be provided at attempt
-  initialization time:
-  
+  One (and only one) of the following must be provided when initializing the
+  root generation attempt:
+
   1) A 16-byte, base64-encoded One Time Password (OTP) provided in the '-otp'
   flag; the token is XOR'd with this value before it is returned once the final
   unseal key has been provided. The '-decode' operation can be used with this
@@ -313,10 +314,10 @@ Usage: vault generate-root [options] [key]
   2) A file containing a PGP key (binary or base64-encoded) or a Keybase.io
   username in the format of "keybase:<username>" in the '-pgp-key' flag. The
   final token value will be encrypted with this public key and base64-encoded.
-  
+
 General Options:
 ` + meta.GeneralOptionsUsage() + `
-Rekey Options:
+Generate Root Options:
 
   -init                   Initialize the root generation attempt. This can only
                           be done if no generation is already initiated.
@@ -351,4 +352,21 @@ Rekey Options:
                           instead be displayed with the key prompt.
 `
 	return strings.TrimSpace(helpText)
+}
+
+func (c *GenerateRootCommand) AutocompleteArgs() complete.Predictor {
+	return complete.PredictNothing
+}
+
+func (c *GenerateRootCommand) AutocompleteFlags() complete.Flags {
+	return complete.Flags{
+		"-init":    complete.PredictNothing,
+		"-cancel":  complete.PredictNothing,
+		"-status":  complete.PredictNothing,
+		"-decode":  complete.PredictNothing,
+		"-genotp":  complete.PredictNothing,
+		"-otp":     complete.PredictNothing,
+		"-pgp-key": complete.PredictNothing,
+		"-nonce":   complete.PredictNothing,
+	}
 }

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	uuid "github.com/hashicorp/go-uuid"
+	"github.com/hashicorp/vault/helper/keysutil"
 	"github.com/hashicorp/vault/logical"
 	"github.com/hashicorp/vault/logical/framework"
 	logicaltest "github.com/hashicorp/vault/logical/testing"
@@ -22,12 +23,29 @@ const (
 	testPlaintext = "the quick brown fox"
 )
 
+func createBackendWithStorage(t *testing.T) (*backend, logical.Storage) {
+	config := logical.TestBackendConfig()
+	config.StorageView = &logical.InmemStorage{}
+
+	b := Backend(config)
+	if b == nil {
+		t.Fatalf("failed to create backend")
+	}
+	err := b.Backend.Setup(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b, config.StorageView
+}
+
 func TestBackend_basic(t *testing.T) {
 	decryptData := make(map[string]interface{})
 	logicaltest.Test(t, logicaltest.TestCase{
 		Factory: Factory,
 		Steps: []logicaltest.TestStep{
+			testAccStepListPolicy(t, "test", true),
 			testAccStepWritePolicy(t, "test", false),
+			testAccStepListPolicy(t, "test", false),
 			testAccStepReadPolicy(t, "test", false, false),
 			testAccStepEncrypt(t, "test", testPlaintext, decryptData),
 			testAccStepDecrypt(t, "test", testPlaintext, decryptData),
@@ -53,7 +71,9 @@ func TestBackend_upsert(t *testing.T) {
 		Factory: Factory,
 		Steps: []logicaltest.TestStep{
 			testAccStepReadPolicy(t, "test", true, false),
+			testAccStepListPolicy(t, "test", true),
 			testAccStepEncryptUpsert(t, "test", testPlaintext, decryptData),
+			testAccStepListPolicy(t, "test", false),
 			testAccStepReadPolicy(t, "test", false, false),
 			testAccStepDecrypt(t, "test", testPlaintext, decryptData),
 		},
@@ -65,7 +85,9 @@ func TestBackend_datakey(t *testing.T) {
 	logicaltest.Test(t, logicaltest.TestCase{
 		Factory: Factory,
 		Steps: []logicaltest.TestStep{
+			testAccStepListPolicy(t, "test", true),
 			testAccStepWritePolicy(t, "test", false),
+			testAccStepListPolicy(t, "test", false),
 			testAccStepReadPolicy(t, "test", false, false),
 			testAccStepWriteDatakey(t, "test", false, 256, dataKeyInfo),
 			testAccStepDecryptDatakey(t, "test", dataKeyInfo),
@@ -80,7 +102,9 @@ func TestBackend_rotation(t *testing.T) {
 	logicaltest.Test(t, logicaltest.TestCase{
 		Factory: Factory,
 		Steps: []logicaltest.TestStep{
+			testAccStepListPolicy(t, "test", true),
 			testAccStepWritePolicy(t, "test", false),
+			testAccStepListPolicy(t, "test", false),
 			testAccStepEncryptVX(t, "test", testPlaintext, decryptData, 0, encryptHistory),
 			testAccStepEncryptVX(t, "test", testPlaintext, decryptData, 1, encryptHistory),
 			testAccStepRotate(t, "test"), // now v2
@@ -105,7 +129,9 @@ func TestBackend_rotation(t *testing.T) {
 			testAccStepLoadVX(t, "test", decryptData, 4, encryptHistory),
 			testAccStepDecrypt(t, "test", testPlaintext, decryptData),
 			testAccStepDeleteNotDisabledPolicy(t, "test"),
-			testAccStepAdjustPolicy(t, "test", 3),
+			testAccStepAdjustPolicyMinDecryption(t, "test", 3),
+			testAccStepAdjustPolicyMinEncryption(t, "test", 4),
+			testAccStepReadPolicyWithVersions(t, "test", false, false, 3, 4),
 			testAccStepLoadVX(t, "test", decryptData, 0, encryptHistory),
 			testAccStepDecryptExpectFailure(t, "test", testPlaintext, decryptData),
 			testAccStepLoadVX(t, "test", decryptData, 1, encryptHistory),
@@ -116,7 +142,8 @@ func TestBackend_rotation(t *testing.T) {
 			testAccStepDecrypt(t, "test", testPlaintext, decryptData),
 			testAccStepLoadVX(t, "test", decryptData, 4, encryptHistory),
 			testAccStepDecrypt(t, "test", testPlaintext, decryptData),
-			testAccStepAdjustPolicy(t, "test", 1),
+			testAccStepAdjustPolicyMinDecryption(t, "test", 1),
+			testAccStepReadPolicyWithVersions(t, "test", false, false, 1, 4),
 			testAccStepLoadVX(t, "test", decryptData, 0, encryptHistory),
 			testAccStepDecrypt(t, "test", testPlaintext, decryptData),
 			testAccStepLoadVX(t, "test", decryptData, 1, encryptHistory),
@@ -128,6 +155,7 @@ func TestBackend_rotation(t *testing.T) {
 			testAccStepEnableDeletion(t, "test"),
 			testAccStepDeletePolicy(t, "test"),
 			testAccStepReadPolicy(t, "test", true, false),
+			testAccStepListPolicy(t, "test", true),
 		},
 	})
 }
@@ -137,7 +165,9 @@ func TestBackend_basic_derived(t *testing.T) {
 	logicaltest.Test(t, logicaltest.TestCase{
 		Factory: Factory,
 		Steps: []logicaltest.TestStep{
+			testAccStepListPolicy(t, "test", true),
 			testAccStepWritePolicy(t, "test", true),
+			testAccStepListPolicy(t, "test", false),
 			testAccStepReadPolicy(t, "test", false, true),
 			testAccStepEncryptContext(t, "test", testPlaintext, "my-cool-context", decryptData),
 			testAccStepDecrypt(t, "test", testPlaintext, decryptData),
@@ -158,12 +188,57 @@ func testAccStepWritePolicy(t *testing.T, name string, derived bool) logicaltest
 	}
 }
 
-func testAccStepAdjustPolicy(t *testing.T, name string, minVer int) logicaltest.TestStep {
+func testAccStepListPolicy(t *testing.T, name string, expectNone bool) logicaltest.TestStep {
+	return logicaltest.TestStep{
+		Operation: logical.ListOperation,
+		Path:      "keys",
+		Check: func(resp *logical.Response) error {
+			if resp == nil {
+				return fmt.Errorf("missing response")
+			}
+			if expectNone {
+				keysRaw, ok := resp.Data["keys"]
+				if ok || keysRaw != nil {
+					return fmt.Errorf("response data when expecting none")
+				}
+				return nil
+			}
+			if len(resp.Data) == 0 {
+				return fmt.Errorf("no data returned")
+			}
+
+			var d struct {
+				Keys []string `mapstructure:"keys"`
+			}
+			if err := mapstructure.Decode(resp.Data, &d); err != nil {
+				return err
+			}
+			if len(d.Keys) > 0 && d.Keys[0] != name {
+				return fmt.Errorf("bad name: %#v", d)
+			}
+			if len(d.Keys) != 1 {
+				return fmt.Errorf("only 1 key expected, %d returned", len(d.Keys))
+			}
+			return nil
+		},
+	}
+}
+
+func testAccStepAdjustPolicyMinDecryption(t *testing.T, name string, minVer int) logicaltest.TestStep {
 	return logicaltest.TestStep{
 		Operation: logical.UpdateOperation,
 		Path:      "keys/" + name + "/config",
 		Data: map[string]interface{}{
 			"min_decryption_version": minVer,
+		},
+	}
+}
+func testAccStepAdjustPolicyMinEncryption(t *testing.T, name string, minVer int) logicaltest.TestStep {
+	return logicaltest.TestStep{
+		Operation: logical.UpdateOperation,
+		Path:      "keys/" + name + "/config",
+		Data: map[string]interface{}{
+			"min_encryption_version": minVer,
 		},
 	}
 }
@@ -213,6 +288,10 @@ func testAccStepDeleteNotDisabledPolicy(t *testing.T, name string) logicaltest.T
 }
 
 func testAccStepReadPolicy(t *testing.T, name string, expectNone, derived bool) logicaltest.TestStep {
+	return testAccStepReadPolicyWithVersions(t, name, expectNone, derived, 1, 0)
+}
+
+func testAccStepReadPolicyWithVersions(t *testing.T, name string, expectNone, derived bool, minDecryptionVersion int, minEncryptionVersion int) logicaltest.TestStep {
 	return logicaltest.TestStep{
 		Operation: logical.ReadOperation,
 		Path:      "keys/" + name,
@@ -234,6 +313,8 @@ func testAccStepReadPolicy(t *testing.T, name string, expectNone, derived bool) 
 				KDF                  string           `mapstructure:"kdf"`
 				DeletionAllowed      bool             `mapstructure:"deletion_allowed"`
 				ConvergentEncryption bool             `mapstructure:"convergent_encryption"`
+				MinDecryptionVersion int              `mapstructure:"min_decryption_version"`
+				MinEncryptionVersion int              `mapstructure:"min_encryption_version"`
 			}
 			if err := mapstructure.Decode(resp.Data, &d); err != nil {
 				return err
@@ -242,7 +323,7 @@ func testAccStepReadPolicy(t *testing.T, name string, expectNone, derived bool) 
 			if d.Name != name {
 				return fmt.Errorf("bad name: %#v", d)
 			}
-			if d.Type != KeyType(keyType_AES256_GCM96).String() {
+			if d.Type != keysutil.KeyType(keysutil.KeyType_AES256_GCM96).String() {
 				return fmt.Errorf("bad key type: %#v", d)
 			}
 			// Should NOT get a key back
@@ -250,6 +331,12 @@ func testAccStepReadPolicy(t *testing.T, name string, expectNone, derived bool) 
 				return fmt.Errorf("bad: %#v", d)
 			}
 			if d.Keys == nil {
+				return fmt.Errorf("bad: %#v", d)
+			}
+			if d.MinDecryptionVersion != minDecryptionVersion {
+				return fmt.Errorf("bad: %#v", d)
+			}
+			if d.MinEncryptionVersion != minEncryptionVersion {
 				return fmt.Errorf("bad: %#v", d)
 			}
 			if d.DeletionAllowed == true {
@@ -536,18 +623,18 @@ func testAccStepDecryptDatakey(t *testing.T, name string,
 
 func TestKeyUpgrade(t *testing.T) {
 	key, _ := uuid.GenerateRandomBytes(32)
-	p := &policy{
+	p := &keysutil.Policy{
 		Name: "test",
 		Key:  key,
-		Type: keyType_AES256_GCM96,
+		Type: keysutil.KeyType_AES256_GCM96,
 	}
 
-	p.migrateKeyToKeysMap()
+	p.MigrateKeyToKeysMap()
 
 	if p.Key != nil ||
 		p.Keys == nil ||
 		len(p.Keys) != 1 ||
-		!reflect.DeepEqual(p.Keys[1].AESKey, key) {
+		!reflect.DeepEqual(p.Keys[1].Key, key) {
 		t.Errorf("bad key migration, result is %#v", p.Keys)
 	}
 }
@@ -557,18 +644,18 @@ func TestDerivedKeyUpgrade(t *testing.T) {
 	key, _ := uuid.GenerateRandomBytes(32)
 	context, _ := uuid.GenerateRandomBytes(32)
 
-	p := &policy{
+	p := &keysutil.Policy{
 		Name:    "test",
 		Key:     key,
-		Type:    keyType_AES256_GCM96,
+		Type:    keysutil.KeyType_AES256_GCM96,
 		Derived: true,
 	}
 
-	p.migrateKeyToKeysMap()
-	p.upgrade(storage) // Need to run the upgrade code to make the migration stick
+	p.MigrateKeyToKeysMap()
+	p.Upgrade(storage) // Need to run the upgrade code to make the migration stick
 
-	if p.KDF != kdf_hmac_sha256_counter {
-		t.Fatalf("bad KDF value by default; counter val is %d, KDF val is %d, policy is %#v", kdf_hmac_sha256_counter, p.KDF, *p)
+	if p.KDF != keysutil.Kdf_hmac_sha256_counter {
+		t.Fatalf("bad KDF value by default; counter val is %d, KDF val is %d, policy is %#v", keysutil.Kdf_hmac_sha256_counter, p.KDF, *p)
 	}
 
 	derBytesOld, err := p.DeriveKey(context, 1)
@@ -585,8 +672,8 @@ func TestDerivedKeyUpgrade(t *testing.T) {
 		t.Fatal("mismatch of same context alg")
 	}
 
-	p.KDF = kdf_hkdf_sha256
-	if p.needsUpgrade() {
+	p.KDF = keysutil.Kdf_hkdf_sha256
+	if p.NeedsUpgrade() {
 		t.Fatal("expected no upgrade needed")
 	}
 
@@ -645,15 +732,15 @@ func testConvergentEncryptionCommon(t *testing.T, ver int) {
 		t.Fatalf("bad: expected error response, got %#v", *resp)
 	}
 
-	p := &policy{
+	p := &keysutil.Policy{
 		Name:                 "testkey",
-		Type:                 keyType_AES256_GCM96,
+		Type:                 keysutil.KeyType_AES256_GCM96,
 		Derived:              true,
 		ConvergentEncryption: true,
 		ConvergentVersion:    ver,
 	}
 
-	err = p.rotate(storage)
+	err = p.Rotate(storage)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -667,6 +754,9 @@ func testConvergentEncryptionCommon(t *testing.T, ver int) {
 			"context":   "pWZ6t/im3AORd0lVYE0zBdKpX6Bl3/SvFtoVTPWbdkzjG788XmMAnOlxandSdd7S",
 		}
 		resp, err = b.HandleRequest(req)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
 		if resp == nil {
 			t.Fatal("expected non-nil response")
 		}
@@ -692,6 +782,9 @@ func testConvergentEncryptionCommon(t *testing.T, ver int) {
 		"context":   "pWZ6t/im3AORd0lVYE0zBdKpX6Bl3/SvFtoVTPWbdkzjG788XmMAnOlxandSdd7S",
 	}
 	resp, err = b.HandleRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp == nil {
 		t.Fatal("expected non-nil response")
 	}
@@ -701,6 +794,9 @@ func testConvergentEncryptionCommon(t *testing.T, ver int) {
 	ciphertext1 := resp.Data["ciphertext"].(string)
 
 	resp, err = b.HandleRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp == nil {
 		t.Fatal("expected non-nil response")
 	}
@@ -726,6 +822,9 @@ func testConvergentEncryptionCommon(t *testing.T, ver int) {
 	}
 
 	resp, err = b.HandleRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp == nil {
 		t.Fatal("expected non-nil response")
 	}
@@ -735,6 +834,9 @@ func testConvergentEncryptionCommon(t *testing.T, ver int) {
 	ciphertext3 := resp.Data["ciphertext"].(string)
 
 	resp, err = b.HandleRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp == nil {
 		t.Fatal("expected non-nil response")
 	}
@@ -757,6 +859,9 @@ func testConvergentEncryptionCommon(t *testing.T, ver int) {
 		"context":   "qV4h9iQyvn+raODOer4JNAsOhkXBwdT4HZ677Ql4KLqXSU+Jk4C/fXBWbv6xkSYT",
 	}
 	resp, err = b.HandleRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp == nil {
 		t.Fatal("expected non-nil response")
 	}
@@ -766,6 +871,9 @@ func testConvergentEncryptionCommon(t *testing.T, ver int) {
 	ciphertext5 := resp.Data["ciphertext"].(string)
 
 	resp, err = b.HandleRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp == nil {
 		t.Fatal("expected non-nil response")
 	}
@@ -791,6 +899,9 @@ func testConvergentEncryptionCommon(t *testing.T, ver int) {
 		"context": "pWZ6t/im3AORd0lVYE0zBdKpX6Bl3/SvFtoVTPWbdkzjG788XmMAnOlxandSdd7S",
 	}
 	resp, err = b.HandleRequest(req)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
 	if resp == nil {
 		t.Fatal("expected non-nil response")
 	}
@@ -805,6 +916,9 @@ func testConvergentEncryptionCommon(t *testing.T, ver int) {
 		"context":   "pWZ6t/im3AORd0lVYE0zBdKpX6Bl3/SvFtoVTPWbdkzjG788XmMAnOlxandSdd7S",
 	}
 	resp, err = b.HandleRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp == nil {
 		t.Fatal("expected non-nil response")
 	}
@@ -814,6 +928,9 @@ func testConvergentEncryptionCommon(t *testing.T, ver int) {
 	ciphertext7 := resp.Data["ciphertext"].(string)
 
 	resp, err = b.HandleRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resp == nil {
 		t.Fatal("expected non-nil response")
 	}
@@ -929,7 +1046,7 @@ func testPolicyFuzzingCommon(t *testing.T, be *backend) {
 				resp, err := be.pathDecryptWrite(req, fd)
 				if err != nil {
 					// This could well happen since the min version is jumping around
-					if resp.Data["error"].(string) == ErrTooOld {
+					if resp.Data["error"].(string) == keysutil.ErrTooOld {
 						continue
 					}
 					t.Fatalf("got an error: %v, resp is %#v, ciphertext was %s, chosenKey is %s, id is %d", err, *resp, ct, chosenKey, id)

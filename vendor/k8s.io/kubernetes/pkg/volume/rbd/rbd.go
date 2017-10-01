@@ -21,16 +21,18 @@ import (
 	dstrings "strings"
 
 	"github.com/golang/glog"
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/resource"
-	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
-	"k8s.io/kubernetes/pkg/types"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/uuid"
+	"k8s.io/kubernetes/pkg/api/v1"
+	"k8s.io/kubernetes/pkg/client/clientset_generated/clientset"
 	"k8s.io/kubernetes/pkg/util/exec"
 	"k8s.io/kubernetes/pkg/util/mount"
 	"k8s.io/kubernetes/pkg/util/strings"
-	"k8s.io/kubernetes/pkg/util/uuid"
 	"k8s.io/kubernetes/pkg/volume"
 	volutil "k8s.io/kubernetes/pkg/volume/util"
+	"k8s.io/kubernetes/pkg/volume/util/volumehelper"
 )
 
 // This is the primary entrypoint for volume plugins.
@@ -49,11 +51,8 @@ var _ volume.DeletableVolumePlugin = &rbdPlugin{}
 var _ volume.ProvisionableVolumePlugin = &rbdPlugin{}
 
 const (
-	rbdPluginName               = "kubernetes.io/rbd"
-	annCephAdminID              = "rbd.kubernetes.io/admin"
-	annCephAdminSecretName      = "rbd.kubernetes.io/adminsecretname"
-	annCephAdminSecretNameSpace = "rbd.kubernetes.io/adminsecretnamespace"
-	secretKeyName               = "key" // key name used in secret
+	rbdPluginName = "kubernetes.io/rbd"
+	secretKeyName = "key" // key name used in secret
 )
 
 func (plugin *rbdPlugin) Init(host volume.VolumeHost) error {
@@ -89,20 +88,28 @@ func (plugin *rbdPlugin) RequiresRemount() bool {
 	return false
 }
 
-func (plugin *rbdPlugin) GetAccessModes() []api.PersistentVolumeAccessMode {
-	return []api.PersistentVolumeAccessMode{
-		api.ReadWriteOnce,
-		api.ReadOnlyMany,
+func (plugin *rbdPlugin) SupportsMountOption() bool {
+	return true
+}
+
+func (plugin *rbdPlugin) SupportsBulkVolumeVerification() bool {
+	return false
+}
+
+func (plugin *rbdPlugin) GetAccessModes() []v1.PersistentVolumeAccessMode {
+	return []v1.PersistentVolumeAccessMode{
+		v1.ReadWriteOnce,
+		v1.ReadOnlyMany,
 	}
 }
 
-func (plugin *rbdPlugin) NewMounter(spec *volume.Spec, pod *api.Pod, _ volume.VolumeOptions) (volume.Mounter, error) {
+func (plugin *rbdPlugin) NewMounter(spec *volume.Spec, pod *v1.Pod, _ volume.VolumeOptions) (volume.Mounter, error) {
 	var secret string
 	var err error
 	source, _ := plugin.getRBDVolumeSource(spec)
 
 	if source.SecretRef != nil {
-		if secret, err = parseSecret(pod.Namespace, source.SecretRef.Name, plugin.host.GetKubeClient()); err != nil {
+		if secret, err = parsePodSecret(pod, source.SecretRef.Name, plugin.host.GetKubeClient()); err != nil {
 			glog.Errorf("Couldn't get secret from %v/%v", pod.Namespace, source.SecretRef)
 			return nil, err
 		}
@@ -112,7 +119,7 @@ func (plugin *rbdPlugin) NewMounter(spec *volume.Spec, pod *api.Pod, _ volume.Vo
 	return plugin.newMounterInternal(spec, pod.UID, &RBDUtil{}, plugin.host.GetMounter(), secret)
 }
 
-func (plugin *rbdPlugin) getRBDVolumeSource(spec *volume.Spec) (*api.RBDVolumeSource, bool) {
+func (plugin *rbdPlugin) getRBDVolumeSource(spec *volume.Spec) (*v1.RBDVolumeSource, bool) {
 	// rbd volumes used directly in a pod have a ReadOnly flag set by the pod author.
 	// rbd volumes used as a PersistentVolume gets the ReadOnly flag indirectly through the persistent-claim volume used to mount the PV
 	if spec.Volume != nil && spec.Volume.RBD != nil {
@@ -139,11 +146,12 @@ func (plugin *rbdPlugin) newMounterInternal(spec *volume.Spec, podUID types.UID,
 			mounter:  &mount.SafeFormatAndMount{Interface: mounter, Runner: exec.New()},
 			plugin:   plugin,
 		},
-		Mon:     source.CephMonitors,
-		Id:      id,
-		Keyring: keyring,
-		Secret:  secret,
-		fsType:  source.FSType,
+		Mon:          source.CephMonitors,
+		Id:           id,
+		Keyring:      keyring,
+		Secret:       secret,
+		fsType:       source.FSType,
+		mountOptions: volume.MountOptionFromSpec(spec),
 	}, nil
 }
 
@@ -168,10 +176,10 @@ func (plugin *rbdPlugin) newUnmounterInternal(volName string, podUID types.UID, 
 }
 
 func (plugin *rbdPlugin) ConstructVolumeSpec(volumeName, mountPath string) (*volume.Spec, error) {
-	rbdVolume := &api.Volume{
+	rbdVolume := &v1.Volume{
 		Name: volumeName,
-		VolumeSource: api.VolumeSource{
-			RBD: &api.RBDVolumeSource{
+		VolumeSource: v1.VolumeSource{
+			RBD: &v1.RBDVolumeSource{
 				CephMonitors: []string{},
 			},
 		},
@@ -183,15 +191,28 @@ func (plugin *rbdPlugin) NewDeleter(spec *volume.Spec) (volume.Deleter, error) {
 	if spec.PersistentVolume != nil && spec.PersistentVolume.Spec.RBD == nil {
 		return nil, fmt.Errorf("spec.PersistentVolumeSource.Spec.RBD is nil")
 	}
-	admin, adminSecretName, adminSecretNamespace, err := annotationsToParam(spec.PersistentVolume)
+	class, err := volutil.GetClassForVolume(plugin.host.GetKubeClient(), spec.PersistentVolume)
 	if err != nil {
-		return nil, fmt.Errorf("cannot find Ceph credentials to delete rbd PV: %v", err)
+		return nil, err
+	}
+	adminSecretName := ""
+	adminSecretNamespace := "default"
+	admin := ""
+
+	for k, v := range class.Parameters {
+		switch dstrings.ToLower(k) {
+		case "adminid":
+			admin = v
+		case "adminsecretname":
+			adminSecretName = v
+		case "adminsecretnamespace":
+			adminSecretNamespace = v
+		}
 	}
 
-	secret, err := parseSecret(adminSecretNamespace, adminSecretName, plugin.host.GetKubeClient())
+	secret, err := parsePVSecret(adminSecretNamespace, adminSecretName, plugin.host.GetKubeClient())
 	if err != nil {
-		// log error but don't return yet
-		glog.Errorf("failed to get admin secret from [%q/%q]: %v", adminSecretNamespace, adminSecretName, err)
+		return nil, fmt.Errorf("failed to get admin secret from [%q/%q]: %v", adminSecretNamespace, adminSecretName, err)
 	}
 	return plugin.newDeleterInternal(spec, admin, secret, &RBDUtil{})
 }
@@ -213,9 +234,6 @@ func (plugin *rbdPlugin) newDeleterInternal(spec *volume.Spec, admin, secret str
 }
 
 func (plugin *rbdPlugin) NewProvisioner(options volume.VolumeOptions) (volume.Provisioner, error) {
-	if len(options.AccessModes) == 0 {
-		options.AccessModes = plugin.GetAccessModes()
-	}
 	return plugin.newProvisionerInternal(options, &RBDUtil{})
 }
 
@@ -236,8 +254,12 @@ type rbdVolumeProvisioner struct {
 	options volume.VolumeOptions
 }
 
-func (r *rbdVolumeProvisioner) Provision() (*api.PersistentVolume, error) {
-	if r.options.Selector != nil {
+func (r *rbdVolumeProvisioner) Provision() (*v1.PersistentVolume, error) {
+	if !volume.AccessModesContainedInAll(r.plugin.GetAccessModes(), r.options.PVC.Spec.AccessModes) {
+		return nil, fmt.Errorf("invalid AccessModes %v: only AccessModes %v are supported", r.options.PVC.Spec.AccessModes, r.plugin.GetAccessModes())
+	}
+
+	if r.options.PVC.Spec.Selector != nil {
 		return nil, fmt.Errorf("claim Selector is not supported")
 	}
 	var err error
@@ -273,9 +295,8 @@ func (r *rbdVolumeProvisioner) Provision() (*api.PersistentVolume, error) {
 	if adminSecretName == "" {
 		return nil, fmt.Errorf("missing Ceph admin secret name")
 	}
-	if secret, err = parseSecret(adminSecretNamespace, adminSecretName, r.plugin.host.GetKubeClient()); err != nil {
-		// log error but don't return yet
-		glog.Errorf("failed to get admin secret from [%q/%q]", adminSecretNamespace, adminSecretName)
+	if secret, err = parsePVSecret(adminSecretNamespace, adminSecretName, r.plugin.host.GetKubeClient()); err != nil {
+		return nil, fmt.Errorf("failed to get admin secret from [%q/%q]: %v", adminSecretNamespace, adminSecretName, err)
 	}
 	r.adminSecret = secret
 	if len(r.Mon) < 1 {
@@ -300,21 +321,23 @@ func (r *rbdVolumeProvisioner) Provision() (*api.PersistentVolume, error) {
 	rbd, sizeMB, err := r.manager.CreateImage(r)
 	if err != nil {
 		glog.Errorf("rbd: create volume failed, err: %v", err)
-		return nil, fmt.Errorf("rbd: create volume failed, err: %v", err)
+		return nil, err
 	}
 	glog.Infof("successfully created rbd image %q", image)
-	pv := new(api.PersistentVolume)
-	rbd.SecretRef = new(api.LocalObjectReference)
+	pv := new(v1.PersistentVolume)
+	metav1.SetMetaDataAnnotation(&pv.ObjectMeta, volumehelper.VolumeDynamicallyCreatedByKey, "rbd-dynamic-provisioner")
+	rbd.SecretRef = new(v1.LocalObjectReference)
 	rbd.SecretRef.Name = secretName
 	rbd.RadosUser = r.Id
 	pv.Spec.PersistentVolumeSource.RBD = rbd
 	pv.Spec.PersistentVolumeReclaimPolicy = r.options.PersistentVolumeReclaimPolicy
-	pv.Spec.AccessModes = r.options.AccessModes
-	pv.Spec.Capacity = api.ResourceList{
-		api.ResourceName(api.ResourceStorage): resource.MustParse(fmt.Sprintf("%dMi", sizeMB)),
+	pv.Spec.AccessModes = r.options.PVC.Spec.AccessModes
+	if len(pv.Spec.AccessModes) == 0 {
+		pv.Spec.AccessModes = r.plugin.GetAccessModes()
 	}
-	// place parameters in pv selector
-	paramToAnnotations(r.adminId, adminSecretNamespace, adminSecretName, pv)
+	pv.Spec.Capacity = v1.ResourceList{
+		v1.ResourceName(v1.ResourceStorage): resource.MustParse(fmt.Sprintf("%dMi", sizeMB)),
+	}
 	return pv, nil
 }
 
@@ -329,36 +352,6 @@ func (r *rbdVolumeDeleter) GetPath() string {
 
 func (r *rbdVolumeDeleter) Delete() error {
 	return r.manager.DeleteImage(r)
-}
-
-func paramToAnnotations(admin, adminSecretNamespace, adminSecretName string, pv *api.PersistentVolume) {
-	if pv.Annotations == nil {
-		pv.Annotations = make(map[string]string)
-	}
-	pv.Annotations[annCephAdminID] = admin
-	pv.Annotations[annCephAdminSecretName] = adminSecretName
-	pv.Annotations[annCephAdminSecretNameSpace] = adminSecretNamespace
-}
-
-func annotationsToParam(pv *api.PersistentVolume) (string, string, string, error) {
-	if pv.Annotations == nil {
-		return "", "", "", fmt.Errorf("PV has no annotation, cannot get Ceph admin credentials")
-	}
-	var admin, adminSecretName, adminSecretNamespace string
-	found := false
-	admin, found = pv.Annotations[annCephAdminID]
-	if !found {
-		return "", "", "", fmt.Errorf("Cannot get Ceph admin id from PV annotations")
-	}
-	adminSecretName, found = pv.Annotations[annCephAdminSecretName]
-	if !found {
-		return "", "", "", fmt.Errorf("Cannot get Ceph admin secret from PV annotations")
-	}
-	adminSecretNamespace, found = pv.Annotations[annCephAdminSecretNameSpace]
-	if !found {
-		return "", "", "", fmt.Errorf("Cannot get Ceph admin secret namespace from PV annotations")
-	}
-	return admin, adminSecretName, adminSecretNamespace, nil
 }
 
 type rbd struct {
@@ -383,13 +376,14 @@ func (rbd *rbd) GetPath() string {
 type rbdMounter struct {
 	*rbd
 	// capitalized so they can be exported in persistRBD()
-	Mon         []string
-	Id          string
-	Keyring     string
-	Secret      string
-	fsType      string
-	adminSecret string
-	adminId     string
+	Mon          []string
+	Id           string
+	Keyring      string
+	Secret       string
+	fsType       string
+	adminSecret  string
+	adminId      string
+	mountOptions []string
 }
 
 var _ volume.Mounter = &rbdMounter{}
@@ -400,6 +394,13 @@ func (b *rbd) GetAttributes() volume.Attributes {
 		Managed:         !b.ReadOnly,
 		SupportsSELinux: true,
 	}
+}
+
+// Checks prior to mount operations to verify that the required components (binaries, etc.)
+// to mount the volume are available on the underlying node.
+// If not, it returns an error
+func (b *rbdMounter) CanMount() error {
+	return nil
 }
 
 func (b *rbdMounter) SetUp(fsGroup *int64) error {
@@ -429,6 +430,12 @@ func (c *rbdUnmounter) TearDown() error {
 }
 
 func (c *rbdUnmounter) TearDownAt(dir string) error {
+	if pathExists, pathErr := volutil.PathExists(dir); pathErr != nil {
+		return fmt.Errorf("Error checking if path exists: %v", pathErr)
+	} else if !pathExists {
+		glog.Warningf("Warning: Unmount skipped because path does not exist: %v", dir)
+		return nil
+	}
 	return diskTearDown(c.manager, *c, dir, c.mounter)
 }
 
@@ -438,7 +445,7 @@ func (plugin *rbdPlugin) execCommand(command string, args []string) ([]byte, err
 }
 
 func getVolumeSource(
-	spec *volume.Spec) (*api.RBDVolumeSource, bool, error) {
+	spec *volume.Spec) (*v1.RBDVolumeSource, bool, error) {
 	if spec.Volume != nil && spec.Volume.RBD != nil {
 		return spec.Volume.RBD, spec.Volume.RBD.ReadOnly, nil
 	} else if spec.PersistentVolume != nil &&
@@ -449,13 +456,26 @@ func getVolumeSource(
 	return nil, false, fmt.Errorf("Spec does not reference a RBD volume type")
 }
 
-// parseSecretMap locates the secret by key name.
-func parseSecret(namespace, secretName string, kubeClient clientset.Interface) (string, error) {
-	secretMap, err := volutil.GetSecret(namespace, secretName, kubeClient)
+func parsePodSecret(pod *v1.Pod, secretName string, kubeClient clientset.Interface) (string, error) {
+	secret, err := volutil.GetSecretForPod(pod, secretName, kubeClient)
+	if err != nil {
+		glog.Errorf("failed to get secret from [%q/%q]", pod.Namespace, secretName)
+		return "", fmt.Errorf("failed to get secret from [%q/%q]", pod.Namespace, secretName)
+	}
+	return parseSecretMap(secret)
+}
+
+func parsePVSecret(namespace, secretName string, kubeClient clientset.Interface) (string, error) {
+	secret, err := volutil.GetSecretForPV(namespace, secretName, rbdPluginName, kubeClient)
 	if err != nil {
 		glog.Errorf("failed to get secret from [%q/%q]", namespace, secretName)
 		return "", fmt.Errorf("failed to get secret from [%q/%q]", namespace, secretName)
 	}
+	return parseSecretMap(secret)
+}
+
+// parseSecretMap locates the secret by key name.
+func parseSecretMap(secretMap map[string]string) (string, error) {
 	if len(secretMap) == 0 {
 		return "", fmt.Errorf("empty secret map")
 	}
