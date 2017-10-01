@@ -24,7 +24,7 @@ import (
 	"time"
 
 	"github.com/Sirupsen/logrus"
-	"k8s.io/kubernetes/pkg/apis/extensions"
+	extensions_v1beta1 "k8s.io/client-go/pkg/apis/extensions/v1beta1"
 )
 
 // reconcileIngress is responsible for processing the ingress resources
@@ -39,7 +39,7 @@ func (c *controller) reconcileIngress() {
 	}
 
 	// step: check if the ingress resources have changed
-	resources := c.resources.Load().(*extensions.IngressList)
+	resources := c.resources.Load().(*extensions_v1beta1.IngressList)
 	if reflect.DeepEqual(resources, list) {
 		logrus.Debugf("nothing to do, the ingress resource have not changed")
 		return
@@ -128,7 +128,7 @@ func (c *controller) reconcileIngress() {
 }
 
 // makeCertificateRequest is responsible for making a request to the store for a certificate
-func (c *controller) makeCertificateRequest(ingress *extensions.Ingress, tls *extensions.IngressTLS) error {
+func (c *controller) makeCertificateRequest(ingress *extensions_v1beta1.Ingress, tls *extensions_v1beta1.IngressTLS) error {
 	// step: make a request for the certificate from vault
 	path := c.config.defaultPath
 	if override, found := ingress.GetAnnotations()[AnnotationVaultPath]; found {
@@ -185,7 +185,7 @@ func (c *controller) checkCertificateExpiring(name, namespace, secret string) (b
 }
 
 // isIngressOK is responsible for validating the ingress resource
-func isIngressOK(ing *extensions.Ingress) error {
+func isIngressOK(ing *extensions_v1beta1.Ingress) error {
 	if len(ing.Spec.TLS) <= 0 {
 		return errors.New("no tls settings")
 	}

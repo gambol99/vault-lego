@@ -24,8 +24,8 @@ import (
 
 	"github.com/Sirupsen/logrus"
 	"github.com/hashicorp/vault/api"
-	client "k8s.io/kubernetes/pkg/client/unversioned"
-	"k8s.io/kubernetes/pkg/util/flowcontrol"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/util/flowcontrol"
 )
 
 // controller is the handler for requests and renewals
@@ -35,7 +35,7 @@ type controller struct {
 	// the vault client
 	vc *api.Client
 	// kubernetes client
-	kc *client.Client
+	kc *kubernetes.Clientset
 	// the current list of ingress resources
 	resources atomic.Value
 	// the reconcile rate limiter
