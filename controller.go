@@ -87,7 +87,13 @@ func isValidConfig(config *Config) error {
 		return errors.New("no vault token")
 	}
 	if config.minCertTTL > config.defaultCertTTL {
-		return errors.New("minimum certificate ttl cannot be greater then default")
+		return errors.New("minimum certificate ttl cannot be greater than default")
+	}
+	if config.refreshCertTTL < 6*time.Hour {
+		return errors.New("refresh certificate ttl cannot be lower than 6h")
+	}
+	if config.refreshCertTTL > config.minCertTTL-6*time.Hour {
+		return errors.New("refresh certificate ttl cannot be greater than the minimum-ttl - 6h")
 	}
 
 	return nil

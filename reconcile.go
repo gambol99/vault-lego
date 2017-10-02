@@ -137,10 +137,24 @@ func (c *controller) makeCertificateRequest(ingress *extensions_v1beta1.Ingress,
 	ttl := c.config.defaultCertTTL
 	if override, found := ingress.GetAnnotations()[AnnotationVaultTTL]; found {
 		tm, err := time.ParseDuration(override)
-		if err == nil {
+		if err != nil {
+			logrus.WithFields(logrus.Fields{
+				"name":        ingress.Name,
+				"namespace":   ingress.Namespace,
+				"ttl":         override,
+				"default-ttl": ttl.String(),
+				"error":       err.Error(),
+			}).Warn("failed parsing configured ttl, using default-ttl instead")
+		} else if tm < c.config.minCertTTL {
+			logrus.WithFields(logrus.Fields{
+				"name":        ingress.Name,
+				"namespace":   ingress.Namespace,
+				"ttl":         tm.String(),
+				"minimum-ttl": c.config.minCertTTL.String(),
+			}).Warn("configured ttl is too small, using minimum-ttl instead")
+		} else {
 			ttl = tm
 		}
-
 	}
 	logrus.WithFields(logrus.Fields{
 		"name":      ingress.Name,
@@ -176,7 +190,7 @@ func (c *controller) checkCertificateExpiring(name, namespace, secret string) (b
 	}).Debugf("checking if the certifacte is expiring")
 
 	// step: check if the certificate is expiring
-	expired, err := isCertificateExpiring(cert.cert, time.Duration(-6*time.Hour))
+	expired, err := isCertificateExpiring(cert.cert, c.config.refreshCertTTL)
 	if err != nil {
 		return false, err
 	}

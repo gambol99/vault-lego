@@ -53,6 +53,8 @@ type Config struct {
 	minCertTTL time.Duration
 	// the default ttl
 	defaultCertTTL time.Duration
+	// the refresh ttl
+	refreshCertTTL time.Duration
 	// the default path
 	defaultPath string
 	// is the interval between reconcilation

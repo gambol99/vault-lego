@@ -77,7 +77,7 @@ func isCertificateExpiring(content []byte, threshold time.Duration) (bool, error
 	if time.Now().After(crt.NotAfter) {
 		return true, nil
 	}
-	if time.Now().After(crt.NotAfter.Add(threshold)) {
+	if time.Now().After(crt.NotAfter.Add(-threshold)) {
 		return true, nil
 	}
 
