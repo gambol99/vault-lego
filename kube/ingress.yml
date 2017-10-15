@@ -3,18 +3,18 @@ kind: Ingress
 metadata:
   annotations:
     ingress.vault.io/tls: "true"
-    ingress.vault.io/ttl: "10h"
-    ingress.vault.io/path: pki/default
-  name: clair
+    ingress.vault.io/ttl: "24h"
+    ingress.vault.io/path: pki/issue/default
+  name: vault
 spec:
   rules:
-  - host: site.example.com
+  - host: vault.example.com
     http:
       paths:
       - backend:
-          serviceName: clair
-          servicePort: 443
+          serviceName: vault
+          servicePort: 8200
   tls:
   - hosts:
-    - site.example.com
-    secretName: tls
+    - vault.example.com
+    secretName: ingress-tls

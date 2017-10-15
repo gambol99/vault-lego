@@ -135,3 +135,13 @@ spec:
     - site.example.com
     secretName: tls
 ```
+
+#### **Example Vault setup**
+
+```bash
+vault mount pki
+vault mount-tune -max-lease-ttl=8760h pki
+vault write pki/root/generate/internal common_name="My Vault ROOT" ttl=8760h
+vault write pki/roles/default allow_any_name=true max_ttl="720h"
+
+```
