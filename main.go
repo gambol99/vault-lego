@@ -45,7 +45,7 @@ func main() {
 		},
 		cli.StringFlag{
 			Name:   "default-path, p",
-			Usage:  "the default vault path the pki exists on, e.g. pki/default/issue `PATH`",
+			Usage:  "the default vault path the pki exists on, e.g. pki/issue/default `PATH`",
 			EnvVar: "VAULT_PKI_PATH",
 			Value:  "pki/issue/default",
 		},

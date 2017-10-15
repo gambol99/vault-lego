@@ -30,13 +30,14 @@ import (
 // hasSecret checks if the secret exists for the namespace
 func (c *controller) hasSecret(name, namespace string) (bool, error) {
 	// step: get a list of all secrets
-	//list, err := c.kc.Secrets(namespace).List(api.ListOptions{})
-	secret, err := c.kc.Secrets(namespace).Get(name, meta_v1.GetOptions{})
+	list, err := c.kc.Secrets(namespace).List(meta_v1.ListOptions{})
 	if err != nil {
 		return false, err
 	}
-	if secret != nil {
-		return true, nil
+	for _, x := range list.Items {
+		if x.Name == name {
+			return true, nil
+		}
 	}
 	return false, nil
 }
