@@ -1,5 +1,5 @@
 FROM fedora:24
-MAINTAINER Rohith <gambol99@gmail.com>
+LABEL maintainer="gambol99@gmail.com"
 
 ADD bin/vault-lego /vault-lego
 

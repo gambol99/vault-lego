@@ -1,7 +1,5 @@
-[![Build Status](https://travis-ci.org/gambol99/vault-lego.svg?branch=master)](https://travis-ci.org/gambol99/vault-lego)
-[![GoDoc](http://godoc.org/github.com/gambol99/vault-lego?status.png)](http://godoc.org/github.com/gambol99/vault-lego)
-[![Docker Repository on Quay](https://quay.io/repository/gambol99/vault-lego/status "Docker Repository on Quay")](https://quay.io/repository/gambol99/vault-lego)
-[![GitHub version](https://badge.fury.io/gh/gambol99%2Fvault-lego.svg)](https://badge.fury.io/gh/gambol99%2Fvault-lego)
+[![Build Status](https://travis-ci.org/catac/vault-lego.svg?branch=master)](https://travis-ci.org/catac/vault-lego)
+[![GitHub version](https://badge.fury.io/gh/catac%2Fvault-lego.svg)](https://badge.fury.io/gh/catac%2Fvault-lego)
 
 ## **Vault Lego**
 ----
@@ -31,7 +29,7 @@ GLOBAL OPTIONS:
    --host HOST, -H HOST                 the url for the vault service i.e. https://vault.vault.svc.cluster.local HOST [$VAULT_ADDR]
    --token TOKEN, -t TOKEN              the vault token to use when requesting a certificate TOKEN [$VAULT_TOKEN]
    --default-path PATH, -p PATH         the default vault path the pki exists on, e.g. pki/default/issue PATH (default: "pki/issue/default") [$VAULT_PKI_PATH]
-   --kubeconfig PATH                    the path to a kubectl configuration file PATH (default: "/Users/ccirstoiu/.kube/config") [$KUBE_CONFIG]
+   --kubeconfig PATH                    the path to a kubectl configuration file PATH (default: "/Users/catac/.kube/config") [$KUBE_CONFIG]
    --kube-context CONTEXT               the kubernetes context inside the kubeconfig file CONTEXT [$KUBE_CONTEXT]
    --namespace NAMESPACE, -n NAMESPACE  the namespace the service should be looking, by default all NAMESPACE [$KUBE_NAMESPACE]
    --default-ttl TTL                    the default time-to-live of the certificate (can override by annontation) TTL (default: 48h0m0s) [$VAULT_PKI_TTL]
@@ -94,7 +92,7 @@ spec:
     spec:
       containers:
       - name: vault-lego
-        image: quay.io/gambol99/vault-lego:latest
+        image: quay.io/catac/vault-lego:latest
         resources:
           limits:
             cpu: 100m

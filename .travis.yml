@@ -1,15 +1,13 @@
 env:
   global:
-  - AUTHOR_EMAIL=gambol99@gmail.com
-  - REGISTRY_USERNAME=gambol99+rebotbuilder
-  - REGISTRY=quay.io
-  - secure: KRN3I4z2dUL6+8oTqi0OHfGSYlCzSkrSaA19VMJFYImewE1mU3iI7bati5i4HopPe75StamekZP79g+vjbWtFGMUyRKfkaNbciKrdS4zwo4MrORj1dFlM7ljd/2MFFjq//4uh9opozbbmqQc5javUdVduXVbU6TYr6tPjH74MhePhuiA/NW/oDlTSA3xmvBhmlX2zBJYws5uUB40T5yq7ZLKAdu50WUJ2q0zdQHJbX2nJbo5VOrVgfyfjr38RVfWa0009yvrcBqaAdcXIsnl6DlQlMQYad4cA3eegTxn+zplJvCT7D5JUmLjl0HI7qclJxmR4Oo78vRSpIyzJnTm5iYJ/f2HQHzht3micv+FeHJ5wNhn/JE39micClMPsWRaJ9rPAcKQLPggxnCb7+JBPP21UnIk2kRLA0WPYOIZvRplmtH9cOX8R0BrnK/lwVIFPWdh99ucxsic30i32eaNs4JHPYx5fuoko/4HoAO0mex/OXHrAqADh3ll2sTfgvawmwF5noEbwVuAseeZFlvNVbQaX6lQyqBFGrIke0UQHPgMHo1MrxBShWh++J/4UBLkPBCgJcewB5YySvkNaZ2zkHmJiNU2k9NUbMWAT+X64JZLZJCLWkoBdP0gD3irjlTR086pueWMWda0n4PKvGtuMikK60CHm4Ae+6UZvQSDa5s=
-  - secure: LjRAcTbUIuPEOy0xoo0s38O3aJlgv4CHkz07JOdY+wBK9N+DufJNfVyokJ9WYp+z7SrmEeYCq1TZRIendpfRLsMt2r8RFXmk6z5Lwo3FB33/VDBHBFJ2qAbMfysrEttjUxHbPxcBYJ7xQ5ElwMttIlbPUQSQdb7DDtkaBA4kezu637TklC0e6S7RQmNrUFhsy9TVS0oToLBZcTYeBoaICUcK6uLA6fIE/QNf9QisYiuc4xmjkBfDPw8TUTYm7NkIe3kX+JaegRyn+1EAy6jlUCJ7CHfO6HELE9aTsLaScdbfWatBDLS992DQYK1U2kbjaxlhJUUOtNyecTX0WaAjcFE+zOL2TVydqIGBXaqG5JlREP/+9dcO1sNG4xJ82byi6oa+EnmBfZemRnBaZeYmLx2INN/KJ2a36Thiq06Wz3A2fFWToRG3gUIvpZ9+MELCshwX5s8tMLTJ2LCVBCbYMLB5wgNinTui35Nsx8SgAxv5YHSHqOLy+pqqYtdrxZ2c5EVWNLhC1BA3k1CrbUeHeccUiBuH2Hr9JoKn8wIQuaufOkzQJLEGku41pyH3mF2wEFG0/rMH28/WoKx22kUxSXqpq9kamgoGeFvWMbPEFp/eXjhDwFNvWuEzGGHdZpa2S/fwVEekXF2NjWHSqu3RWrgc/2DDSQmbafkkI2frqOs=
+  - AUTHOR_EMAIL=catalin.cirstoiu@gmail.com
+  - REGISTRY_USERNAME=catac
+  - REGISTRY=index.docker.io
 services:
 - docker
 language: go
 go:
-- 1.7
+- 1.9.1
 install:
 - go get github.com/Masterminds/glide
 script:
@@ -26,7 +24,7 @@ deploy:
   provider: releases
   skip_cleanup: true
   on:
-    repo: gambol99/vault-lego
+    repo: catac/vault-lego
     tags: true
   api_key:
     secure: ${GITHUB_TOKEN}

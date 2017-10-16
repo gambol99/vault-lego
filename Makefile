@@ -1,8 +1,8 @@
 NAME=vault-lego
-AUTHOR ?= gambol99
-AUTHOR_EMAIL=gambol99@gmail.com
-REGISTRY=quay.io
-GOVERSION=1.7.3
+AUTHOR ?= catac
+AUTHOR_EMAIL=catalin.cirstoiu@gmail.com
+REGISTRY=index.docker.io
+GOVERSION=1.9.1
 ROOT_DIR=${PWD}
 HARDWARE=$(shell uname -m)
 GIT_SHA=$(shell git --no-pager describe --always --dirty)
@@ -36,8 +36,8 @@ static: golang deps
 
 docker-build:
 	@echo "--> Compiling the project"
-	${SUDO} docker run --rm -v ${ROOT_DIR}:/go/src/github.com/gambol99/${NAME} \
-		-w /go/src/github.com/gambol99/${NAME} -e GOOS=linux golang:${GOVERSION} make static
+	${SUDO} docker run --rm -v ${ROOT_DIR}:/go/src/github.com/catac/${NAME} \
+		-w /go/src/github.com/catac/${NAME} -e GOOS=linux golang:${GOVERSION} make static
 
 docker:
 	@echo "--> Building the docker image"
