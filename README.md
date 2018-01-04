@@ -17,7 +17,7 @@ USAGE:
    vault-lego [global options] command [command options] [arguments...]
 
 VERSION:
-   v0.0.6 (git+sha: no gitsha provided)
+   v0.0.7 (git+sha: no gitsha provided)
 
 AUTHOR:
    Rohith Jayawardene
