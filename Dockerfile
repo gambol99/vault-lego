@@ -5,5 +5,6 @@ ADD bin/vault-lego /vault-lego
 
 WORKDIR "/"
 
-USER daemon
+# user daemon
+USER 2:2
 ENTRYPOINT [ "/vault-lego" ]
