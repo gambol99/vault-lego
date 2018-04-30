@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"strings"
@@ -16,7 +17,7 @@ import (
 type AuditFormatWriter interface {
 	WriteRequest(io.Writer, *AuditRequestEntry) error
 	WriteResponse(io.Writer, *AuditResponseEntry) error
-	Salt() (*salt.Salt, error)
+	Salt(context.Context) (*salt.Salt, error)
 }
 
 // AuditFormatter implements the Formatter interface, and allows the underlying
@@ -25,14 +26,10 @@ type AuditFormatter struct {
 	AuditFormatWriter
 }
 
-func (f *AuditFormatter) FormatRequest(
-	w io.Writer,
-	config FormatterConfig,
-	auth *logical.Auth,
-	req *logical.Request,
-	inErr error) error {
+var _ Formatter = (*AuditFormatter)(nil)
 
-	if req == nil {
+func (f *AuditFormatter) FormatRequest(ctx context.Context, w io.Writer, config FormatterConfig, in *LogInput) error {
+	if in == nil || in.Request == nil {
 		return fmt.Errorf("request to request-audit a nil request")
 	}
 
@@ -44,33 +41,36 @@ func (f *AuditFormatter) FormatRequest(
 		return fmt.Errorf("no format writer specified")
 	}
 
-	salt, err := f.Salt()
+	salt, err := f.Salt(ctx)
 	if err != nil {
 		return errwrap.Wrapf("error fetching salt: {{err}}", err)
 	}
 
+	// Set these to the input values at first
+	auth := in.Auth
+	req := in.Request
+
 	if !config.Raw {
 		// Before we copy the structure we must nil out some data
 		// otherwise we will cause reflection to panic and die
-		if req.Connection != nil && req.Connection.ConnState != nil {
-			origReq := req
-			origState := req.Connection.ConnState
-			req.Connection.ConnState = nil
+		if in.Request.Connection != nil && in.Request.Connection.ConnState != nil {
+			origState := in.Request.Connection.ConnState
+			in.Request.Connection.ConnState = nil
 			defer func() {
-				origReq.Connection.ConnState = origState
+				in.Request.Connection.ConnState = origState
 			}()
 		}
 
 		// Copy the auth structure
-		if auth != nil {
-			cp, err := copystructure.Copy(auth)
+		if in.Auth != nil {
+			cp, err := copystructure.Copy(in.Auth)
 			if err != nil {
 				return err
 			}
 			auth = cp.(*logical.Auth)
 		}
 
-		cp, err := copystructure.Copy(req)
+		cp, err := copystructure.Copy(in.Request)
 		if err != nil {
 			return err
 		}
@@ -83,7 +83,7 @@ func (f *AuditFormatter) FormatRequest(
 			if !config.HMACAccessor && auth.Accessor != "" {
 				authAccessor = auth.Accessor
 			}
-			if err := Hash(salt, auth); err != nil {
+			if err := Hash(salt, auth, nil); err != nil {
 				return err
 			}
 			if authAccessor != "" {
@@ -96,7 +96,7 @@ func (f *AuditFormatter) FormatRequest(
 		if !config.HMACAccessor && req != nil && req.ClientTokenAccessor != "" {
 			clientTokenAccessor = req.ClientTokenAccessor
 		}
-		if err := Hash(salt, req); err != nil {
+		if err := Hash(salt, req, in.NonHMACReqDataKeys); err != nil {
 			return err
 		}
 		if clientTokenAccessor != "" {
@@ -109,8 +109,8 @@ func (f *AuditFormatter) FormatRequest(
 		auth = new(logical.Auth)
 	}
 	var errString string
-	if inErr != nil {
-		errString = inErr.Error()
+	if in.OuterErr != nil {
+		errString = in.OuterErr.Error()
 	}
 
 	reqEntry := &AuditRequestEntry{
@@ -123,6 +123,7 @@ func (f *AuditFormatter) FormatRequest(
 			DisplayName:   auth.DisplayName,
 			Policies:      auth.Policies,
 			Metadata:      auth.Metadata,
+			EntityID:      auth.EntityID,
 			RemainingUses: req.ClientTokenRemainingUses,
 		},
 
@@ -133,6 +134,7 @@ func (f *AuditFormatter) FormatRequest(
 			Operation:           req.Operation,
 			Path:                req.Path,
 			Data:                req.Data,
+			PolicyOverride:      req.PolicyOverride,
 			RemoteAddr:          getRemoteAddr(req),
 			ReplicationCluster:  req.ReplicationCluster,
 			Headers:             req.Headers,
@@ -144,21 +146,14 @@ func (f *AuditFormatter) FormatRequest(
 	}
 
 	if !config.OmitTime {
-		reqEntry.Time = time.Now().UTC().Format(time.RFC3339)
+		reqEntry.Time = time.Now().UTC().Format(time.RFC3339Nano)
 	}
 
 	return f.AuditFormatWriter.WriteRequest(w, reqEntry)
 }
 
-func (f *AuditFormatter) FormatResponse(
-	w io.Writer,
-	config FormatterConfig,
-	auth *logical.Auth,
-	req *logical.Request,
-	resp *logical.Response,
-	inErr error) error {
-
-	if req == nil {
+func (f *AuditFormatter) FormatResponse(ctx context.Context, w io.Writer, config FormatterConfig, in *LogInput) error {
+	if in == nil || in.Request == nil {
 		return fmt.Errorf("request to response-audit a nil request")
 	}
 
@@ -170,40 +165,44 @@ func (f *AuditFormatter) FormatResponse(
 		return fmt.Errorf("no format writer specified")
 	}
 
-	salt, err := f.Salt()
+	salt, err := f.Salt(ctx)
 	if err != nil {
 		return errwrap.Wrapf("error fetching salt: {{err}}", err)
 	}
 
+	// Set these to the input values at first
+	auth := in.Auth
+	req := in.Request
+	resp := in.Response
+
 	if !config.Raw {
 		// Before we copy the structure we must nil out some data
 		// otherwise we will cause reflection to panic and die
-		if req.Connection != nil && req.Connection.ConnState != nil {
-			origReq := req
-			origState := req.Connection.ConnState
-			req.Connection.ConnState = nil
+		if in.Request.Connection != nil && in.Request.Connection.ConnState != nil {
+			origState := in.Request.Connection.ConnState
+			in.Request.Connection.ConnState = nil
 			defer func() {
-				origReq.Connection.ConnState = origState
+				in.Request.Connection.ConnState = origState
 			}()
 		}
 
 		// Copy the auth structure
-		if auth != nil {
-			cp, err := copystructure.Copy(auth)
+		if in.Auth != nil {
+			cp, err := copystructure.Copy(in.Auth)
 			if err != nil {
 				return err
 			}
 			auth = cp.(*logical.Auth)
 		}
 
-		cp, err := copystructure.Copy(req)
+		cp, err := copystructure.Copy(in.Request)
 		if err != nil {
 			return err
 		}
 		req = cp.(*logical.Request)
 
-		if resp != nil {
-			cp, err := copystructure.Copy(resp)
+		if in.Response != nil {
+			cp, err := copystructure.Copy(in.Response)
 			if err != nil {
 				return err
 			}
@@ -218,7 +217,7 @@ func (f *AuditFormatter) FormatResponse(
 			if !config.HMACAccessor && auth.Accessor != "" {
 				accessor = auth.Accessor
 			}
-			if err := Hash(salt, auth); err != nil {
+			if err := Hash(salt, auth, nil); err != nil {
 				return err
 			}
 			if accessor != "" {
@@ -231,7 +230,7 @@ func (f *AuditFormatter) FormatResponse(
 		if !config.HMACAccessor && req != nil && req.ClientTokenAccessor != "" {
 			clientTokenAccessor = req.ClientTokenAccessor
 		}
-		if err := Hash(salt, req); err != nil {
+		if err := Hash(salt, req, in.NonHMACReqDataKeys); err != nil {
 			return err
 		}
 		if clientTokenAccessor != "" {
@@ -240,14 +239,15 @@ func (f *AuditFormatter) FormatResponse(
 
 		// Cache and restore accessor in the response
 		if resp != nil {
-			var accessor, wrappedAccessor string
+			var accessor, wrappedAccessor, wrappingAccessor string
 			if !config.HMACAccessor && resp != nil && resp.Auth != nil && resp.Auth.Accessor != "" {
 				accessor = resp.Auth.Accessor
 			}
 			if !config.HMACAccessor && resp != nil && resp.WrapInfo != nil && resp.WrapInfo.WrappedAccessor != "" {
 				wrappedAccessor = resp.WrapInfo.WrappedAccessor
+				wrappingAccessor = resp.WrapInfo.Accessor
 			}
-			if err := Hash(salt, resp); err != nil {
+			if err := Hash(salt, resp, in.NonHMACRespDataKeys); err != nil {
 				return err
 			}
 			if accessor != "" {
@@ -255,6 +255,9 @@ func (f *AuditFormatter) FormatResponse(
 			}
 			if wrappedAccessor != "" {
 				resp.WrapInfo.WrappedAccessor = wrappedAccessor
+			}
+			if wrappingAccessor != "" {
+				resp.WrapInfo.Accessor = wrappingAccessor
 			}
 		}
 	}
@@ -267,8 +270,8 @@ func (f *AuditFormatter) FormatResponse(
 		resp = new(logical.Response)
 	}
 	var errString string
-	if inErr != nil {
-		errString = inErr.Error()
+	if in.OuterErr != nil {
+		errString = in.OuterErr.Error()
 	}
 
 	var respAuth *AuditAuth
@@ -299,6 +302,7 @@ func (f *AuditFormatter) FormatResponse(
 		respWrapInfo = &AuditResponseWrapInfo{
 			TTL:             int(resp.WrapInfo.TTL / time.Second),
 			Token:           token,
+			Accessor:        resp.WrapInfo.Accessor,
 			CreationTime:    resp.WrapInfo.CreationTime.Format(time.RFC3339Nano),
 			CreationPath:    resp.WrapInfo.CreationPath,
 			WrappedAccessor: resp.WrapInfo.WrappedAccessor,
@@ -309,12 +313,13 @@ func (f *AuditFormatter) FormatResponse(
 		Type:  "response",
 		Error: errString,
 		Auth: AuditAuth{
-			ClientToken:   auth.ClientToken,
-			Accessor:      auth.Accessor,
 			DisplayName:   auth.DisplayName,
 			Policies:      auth.Policies,
 			Metadata:      auth.Metadata,
+			ClientToken:   auth.ClientToken,
+			Accessor:      auth.Accessor,
 			RemainingUses: req.ClientTokenRemainingUses,
+			EntityID:      auth.EntityID,
 		},
 
 		Request: AuditRequest{
@@ -324,6 +329,7 @@ func (f *AuditFormatter) FormatResponse(
 			Operation:           req.Operation,
 			Path:                req.Path,
 			Data:                req.Data,
+			PolicyOverride:      req.PolicyOverride,
 			RemoteAddr:          getRemoteAddr(req),
 			ReplicationCluster:  req.ReplicationCluster,
 			Headers:             req.Headers,
@@ -343,13 +349,13 @@ func (f *AuditFormatter) FormatResponse(
 	}
 
 	if !config.OmitTime {
-		respEntry.Time = time.Now().UTC().Format(time.RFC3339)
+		respEntry.Time = time.Now().UTC().Format(time.RFC3339Nano)
 	}
 
 	return f.AuditFormatWriter.WriteResponse(w, respEntry)
 }
 
-// AuditRequest is the structure of a request audit log entry in Audit.
+// AuditRequestEntry is the structure of a request audit log entry in Audit.
 type AuditRequestEntry struct {
 	Time    string       `json:"time,omitempty"`
 	Type    string       `json:"type"`
@@ -376,6 +382,7 @@ type AuditRequest struct {
 	ClientTokenAccessor string                 `json:"client_token_accessor"`
 	Path                string                 `json:"path"`
 	Data                map[string]interface{} `json:"data"`
+	PolicyOverride      bool                   `json:"policy_override"`
 	RemoteAddr          string                 `json:"remote_address"`
 	WrapTTL             int                    `json:"wrap_ttl"`
 	Headers             map[string][]string    `json:"headers"`
@@ -397,6 +404,7 @@ type AuditAuth struct {
 	Metadata      map[string]string `json:"metadata"`
 	NumUses       int               `json:"num_uses,omitempty"`
 	RemainingUses int               `json:"remaining_uses,omitempty"`
+	EntityID      string            `json:"entity_id"`
 }
 
 type AuditSecret struct {
@@ -406,6 +414,7 @@ type AuditSecret struct {
 type AuditResponseWrapInfo struct {
 	TTL             int    `json:"ttl"`
 	Token           string `json:"token"`
+	Accessor        string `json:"accessor"`
 	CreationTime    string `json:"creation_time"`
 	CreationPath    string `json:"creation_path"`
 	WrappedAccessor string `json:"wrapped_accessor,omitempty"`

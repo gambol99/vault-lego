@@ -1,6 +1,7 @@
 package transit
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/base64"
@@ -32,7 +33,7 @@ func (b *backend) pathSign() *framework.Path {
 derivation is enabled; currently only available with ed25519 keys.`,
 			},
 
-			"algorithm": &framework.FieldSchema{
+			"hash_algorithm": &framework.FieldSchema{
 				Type:    framework.TypeString,
 				Default: "sha2-256",
 				Description: `Hash algorithm to use (POST body parameter). Valid values are:
@@ -46,6 +47,12 @@ Defaults to "sha2-256". Not valid for all key types,
 including ed25519.`,
 			},
 
+			"algorithm": &framework.FieldSchema{
+				Type:        framework.TypeString,
+				Default:     "sha2-256",
+				Description: `Deprecated: use "hash_algorithm" instead.`,
+			},
+
 			"urlalgorithm": &framework.FieldSchema{
 				Type:        framework.TypeString,
 				Description: `Hash algorithm to use (POST URL parameter)`,
@@ -56,6 +63,16 @@ including ed25519.`,
 				Description: `The version of the key to use for signing.
 Must be 0 (for latest) or a value greater than or equal
 to the min_encryption_version configured on the key.`,
+			},
+
+			"prehashed": &framework.FieldSchema{
+				Type:        framework.TypeBool,
+				Description: `Set to 'true' when the input is already hashed. If the key type is 'rsa-2048' or 'rsa-4096', then the algorithm used to hash the input should be indicated by the 'algorithm' parameter.`,
+			},
+			"signature_algorithm": &framework.FieldSchema{
+				Type: framework.TypeString,
+				Description: `The signature algorithm to use for signing. Currently only applies to RSA key types.
+Options are 'pss' or 'pkcs1v15'. Defaults to 'pss'`,
 			},
 		},
 
@@ -103,7 +120,7 @@ derivation is enabled; currently only available with ed25519 keys.`,
 				Description: `Hash algorithm to use (POST URL parameter)`,
 			},
 
-			"algorithm": &framework.FieldSchema{
+			"hash_algorithm": &framework.FieldSchema{
 				Type:    framework.TypeString,
 				Default: "sha2-256",
 				Description: `Hash algorithm to use (POST body parameter). Valid values are:
@@ -114,6 +131,21 @@ derivation is enabled; currently only available with ed25519 keys.`,
 * sha2-512
 
 Defaults to "sha2-256". Not valid for all key types.`,
+			},
+			"algorithm": &framework.FieldSchema{
+				Type:        framework.TypeString,
+				Default:     "sha2-256",
+				Description: `Deprecated: use "hash_algorithm" instead.`,
+			},
+
+			"prehashed": &framework.FieldSchema{
+				Type:        framework.TypeBool,
+				Description: `Set to 'true' when the input is already hashed. If the key type is 'rsa-2048' or 'rsa-4096', then the algorithm used to hash the input should be indicated by the 'algorithm' parameter.`,
+			},
+			"signature_algorithm": &framework.FieldSchema{
+				Type: framework.TypeString,
+				Description: `The signature algorithm to use for signature verification. Currently only applies to RSA key types. 
+Options are 'pss' or 'pkcs1v15'. Defaults to 'pss'`,
 			},
 		},
 
@@ -126,15 +158,19 @@ Defaults to "sha2-256". Not valid for all key types.`,
 	}
 }
 
-func (b *backend) pathSignWrite(
-	req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+func (b *backend) pathSignWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	name := d.Get("name").(string)
 	ver := d.Get("key_version").(int)
 	inputB64 := d.Get("input").(string)
-	algorithm := d.Get("urlalgorithm").(string)
-	if algorithm == "" {
-		algorithm = d.Get("algorithm").(string)
+	hashAlgorithm := d.Get("urlalgorithm").(string)
+	if hashAlgorithm == "" {
+		hashAlgorithm = d.Get("hash_algorithm").(string)
+		if hashAlgorithm == "" {
+			hashAlgorithm = d.Get("algorithm").(string)
+		}
 	}
+	prehashed := d.Get("prehashed").(bool)
+	sigAlgorithm := d.Get("signature_algorithm").(string)
 
 	input, err := base64.StdEncoding.DecodeString(inputB64)
 	if err != nil {
@@ -142,7 +178,7 @@ func (b *backend) pathSignWrite(
 	}
 
 	// Get the policy
-	p, lock, err := b.lm.GetPolicyShared(req.Storage, name)
+	p, lock, err := b.lm.GetPolicyShared(ctx, req.Storage, name)
 	if lock != nil {
 		defer lock.RUnlock()
 	}
@@ -166,9 +202,9 @@ func (b *backend) pathSignWrite(
 		}
 	}
 
-	if p.Type.HashSignatureInput() {
+	if p.Type.HashSignatureInput() && !prehashed {
 		var hf hash.Hash
-		switch algorithm {
+		switch hashAlgorithm {
 		case "sha2-224":
 			hf = sha256.New224()
 		case "sha2-256":
@@ -178,13 +214,13 @@ func (b *backend) pathSignWrite(
 		case "sha2-512":
 			hf = sha512.New()
 		default:
-			return logical.ErrorResponse(fmt.Sprintf("unsupported algorithm %s", algorithm)), nil
+			return logical.ErrorResponse(fmt.Sprintf("unsupported hash algorithm %s", hashAlgorithm)), nil
 		}
 		hf.Write(input)
 		input = hf.Sum(nil)
 	}
 
-	sig, err := p.Sign(ver, context, input)
+	sig, err := p.Sign(ver, context, input, hashAlgorithm, sigAlgorithm)
 	if err != nil {
 		return nil, err
 	}
@@ -206,8 +242,7 @@ func (b *backend) pathSignWrite(
 	return resp, nil
 }
 
-func (b *backend) pathVerifyWrite(
-	req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+func (b *backend) pathVerifyWrite(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 
 	sig := d.Get("signature").(string)
 	hmac := d.Get("hmac").(string)
@@ -219,15 +254,20 @@ func (b *backend) pathVerifyWrite(
 		return logical.ErrorResponse("neither a 'signature' nor an 'hmac' were given to verify"), logical.ErrInvalidRequest
 
 	case hmac != "":
-		return b.pathHMACVerify(req, d, hmac)
+		return b.pathHMACVerify(ctx, req, d, hmac)
 	}
 
 	name := d.Get("name").(string)
 	inputB64 := d.Get("input").(string)
-	algorithm := d.Get("urlalgorithm").(string)
-	if algorithm == "" {
-		algorithm = d.Get("algorithm").(string)
+	hashAlgorithm := d.Get("urlalgorithm").(string)
+	if hashAlgorithm == "" {
+		hashAlgorithm = d.Get("hash_algorithm").(string)
+		if hashAlgorithm == "" {
+			hashAlgorithm = d.Get("algorithm").(string)
+		}
 	}
+	prehashed := d.Get("prehashed").(bool)
+	sigAlgorithm := d.Get("signature_algorithm").(string)
 
 	input, err := base64.StdEncoding.DecodeString(inputB64)
 	if err != nil {
@@ -235,7 +275,7 @@ func (b *backend) pathVerifyWrite(
 	}
 
 	// Get the policy
-	p, lock, err := b.lm.GetPolicyShared(req.Storage, name)
+	p, lock, err := b.lm.GetPolicyShared(ctx, req.Storage, name)
 	if lock != nil {
 		defer lock.RUnlock()
 	}
@@ -259,9 +299,9 @@ func (b *backend) pathVerifyWrite(
 		}
 	}
 
-	if p.Type.HashSignatureInput() {
+	if p.Type.HashSignatureInput() && !prehashed {
 		var hf hash.Hash
-		switch algorithm {
+		switch hashAlgorithm {
 		case "sha2-224":
 			hf = sha256.New224()
 		case "sha2-256":
@@ -271,13 +311,13 @@ func (b *backend) pathVerifyWrite(
 		case "sha2-512":
 			hf = sha512.New()
 		default:
-			return logical.ErrorResponse(fmt.Sprintf("unsupported algorithm %s", algorithm)), nil
+			return logical.ErrorResponse(fmt.Sprintf("unsupported hash algorithm %s", hashAlgorithm)), nil
 		}
 		hf.Write(input)
 		input = hf.Sum(nil)
 	}
 
-	valid, err := p.VerifySignature(context, input, sig)
+	valid, err := p.VerifySignature(context, input, sig, hashAlgorithm, sigAlgorithm)
 	if err != nil {
 		switch err.(type) {
 		case errutil.UserError:

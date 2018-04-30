@@ -78,7 +78,7 @@ func (c *Sys) DisableAuth(path string) error {
 }
 
 // Structures for the requests/resposne are all down here. They aren't
-// individually documentd because the map almost directly to the raw HTTP API
+// individually documented because the map almost directly to the raw HTTP API
 // documentation. Please refer to that documentation for more details.
 
 type EnableAuthOptions struct {
@@ -87,10 +87,16 @@ type EnableAuthOptions struct {
 	Config      AuthConfigInput `json:"config" structs:"config"`
 	Local       bool            `json:"local" structs:"local"`
 	PluginName  string          `json:"plugin_name,omitempty" structs:"plugin_name,omitempty"`
+	SealWrap    bool            `json:"seal_wrap" structs:"seal_wrap" mapstructure:"seal_wrap"`
 }
 
 type AuthConfigInput struct {
-	PluginName string `json:"plugin_name,omitempty" structs:"plugin_name,omitempty" mapstructure:"plugin_name"`
+	DefaultLeaseTTL          string   `json:"default_lease_ttl" structs:"default_lease_ttl" mapstructure:"default_lease_ttl"`
+	MaxLeaseTTL              string   `json:"max_lease_ttl" structs:"max_lease_ttl" mapstructure:"max_lease_ttl"`
+	PluginName               string   `json:"plugin_name,omitempty" structs:"plugin_name,omitempty" mapstructure:"plugin_name"`
+	AuditNonHMACRequestKeys  []string `json:"audit_non_hmac_request_keys,omitempty" structs:"audit_non_hmac_request_keys" mapstructure:"audit_non_hmac_request_keys"`
+	AuditNonHMACResponseKeys []string `json:"audit_non_hmac_response_keys,omitempty" structs:"audit_non_hmac_response_keys" mapstructure:"audit_non_hmac_response_keys"`
+	ListingVisibility        string   `json:"listing_visibility,omitempty" structs:"listing_visibility" mapstructure:"listing_visibility"`
 }
 
 type AuthMount struct {
@@ -99,10 +105,14 @@ type AuthMount struct {
 	Accessor    string           `json:"accessor" structs:"accessor" mapstructure:"accessor"`
 	Config      AuthConfigOutput `json:"config" structs:"config" mapstructure:"config"`
 	Local       bool             `json:"local" structs:"local" mapstructure:"local"`
+	SealWrap    bool             `json:"seal_wrap" structs:"seal_wrap" mapstructure:"seal_wrap"`
 }
 
 type AuthConfigOutput struct {
-	DefaultLeaseTTL int    `json:"default_lease_ttl" structs:"default_lease_ttl" mapstructure:"default_lease_ttl"`
-	MaxLeaseTTL     int    `json:"max_lease_ttl" structs:"max_lease_ttl" mapstructure:"max_lease_ttl"`
-	PluginName      string `json:"plugin_name,omitempty" structs:"plugin_name,omitempty" mapstructure:"plugin_name"`
+	DefaultLeaseTTL          int      `json:"default_lease_ttl" structs:"default_lease_ttl" mapstructure:"default_lease_ttl"`
+	MaxLeaseTTL              int      `json:"max_lease_ttl" structs:"max_lease_ttl" mapstructure:"max_lease_ttl"`
+	PluginName               string   `json:"plugin_name,omitempty" structs:"plugin_name,omitempty" mapstructure:"plugin_name"`
+	AuditNonHMACRequestKeys  []string `json:"audit_non_hmac_request_keys,omitempty" structs:"audit_non_hmac_request_keys" mapstructure:"audit_non_hmac_request_keys"`
+	AuditNonHMACResponseKeys []string `json:"audit_non_hmac_response_keys,omitempty" structs:"audit_non_hmac_response_keys" mapstructure:"audit_non_hmac_response_keys"`
+	ListingVisibility        string   `json:"listing_visibility,omitempty" structs:"listing_visibility" mapstructure:"listing_visibility"`
 }

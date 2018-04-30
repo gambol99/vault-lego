@@ -28,6 +28,7 @@ import (
 
 	"k8s.io/kubernetes/test/e2e/framework"
 
+	"github.com/blang/semver"
 	. "github.com/onsi/ginkgo"
 )
 
@@ -122,14 +123,26 @@ func checkDockerConfig() error {
 		}
 		missing = map[string]bool{}
 	)
+
+	// Whitelists CONFIG_DEVPTS_MULTIPLE_INSTANCES (meaning allowing it to be
+	// absent) if the kernel version is >= 4.8, because this option has been
+	// removed from the 4.8 kernel.
+	kernelVersion, err := getKernelVersion()
+	if err != nil {
+		return err
+	}
+	if kernelVersion.GTE(semver.MustParse("4.8.0")) {
+		whitelist["CONFIG_DEVPTS_MULTIPLE_INSTANCES"] = true
+	}
+
 	for _, bin := range bins {
 		if _, err := os.Stat(bin); os.IsNotExist(err) {
 			continue
 		}
-		output, err := runCommand(bin)
-		if err != nil {
-			return err
-		}
+		// We don't check the return code because it's OK if the script returns
+		// a non-zero exit code just because the configs in the whitelist are
+		// missing.
+		output, _ := runCommand(bin)
 		for _, line := range strings.Split(output, "\n") {
 			if !strings.Contains(line, "missing") {
 				continue
@@ -342,16 +355,6 @@ var _ = framework.KubeDescribe("GKE system requirements [Conformance] [Feature:G
 	})
 })
 
-// runCommand runs the cmd and returns the combined stdout and stderr, or an
-// error if the command failed.
-func runCommand(cmd ...string) (string, error) {
-	output, err := exec.Command(cmd[0], cmd[1:]...).CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("failed to run %q: %s (%s)", strings.Join(cmd, " "), err, output)
-	}
-	return string(output), nil
-}
-
 // getPPID returns the PPID for the pid.
 func getPPID(pid int) (int, error) {
 	statusFile := "/proc/" + strconv.Itoa(pid) + "/status"
@@ -409,4 +412,19 @@ func getCmdToProcessMap() (map[string][]process, error) {
 		result[cmd] = append(result[cmd], process{pid, ppid})
 	}
 	return result, nil
+}
+
+// getKernelVersion returns the kernel version in the semantic version format.
+func getKernelVersion() (*semver.Version, error) {
+	output, err := runCommand("uname", "-r")
+	if err != nil {
+		return nil, err
+	}
+	// An example 'output' could be "4.13.0-1001-gke".
+	v := strings.TrimSpace(strings.Split(output, "-")[0])
+	kernelVersion, err := semver.Make(v)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert %q to semantic version: %s", v, err)
+	}
+	return &kernelVersion, nil
 }

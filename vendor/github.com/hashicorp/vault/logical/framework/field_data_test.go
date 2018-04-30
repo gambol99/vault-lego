@@ -224,7 +224,7 @@ func TestFieldDataGet(t *testing.T) {
 			[]string{},
 		},
 
-		"commma string slice type, string slice with one value": {
+		"comma string slice type, string slice with one value": {
 			map[string]*FieldSchema{
 				"foo": &FieldSchema{Type: TypeCommaStringSlice},
 			},
@@ -257,6 +257,93 @@ func TestFieldDataGet(t *testing.T) {
 			[]string{},
 		},
 
+		"comma int slice type, comma int with one value": {
+			map[string]*FieldSchema{
+				"foo": &FieldSchema{Type: TypeCommaIntSlice},
+			},
+			map[string]interface{}{
+				"foo": 1,
+			},
+			"foo",
+			[]int{1},
+		},
+
+		"comma int slice type, comma int with multi value slice": {
+			map[string]*FieldSchema{
+				"foo": &FieldSchema{Type: TypeCommaIntSlice},
+			},
+			map[string]interface{}{
+				"foo": []int{1, 2, 3},
+			},
+			"foo",
+			[]int{1, 2, 3},
+		},
+
+		"comma int slice type, comma int with multi value": {
+			map[string]*FieldSchema{
+				"foo": &FieldSchema{Type: TypeCommaIntSlice},
+			},
+			map[string]interface{}{
+				"foo": "1,2,3",
+			},
+			"foo",
+			[]int{1, 2, 3},
+		},
+
+		"comma int slice type, nil int slice value": {
+			map[string]*FieldSchema{
+				"foo": &FieldSchema{Type: TypeCommaIntSlice},
+			},
+			map[string]interface{}{
+				"foo": "",
+			},
+			"foo",
+			[]int{},
+		},
+
+		"comma int slice type, int slice with one value": {
+			map[string]*FieldSchema{
+				"foo": &FieldSchema{Type: TypeCommaIntSlice},
+			},
+			map[string]interface{}{
+				"foo": []interface{}{"1"},
+			},
+			"foo",
+			[]int{1},
+		},
+
+		"comma int slice type, int slice with multi value strings": {
+			map[string]*FieldSchema{
+				"foo": &FieldSchema{Type: TypeCommaIntSlice},
+			},
+			map[string]interface{}{
+				"foo": []interface{}{"1", "2", "3"},
+			},
+			"foo",
+			[]int{1, 2, 3},
+		},
+
+		"comma int slice type, int slice with multi value": {
+			map[string]*FieldSchema{
+				"foo": &FieldSchema{Type: TypeCommaIntSlice},
+			},
+			map[string]interface{}{
+				"foo": []interface{}{1, 2, 3},
+			},
+			"foo",
+			[]int{1, 2, 3},
+		},
+
+		"comma int slice type, empty int slice value": {
+			map[string]*FieldSchema{
+				"foo": &FieldSchema{Type: TypeCommaIntSlice},
+			},
+			map[string]interface{}{
+				"foo": []interface{}{},
+			},
+			"foo",
+			[]int{},
+		},
 		"name string type, valid string": {
 			map[string]*FieldSchema{
 				"foo": &FieldSchema{Type: TypeNameString},
@@ -277,6 +364,143 @@ func TestFieldDataGet(t *testing.T) {
 			},
 			"foo",
 			"bar.baz-bay123",
+		},
+
+		"keypair type, valid value map type": {
+			map[string]*FieldSchema{
+				"foo": &FieldSchema{Type: TypeKVPairs},
+			},
+			map[string]interface{}{
+				"foo": map[string]interface{}{
+					"key1": "value1",
+					"key2": "value2",
+					"key3": 1,
+				},
+			},
+			"foo",
+			map[string]string{
+				"key1": "value1",
+				"key2": "value2",
+				"key3": "1",
+			},
+		},
+
+		"keypair type, list of equal sign delim key pairs type": {
+			map[string]*FieldSchema{
+				"foo": &FieldSchema{Type: TypeKVPairs},
+			},
+			map[string]interface{}{
+				"foo": []interface{}{"key1=value1", "key2=value2", "key3=1"},
+			},
+			"foo",
+			map[string]string{
+				"key1": "value1",
+				"key2": "value2",
+				"key3": "1",
+			},
+		},
+
+		"keypair type, single equal sign delim value": {
+			map[string]*FieldSchema{
+				"foo": &FieldSchema{Type: TypeKVPairs},
+			},
+			map[string]interface{}{
+				"foo": "key1=value1",
+			},
+			"foo",
+			map[string]string{
+				"key1": "value1",
+			},
+		},
+
+		"name string type, not supplied": {
+			map[string]*FieldSchema{
+				"foo": {Type: TypeNameString},
+			},
+			map[string]interface{}{},
+			"foo",
+			"",
+		},
+
+		"string type, not supplied": {
+			map[string]*FieldSchema{
+				"foo": {Type: TypeString},
+			},
+			map[string]interface{}{},
+			"foo",
+			"",
+		},
+
+		"type int, not supplied": {
+			map[string]*FieldSchema{
+				"foo": {Type: TypeInt},
+			},
+			map[string]interface{}{},
+			"foo",
+			0,
+		},
+
+		"type bool, not supplied": {
+			map[string]*FieldSchema{
+				"foo": {Type: TypeBool},
+			},
+			map[string]interface{}{},
+			"foo",
+			false,
+		},
+
+		"type map, not supplied": {
+			map[string]*FieldSchema{
+				"foo": {Type: TypeMap},
+			},
+			map[string]interface{}{},
+			"foo",
+			map[string]interface{}{},
+		},
+
+		"type duration second, not supplied": {
+			map[string]*FieldSchema{
+				"foo": {Type: TypeDurationSecond},
+			},
+			map[string]interface{}{},
+			"foo",
+			0,
+		},
+
+		"type slice, not supplied": {
+			map[string]*FieldSchema{
+				"foo": {Type: TypeSlice},
+			},
+			map[string]interface{}{},
+			"foo",
+			[]interface{}{},
+		},
+
+		"type string slice, not supplied": {
+			map[string]*FieldSchema{
+				"foo": {Type: TypeStringSlice},
+			},
+			map[string]interface{}{},
+			"foo",
+			[]string{},
+		},
+
+		"type comma string slice, not supplied": {
+			map[string]*FieldSchema{
+				"foo": {Type: TypeCommaStringSlice},
+			},
+			map[string]interface{}{},
+			"foo",
+			[]string{},
+		},
+
+		"type kv pair, not supplied": {
+			map[string]*FieldSchema{
+				"foo": {Type: TypeKVPairs},
+			},
+			map[string]interface{}{},
+			"foo",
+			map[string]string{},
 		},
 	}
 
@@ -338,6 +562,15 @@ func TestFieldDataGet_Error(t *testing.T) {
 			},
 			map[string]interface{}{
 				"foo": "",
+			},
+			"foo",
+		},
+		"keypair type, csv version empty key name": {
+			map[string]*FieldSchema{
+				"foo": &FieldSchema{Type: TypeKVPairs},
+			},
+			map[string]interface{}{
+				"foo": []interface{}{"=value1", "key2=value2", "key3=1"},
 			},
 			"foo",
 		},

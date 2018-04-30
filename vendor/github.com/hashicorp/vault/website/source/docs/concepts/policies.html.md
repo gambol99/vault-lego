@@ -18,22 +18,22 @@ system.
 ## Policy-Authorization Workflow
 
 Before a human or machine can gain access, an administrator must configure Vault
-with an [authentication backend](/docs/concepts/auth.html). Authentication is
+with an [auth method](/docs/concepts/auth.html). Authentication is
 the process by which human or machine-supplied information is verified against
 an internal or external system.
 
 Consider the following diagram, which illustrates the steps a security team
 would take to configure Vault to authenticate using a corporate LDAP or
 ActiveDirectory installation. Even though this example uses LDAP, the concept
-applies to all authentication backends.
+applies to all auth methods.
 
 [![Vault Auth Workflow](/assets/images/vault-policy-workflow.svg)](/assets/images/vault-policy-workflow.svg)
 
-1. The security team configures Vault to connect to an authentication backend.
-This configuration varies by authentication backend. In the case of LDAP, Vault
+1. The security team configures Vault to connect to an auth method.
+This configuration varies by auth method. In the case of LDAP, Vault
 needs to know the address of the LDAP server and whether to connect using TLS.
 It is important to note that Vault does not store a copy of the LDAP database -
-Vault will delegate the authentication to the authentication backend.
+Vault will delegate the authentication to the auth method.
 
 1. The security team authors a policy (or uses an existing policy) which grants
 access to paths in Vault. Policies are written in HCL in your editor of
@@ -42,8 +42,8 @@ preference and saved to disk.
 1. The policy's contents are uploaded and store in Vault and referenced by name.
 You can think of the policy's name as a pointer or symlink to its set of rules.
 
-1. Most importantly, the security team maps data in the authentication backend to a
-policy. For example, the security team might create mappings like:
+1. Most importantly, the security team maps data in the auth method to a policy.
+For example, the security team might create mappings like:
 
     > Members of the OU group "dev" map to the Vault policy named "readonly-dev".
 
@@ -53,7 +53,7 @@ policy. For example, the security team might create mappings like:
 
 Now Vault has an internal mapping between a backend authentication system and
 internal policy. When a user authenticates to Vault, the actual authentication
-is delegated to the authentication backend. As a user, the flow looks like:
+is delegated to the auth method. As a user, the flow looks like:
 
 [![Vault Auth Workflow](/assets/images/vault-auth-workflow.svg)](/assets/images/vault-auth-workflow.svg)
 
@@ -113,9 +113,9 @@ path "secret/super-secret" {
   capabilities = ["deny"]
 }
 
-# Policies can also specify allowed and disallowed parameters. Here the key
-# "secret/restricted" can only contain "foo" (any value) and "bar" (one of "zip"
-# or "zap").
+# Policies can also specify allowed, disallowed, and required parameters. Here
+# the key "secret/restricted" can only contain "foo" (any value) and "bar" (one
+# of "zip" or "zap").
 path "secret/restricted" {
   capabilities = ["create"]
   allowed_parameters = {
@@ -217,12 +217,23 @@ In addition to the standard set of capabilities, Vault offers finer-grained
 control over permissions at a given path. The capabilities associated with a
 path take precedence over permissions on parameters.
 
-### Allowed and Denied Parameters
+### Parameter Constraints
 
 In Vault, data is represented as `key=value` pairs. Vault policies can
 optionally further restrict paths based on the keys and data at those keys when
 evaluating the permissions for a path. The optional finer-grained control
 options are:
+
+  * `required_parameters` - A list of parameters that must be specified.
+
+      ```ruby
+      # This requires the user to create "secret/foo" with a parameter named
+      # "bar" and "baz".
+      path "secret/foo" {
+        capabilities = ["create"]
+        required_parameters = ["bar", "baz"]
+      }
+      ```
 
   * `allowed_parameters` - Whitelists a list of keys and values that are
     permitted on the given path.
@@ -258,7 +269,7 @@ options are:
         ```
 
     * If any keys are specified, all non-specified parameters will be denied
-      unless there the parameter `"*"` is set to an empty array, which will
+      unless the parameter `"*"` is set to an empty array, which will
       allow all other parameters to be modified. Parameters with specific values
       will still be restricted to those values.
 
@@ -327,14 +338,17 @@ Parameter values also support prefix/suffix globbing. Globbing is enabled by
 prepending or appending or prepending a splat (`*`) to the value:
 
 ```ruby
-# Allow any parameter as long as the value starts with "foo-*".
+# Only allow a parameter named "bar" with a value starting with "foo-*".
 path "secret/foo" {
   capabilities = ["create"]
   allowed_parameters = {
-    "*" = ["foo-*"]
+    "bar" = ["foo-*"]
   }
 }
 ```
+
+Note: the only value that can be used with the `*` parameter is `[]`.
+
 
 ### Required Response Wrapping TTLs
 
@@ -357,9 +371,9 @@ wrapping mandatory for a particular path.
     wrapped response.
 
 If both are specified, the minimum value must be less than the maximum. In
-addition, if paths are merged from different stanzas, the lowest value specified
-for each is the value that will result, in line with the idea of keeping token
-lifetimes as short as possible.
+addition, if paths are merged from different stanzas, the lowest value
+specified for each is the value that will result, in line with the idea of
+keeping token lifetimes as short as possible.
 
 ## Builtin Policies
 
@@ -368,10 +382,17 @@ the two builtin policies.
 
 ### Default Policy
 
-The `default` policy is a builtin Vault policy that cannot be modified or
-removed. By default, it is attached to all tokens, but may be explicitly
-detached at creation time. The policy contains basic functionality such as the
-ability for the token to lookup data about itself and to use its cubbyhole data.
+The `default` policy is a builtin Vault policy that cannot be removed. By
+default, it is attached to all tokens, but may be explicitly excluded at token
+creation time by supporting authentication methods.
+
+The policy contains basic functionality such as the ability for the token to
+look up data about itself and to use its cubbyhole data. However, Vault is not
+proscriptive about its contents. It can be modified to suit your needs; Vault
+will never overwrite your modifications. If you want to stay up-to-date with
+the latest upstream version of the `default` policy, simply read the contents
+of the policy from an up-to-date `dev` server, and write those contents into
+your Vault's `default` policy.
 
 To view all permissions granted by the default policy on your Vault
 installation, run:
@@ -383,7 +404,7 @@ $ vault read sys/policy/default
 To disable attachment of the default policy:
 
 ```sh
-$ vault token-create -no-default-policy
+$ vault token create -no-default-policy
 ```
 
 or via the API:
@@ -411,7 +432,7 @@ controlled users and authentication should be used.
 To revoke a root token, run:
 
 ```sh
-$ vault token-revoke "<token>"
+$ vault token revoke "<token>"
 ```
 
 or via the API:
@@ -426,8 +447,8 @@ $ curl \
 
 For more information, please read:
 
-- [Production Hardening](/guides/production.html)
-- [Generating a Root Token](/guides/generate-root.html)
+- [Production Hardening](/guides/operations/production.html)
+- [Generating a Root Token](/guides/operations/generate-root.html)
 
 ## Managing Policies
 
@@ -461,7 +482,7 @@ Policies may be created (uploaded) via the CLI or via the API. To create a new
 policy in Vault:
 
 ```sh
-$ vault write sys/policy/my-policy rules=@my-policy.hcl
+$ vault write sys/policy/my-policy policy=@my-policy.hcl
 ```
 
 -> The `@` tells Vault to read from a file on disk. In the example above, Vault
@@ -474,7 +495,7 @@ or via the API:
 $ curl \
   --request POST \
   --header "X-Vault-Token: ..." \
-  --data 'path "..." {} \'
+  --data '{"policy":"path \"...\" {...} "}' \
   https://vault.hashicorp.rocks/v1/sys/policy/my-policy
 ```
 
@@ -489,7 +510,7 @@ API. To update an existing policy in Vault, follow the same steps as creating a
 policy, but use an existing policy name:
 
 ```sh
-$ vault write sys/policy/my-existing-policy rules=@updated-policy.json
+$ vault write sys/policy/my-existing-policy policy=@updated-policy.json
 ```
 
 or via the API:
@@ -498,7 +519,7 @@ or via the API:
 $ curl \
   --request POST \
   --header "X-Vault-Token: ..." \
-  --data 'path "..." {} \'
+  --data '{"policy":"path \"...\" {...} "}' \
   https://vault.hashicorp.rocks/v1/sys/policy/my-existing-policy
 ```
 
@@ -527,7 +548,7 @@ policy that does not exist.
 Vault can automatically associate a set of policies to a token based on an
 authorization. This configuration varies significantly between authentication
 backends. For simplicity, this example will use Vault's built-in userpass
-authentication backend.
+auth method.
 
 A Vault administrator or someone from the security team would create the user in
 Vault with a list of associated policies:
@@ -539,13 +560,13 @@ $ vault write auth/userpass/users/sethvargo \
 ```
 
 This creates an authentication mapping to the policy such that, when the user
-authenticates successful to Vault, they will be given a token which has the list
+authenticates successfully to Vault, they will be given a token which has the list
 of policies attached.
 
 The user wishing to authenticate would run
 
 ```sh
-$ vault auth -method="userpass" username="sethvargo"
+$ vault login -method="userpass" username="sethvargo"
 Password (will be hidden): ...
 ```
 
@@ -555,10 +576,10 @@ authenticated user.
 
 ### Tokens
 
-Tokens are associated their policies at creation time. For example:
+Tokens are associated with their policies at creation time. For example:
 
 ```sh
-$ vault token-create -policy=dev-readonly,logs
+$ vault token create -policy=dev-readonly -policy=logs
 ```
 
 Child tokens can be associated with a subset of a parent's policies. Root users
@@ -568,6 +589,6 @@ There is no way to modify the policies associated with a token once the token
 has been issued. The token must be revoked and a new one acquired to receive a
 new set of policies.
 
-However, the _contents_ of policies are parsed in real-time at every token use.
+However, the _contents_ of policies are parsed in real-time whenever the token is used.
 As a result, if a policy is modified, the modified rules will be in force the
-next time a token with that policy attached is used to make a call to Vault.
+next time a token, with that policy attached, is used to make a call to Vault.

@@ -15,7 +15,7 @@ and require no additional operator intervention to run. Builtin plugins are
 just like any other backend code inside vault. External plugins, on the other
 hand, are not shipped with the vault binary and must be registered to vault by
 a privileged vault user. This section of the documentation will describe the
-architecture and security of external plugins. 
+architecture and security of external plugins.
 
 # Plugin Architecture
 Vault's plugins are completely separate, standalone applications that Vault
@@ -31,6 +31,11 @@ token](https://www.vaultproject.io/docs/concepts/response-wrapping.html) to the
 plugin process' environment. This token is single use and has a short TTL. Once
 unwrapped, it provides the plugin with a uniquely generated TLS certificate and
 private key for it to use to talk to the original vault process.
+
+The [`api_addr`][api_addr] must be set in order for the plugin process establish
+communication with the Vault server during mount time. If the storage backend
+has HA enabled and supports automatic host address detection (e.g. Consul),
+Vault will automatically attempt to determine the `api_addr` as well.
 
 ~> Note: Reading the original connection's TLS connection state is not supported
 in plugins.
@@ -67,7 +72,7 @@ docs](/api/system/plugins-catalog.html).
 An example plugin submission looks like:
 
 ```
-$ vault write sys/plugins/catalog/myplugin-database-plugin \ 
+$ vault write sys/plugins/catalog/myplugin-database-plugin \
     sha_256=<expected SHA256 Hex value of the plugin binary> \
     command="myplugin"
 Success! Data written to: sys/plugins/catalog/myplugin-database-plugin
@@ -78,7 +83,7 @@ When a backend wants to run a plugin, it first looks up the plugin, by name, in
 the catalog. It then checks the executable's SHA256 sum against the one
 configured in the plugin catalog. Finally vault runs the command configured in
 the catalog, sending along the JWT formatted response wrapping token and mlock
-settings (like Vault, plugins support the use of mlock when available).
+settings (like Vault, plugins support [the use of mlock when available](https://www.vaultproject.io/docs/configuration/index.html#disable_mlock)).
 
 # Plugin Development
 
@@ -109,7 +114,7 @@ package main
 
 import (
 	"os"
-	
+
 	"github.com/hashicorp/vault/helper/pluginutil"
 	"github.com/hashicorp/vault/plugins"
 )
@@ -118,10 +123,12 @@ func main() {
 	apiClientMeta := &pluginutil.APIClientMeta{}
 	flags := apiClientMeta.FlagSet()
 	flags.Parse(os.Args)
-	
+
 	plugins.Serve(New().(MyPlugin), apiClientMeta.GetTLSConfig())
 }
 ```
 
 And that's basically it! You would just need to change MyPlugin to your actual
 plugin.
+
+[api_addr]: /docs/configuration/index.html#api_addr

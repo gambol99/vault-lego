@@ -20,9 +20,9 @@ import (
 	"fmt"
 
 	"github.com/Sirupsen/logrus"
+	kc_api "k8s.io/api/core/v1"
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-	kc_api "k8s.io/client-go/pkg/api/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
@@ -30,7 +30,7 @@ import (
 // hasSecret checks if the secret exists for the namespace
 func (c *controller) hasSecret(name, namespace string) (bool, error) {
 	// step: get a list of all secrets
-	list, err := c.kc.Secrets(namespace).List(meta_v1.ListOptions{})
+	list, err := c.kc.CoreV1().Secrets(namespace).List(meta_v1.ListOptions{})
 	if err != nil {
 		return false, err
 	}
@@ -51,7 +51,7 @@ func (c *controller) getSecret(name, namespace string) (certificate, error) {
 		"namespace": namespace,
 	}).Debug("retrieving the certificate secret from kubernetes")
 
-	secret, err := c.kc.Secrets(namespace).Get(name, meta_v1.GetOptions{})
+	secret, err := c.kc.CoreV1().Secrets(namespace).Get(name, meta_v1.GetOptions{})
 	if err != nil {
 		return cert, err
 	}
@@ -91,9 +91,9 @@ func (c *controller) addSecret(name, namespace string, cert certificate) error {
 	}
 	switch found {
 	case false:
-		_, err = c.kc.Secrets(namespace).Create(secret)
+		_, err = c.kc.CoreV1().Secrets(namespace).Create(secret)
 	default:
-		_, err = c.kc.Secrets(namespace).Update(secret)
+		_, err = c.kc.CoreV1().Secrets(namespace).Update(secret)
 	}
 
 	return err

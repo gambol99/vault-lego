@@ -22,12 +22,12 @@ import (
 	"strings"
 	"time"
 
+	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/kubernetes/pkg/api/v1"
-	"k8s.io/kubernetes/pkg/client/clientset_generated/clientset"
+	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/kubernetes/test/e2e/framework"
 
 	. "github.com/onsi/ginkgo"
@@ -41,7 +41,7 @@ const (
 	DNSAutoscalerLabelName = "kube-dns-autoscaler"
 )
 
-var _ = framework.KubeDescribe("DNS horizontal autoscaling", func() {
+var _ = SIGDescribe("DNS horizontal autoscaling", func() {
 	f := framework.NewDefaultFramework("dns-autoscaling")
 	var c clientset.Interface
 	var previousParams map[string]string
@@ -99,9 +99,11 @@ var _ = framework.KubeDescribe("DNS horizontal autoscaling", func() {
 	// This test is separated because it is slow and need to run serially.
 	// Will take around 5 minutes to run on a 4 nodes cluster.
 	It("[Serial] [Slow] kube-dns-autoscaler should scale kube-dns pods when cluster size changed", func() {
+		numNodes, err := framework.NumberOfRegisteredNodes(c)
+		Expect(err).NotTo(HaveOccurred())
 
 		By("Replace the dns autoscaling parameters with testing parameters")
-		err := updateDNSScalingConfigMap(c, packDNSScalingConfigMap(packLinearParams(&DNSParams_1)))
+		err = updateDNSScalingConfigMap(c, packDNSScalingConfigMap(packLinearParams(&DNSParams_1)))
 		Expect(err).NotTo(HaveOccurred())
 		defer func() {
 			By("Restoring intial dns autoscaling parameters")
@@ -117,25 +119,21 @@ var _ = framework.KubeDescribe("DNS horizontal autoscaling", func() {
 		Expect(waitForDNSReplicasSatisfied(c, getExpectReplicasLinear, DNSdefaultTimeout)).NotTo(HaveOccurred())
 
 		originalSizes := make(map[string]int)
-		sum := 0
 		for _, mig := range strings.Split(framework.TestContext.CloudConfig.NodeInstanceGroup, ",") {
 			size, err := framework.GroupSize(mig)
 			Expect(err).NotTo(HaveOccurred())
 			By(fmt.Sprintf("Initial size of %s: %d", mig, size))
 			originalSizes[mig] = size
-			sum += size
 		}
 
 		By("Manually increase cluster size")
-		increasedSize := 0
 		increasedSizes := make(map[string]int)
 		for key, val := range originalSizes {
 			increasedSizes[key] = val + 1
-			increasedSize += increasedSizes[key]
 		}
 		setMigSizes(increasedSizes)
 		Expect(WaitForClusterSizeFunc(c,
-			func(size int) bool { return size == increasedSize }, scaleUpTimeout)).NotTo(HaveOccurred())
+			func(size int) bool { return size == numNodes+len(originalSizes) }, scaleUpTimeout)).NotTo(HaveOccurred())
 
 		By("Wait for kube-dns scaled to expected number")
 		getExpectReplicasLinear = getExpectReplicasFuncLinear(c, &DNSParams_1)
@@ -151,7 +149,7 @@ var _ = framework.KubeDescribe("DNS horizontal autoscaling", func() {
 
 		By("Restoring cluster size")
 		setMigSizes(originalSizes)
-		Expect(framework.WaitForClusterSize(c, sum, scaleDownTimeout)).NotTo(HaveOccurred())
+		Expect(framework.WaitForReadyNodes(c, numNodes, scaleDownTimeout)).NotTo(HaveOccurred())
 
 		By("Wait for kube-dns scaled to expected number")
 		Expect(waitForDNSReplicasSatisfied(c, getExpectReplicasLinear, DNSdefaultTimeout)).NotTo(HaveOccurred())
@@ -248,7 +246,7 @@ func getScheduableCores(nodes []v1.Node) int64 {
 }
 
 func fetchDNSScalingConfigMap(c clientset.Interface) (*v1.ConfigMap, error) {
-	cm, err := c.Core().ConfigMaps(metav1.NamespaceSystem).Get(DNSAutoscalerLabelName, metav1.GetOptions{})
+	cm, err := c.CoreV1().ConfigMaps(metav1.NamespaceSystem).Get(DNSAutoscalerLabelName, metav1.GetOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -256,7 +254,7 @@ func fetchDNSScalingConfigMap(c clientset.Interface) (*v1.ConfigMap, error) {
 }
 
 func deleteDNSScalingConfigMap(c clientset.Interface) error {
-	if err := c.Core().ConfigMaps(metav1.NamespaceSystem).Delete(DNSAutoscalerLabelName, nil); err != nil {
+	if err := c.CoreV1().ConfigMaps(metav1.NamespaceSystem).Delete(DNSAutoscalerLabelName, nil); err != nil {
 		return err
 	}
 	framework.Logf("DNS autoscaling ConfigMap deleted.")
@@ -282,7 +280,7 @@ func packDNSScalingConfigMap(params map[string]string) *v1.ConfigMap {
 }
 
 func updateDNSScalingConfigMap(c clientset.Interface, configMap *v1.ConfigMap) error {
-	_, err := c.Core().ConfigMaps(metav1.NamespaceSystem).Update(configMap)
+	_, err := c.CoreV1().ConfigMaps(metav1.NamespaceSystem).Update(configMap)
 	if err != nil {
 		return err
 	}
@@ -293,7 +291,7 @@ func updateDNSScalingConfigMap(c clientset.Interface, configMap *v1.ConfigMap) e
 func getDNSReplicas(c clientset.Interface) (int, error) {
 	label := labels.SelectorFromSet(labels.Set(map[string]string{ClusterAddonLabelKey: DNSLabelName}))
 	listOpts := metav1.ListOptions{LabelSelector: label.String()}
-	deployments, err := c.Extensions().Deployments(metav1.NamespaceSystem).List(listOpts)
+	deployments, err := c.ExtensionsV1beta1().Deployments(metav1.NamespaceSystem).List(listOpts)
 	if err != nil {
 		return 0, err
 	}
@@ -308,7 +306,7 @@ func getDNSReplicas(c clientset.Interface) (int, error) {
 func deleteDNSAutoscalerPod(c clientset.Interface) error {
 	label := labels.SelectorFromSet(labels.Set(map[string]string{ClusterAddonLabelKey: DNSAutoscalerLabelName}))
 	listOpts := metav1.ListOptions{LabelSelector: label.String()}
-	pods, err := c.Core().Pods(metav1.NamespaceSystem).List(listOpts)
+	pods, err := c.CoreV1().Pods(metav1.NamespaceSystem).List(listOpts)
 	if err != nil {
 		return err
 	}
@@ -317,7 +315,7 @@ func deleteDNSAutoscalerPod(c clientset.Interface) error {
 	}
 
 	podName := pods.Items[0].Name
-	if err := c.Core().Pods(metav1.NamespaceSystem).Delete(podName, nil); err != nil {
+	if err := c.CoreV1().Pods(metav1.NamespaceSystem).Delete(podName, nil); err != nil {
 		return err
 	}
 	framework.Logf("DNS autoscaling pod %v deleted.", podName)

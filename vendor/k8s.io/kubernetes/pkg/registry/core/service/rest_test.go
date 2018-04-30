@@ -19,7 +19,6 @@ package service
 import (
 	"testing"
 
-	"fmt"
 	"net"
 	"reflect"
 	"strings"
@@ -31,11 +30,15 @@ import (
 	utilnet "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/apimachinery/pkg/util/rand"
 	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
+	"k8s.io/apiserver/pkg/registry/generic"
 	"k8s.io/apiserver/pkg/registry/rest"
+	etcdtesting "k8s.io/apiserver/pkg/storage/etcd/testing"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
-	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/service"
+	api "k8s.io/kubernetes/pkg/apis/core"
+	"k8s.io/kubernetes/pkg/apis/core/helper"
 	"k8s.io/kubernetes/pkg/features"
+	podstore "k8s.io/kubernetes/pkg/registry/core/pod/storage"
 	"k8s.io/kubernetes/pkg/registry/core/service/ipallocator"
 	"k8s.io/kubernetes/pkg/registry/core/service/portallocator"
 	"k8s.io/kubernetes/pkg/registry/registrytest"
@@ -53,19 +56,40 @@ func generateRandomNodePort() int32 {
 	return int32(rand.IntnRange(30001, 30999))
 }
 
-func NewTestREST(t *testing.T, endpoints *api.EndpointsList) (*REST, *registrytest.ServiceRegistry) {
+func NewTestREST(t *testing.T, endpoints *api.EndpointsList) (*REST, *registrytest.ServiceRegistry, *etcdtesting.EtcdTestServer) {
+	return NewTestRESTWithPods(t, endpoints, nil)
+}
+
+func NewTestRESTWithPods(t *testing.T, endpoints *api.EndpointsList, pods *api.PodList) (*REST, *registrytest.ServiceRegistry, *etcdtesting.EtcdTestServer) {
 	registry := registrytest.NewServiceRegistry()
 	endpointRegistry := &registrytest.EndpointRegistry{
 		Endpoints: endpoints,
+	}
+	etcdStorage, server := registrytest.NewEtcdStorage(t, "")
+	restOptions := generic.RESTOptions{
+		StorageConfig:           etcdStorage,
+		Decorator:               generic.UndecoratedStorage,
+		DeleteCollectionWorkers: 3,
+		ResourcePrefix:          "pods",
+	}
+	podStorage := podstore.NewStorage(restOptions, nil, nil, nil)
+	if pods != nil && pods.Items != nil {
+		ctx := genericapirequest.NewDefaultContext()
+		for ix := range pods.Items {
+			key, _ := podStorage.Pod.KeyFunc(ctx, pods.Items[ix].Name)
+			if err := podStorage.Pod.Storage.Create(ctx, key, &pods.Items[ix], nil, 0); err != nil {
+				t.Fatalf("Couldn't create pod: %v", err)
+			}
+		}
 	}
 	r := ipallocator.NewCIDRRange(makeIPNet(t))
 
 	portRange := utilnet.PortRange{Base: 30000, Size: 1000}
 	portAllocator := portallocator.NewPortAllocator(portRange)
 
-	storage := NewStorage(registry, endpointRegistry, r, portAllocator, nil)
+	storage := NewStorage(registry, endpointRegistry, podStorage.Pod, r, portAllocator, nil)
 
-	return storage.Service, registry
+	return storage.Service, registry, server
 }
 
 func makeIPNet(t *testing.T) *net.IPNet {
@@ -76,16 +100,27 @@ func makeIPNet(t *testing.T) *net.IPNet {
 	return net
 }
 
-func deepCloneService(svc *api.Service) *api.Service {
-	value, err := api.Scheme.DeepCopy(svc)
+func releaseServiceNodePorts(t *testing.T, ctx genericapirequest.Context, svcName string, rest *REST, registry *registrytest.ServiceRegistry) {
+	srv, err := registry.GetService(ctx, svcName, &metav1.GetOptions{})
 	if err != nil {
-		panic("couldn't copy service")
+		t.Errorf("Unexpected error: %v", err)
 	}
-	return value.(*api.Service)
+	if srv == nil {
+		t.Fatalf("Failed to find service: %s", svcName)
+	}
+	serviceNodePorts := CollectServiceNodePorts(srv)
+	if len(serviceNodePorts) == 0 {
+		t.Errorf("Failed to find NodePorts of service : %s", srv.Name)
+	}
+	for i := range serviceNodePorts {
+		nodePort := serviceNodePorts[i]
+		rest.serviceNodePorts.Release(nodePort)
+	}
 }
 
 func TestServiceRegistryCreate(t *testing.T) {
-	storage, registry := NewTestREST(t, nil)
+	storage, registry, server := NewTestREST(t, nil)
+	defer server.Terminate(t)
 
 	svc := &api.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "foo"},
@@ -101,7 +136,7 @@ func TestServiceRegistryCreate(t *testing.T) {
 		},
 	}
 	ctx := genericapirequest.NewDefaultContext()
-	created_svc, err := storage.Create(ctx, svc, false)
+	created_svc, err := storage.Create(ctx, svc, rest.ValidateAllObjectFunc, false)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -132,7 +167,9 @@ func TestServiceRegistryCreate(t *testing.T) {
 }
 
 func TestServiceRegistryCreateMultiNodePortsService(t *testing.T) {
-	storage, registry := NewTestREST(t, nil)
+	storage, registry, server := NewTestREST(t, nil)
+	defer server.Terminate(t)
+
 	testCases := []struct {
 		svc             *api.Service
 		name            string
@@ -225,7 +262,7 @@ func TestServiceRegistryCreateMultiNodePortsService(t *testing.T) {
 
 	ctx := genericapirequest.NewDefaultContext()
 	for _, test := range testCases {
-		created_svc, err := storage.Create(ctx, test.svc, false)
+		created_svc, err := storage.Create(ctx, test.svc, rest.ValidateAllObjectFunc, false)
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
 		}
@@ -249,13 +286,19 @@ func TestServiceRegistryCreateMultiNodePortsService(t *testing.T) {
 			t.Errorf("unexpected error: %v", err)
 		}
 		if srv == nil {
-			t.Errorf("Failed to find service: %s", test.name)
+			t.Fatalf("Failed to find service: %s", test.name)
+		}
+		for i := range serviceNodePorts {
+			nodePort := serviceNodePorts[i]
+			// Release the node port at the end of the test case.
+			storage.serviceNodePorts.Release(nodePort)
 		}
 	}
 }
 
 func TestServiceStorageValidatesCreate(t *testing.T) {
-	storage, _ := NewTestREST(t, nil)
+	storage, _, server := NewTestREST(t, nil)
+	defer server.Terminate(t)
 	failureCases := map[string]api.Service{
 		"empty ID": {
 			ObjectMeta: metav1.ObjectMeta{Name: ""},
@@ -296,7 +339,7 @@ func TestServiceStorageValidatesCreate(t *testing.T) {
 	}
 	ctx := genericapirequest.NewDefaultContext()
 	for _, failureCase := range failureCases {
-		c, err := storage.Create(ctx, &failureCase, false)
+		c, err := storage.Create(ctx, &failureCase, rest.ValidateAllObjectFunc, false)
 		if c != nil {
 			t.Errorf("Expected nil object")
 		}
@@ -308,7 +351,9 @@ func TestServiceStorageValidatesCreate(t *testing.T) {
 
 func TestServiceRegistryUpdate(t *testing.T) {
 	ctx := genericapirequest.NewDefaultContext()
-	storage, registry := NewTestREST(t, nil)
+	storage, registry, server := NewTestREST(t, nil)
+	defer server.Terminate(t)
+
 	svc, err := registry.CreateService(ctx, &api.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "foo", ResourceVersion: "1", Namespace: metav1.NamespaceDefault},
 		Spec: api.ServiceSpec{
@@ -319,7 +364,7 @@ func TestServiceRegistryUpdate(t *testing.T) {
 				TargetPort: intstr.FromInt(6502),
 			}},
 		},
-	})
+	}, rest.ValidateAllObjectFunc)
 
 	if err != nil {
 		t.Fatalf("Expected no error: %v", err)
@@ -338,7 +383,7 @@ func TestServiceRegistryUpdate(t *testing.T) {
 				TargetPort: intstr.FromInt(6502),
 			}},
 		},
-	}, api.Scheme))
+	}), rest.ValidateAllObjectFunc, rest.ValidateAllObjectUpdateFunc)
 	if err != nil {
 		t.Fatalf("Expected no error: %v", err)
 	}
@@ -359,7 +404,8 @@ func TestServiceRegistryUpdate(t *testing.T) {
 
 func TestServiceStorageValidatesUpdate(t *testing.T) {
 	ctx := genericapirequest.NewDefaultContext()
-	storage, registry := NewTestREST(t, nil)
+	storage, registry, server := NewTestREST(t, nil)
+	defer server.Terminate(t)
 	registry.CreateService(ctx, &api.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "foo"},
 		Spec: api.ServiceSpec{
@@ -369,7 +415,7 @@ func TestServiceStorageValidatesUpdate(t *testing.T) {
 				Protocol: api.ProtocolTCP,
 			}},
 		},
-	})
+	}, rest.ValidateAllObjectFunc)
 	failureCases := map[string]api.Service{
 		"empty ID": {
 			ObjectMeta: metav1.ObjectMeta{Name: ""},
@@ -399,7 +445,7 @@ func TestServiceStorageValidatesUpdate(t *testing.T) {
 		},
 	}
 	for _, failureCase := range failureCases {
-		c, created, err := storage.Update(ctx, failureCase.Name, rest.DefaultUpdatedObjectInfo(&failureCase, api.Scheme))
+		c, created, err := storage.Update(ctx, failureCase.Name, rest.DefaultUpdatedObjectInfo(&failureCase), rest.ValidateAllObjectFunc, rest.ValidateAllObjectUpdateFunc)
 		if c != nil || created {
 			t.Errorf("Expected nil object or created false")
 		}
@@ -411,7 +457,8 @@ func TestServiceStorageValidatesUpdate(t *testing.T) {
 
 func TestServiceRegistryExternalService(t *testing.T) {
 	ctx := genericapirequest.NewDefaultContext()
-	storage, registry := NewTestREST(t, nil)
+	storage, registry, server := NewTestREST(t, nil)
+	defer server.Terminate(t)
 	svc := &api.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "foo"},
 		Spec: api.ServiceSpec{
@@ -425,7 +472,7 @@ func TestServiceRegistryExternalService(t *testing.T) {
 			}},
 		},
 	}
-	_, err := storage.Create(ctx, svc, false)
+	_, err := storage.Create(ctx, svc, rest.ValidateAllObjectFunc, false)
 	if err != nil {
 		t.Errorf("Failed to create service: %#v", err)
 	}
@@ -434,13 +481,23 @@ func TestServiceRegistryExternalService(t *testing.T) {
 		t.Errorf("Unexpected error: %v", err)
 	}
 	if srv == nil {
-		t.Errorf("Failed to find service: %s", svc.Name)
+		t.Fatalf("Failed to find service: %s", svc.Name)
+	}
+	serviceNodePorts := CollectServiceNodePorts(srv)
+	if len(serviceNodePorts) == 0 {
+		t.Errorf("Failed to find NodePorts of service : %s", srv.Name)
+	}
+	for i := range serviceNodePorts {
+		nodePort := serviceNodePorts[i]
+		// Release the node port at the end of the test case.
+		storage.serviceNodePorts.Release(nodePort)
 	}
 }
 
 func TestServiceRegistryDelete(t *testing.T) {
 	ctx := genericapirequest.NewDefaultContext()
-	storage, registry := NewTestREST(t, nil)
+	storage, registry, server := NewTestREST(t, nil)
+	defer server.Terminate(t)
 	svc := &api.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "foo"},
 		Spec: api.ServiceSpec{
@@ -453,7 +510,7 @@ func TestServiceRegistryDelete(t *testing.T) {
 			}},
 		},
 	}
-	registry.CreateService(ctx, svc)
+	registry.CreateService(ctx, svc, rest.ValidateAllObjectFunc)
 	storage.Delete(ctx, svc.Name)
 	if e, a := "foo", registry.DeletedID; e != a {
 		t.Errorf("Expected %v, but got %v", e, a)
@@ -462,7 +519,8 @@ func TestServiceRegistryDelete(t *testing.T) {
 
 func TestServiceRegistryDeleteExternal(t *testing.T) {
 	ctx := genericapirequest.NewDefaultContext()
-	storage, registry := NewTestREST(t, nil)
+	storage, registry, server := NewTestREST(t, nil)
+	defer server.Terminate(t)
 	svc := &api.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "foo"},
 		Spec: api.ServiceSpec{
@@ -475,7 +533,7 @@ func TestServiceRegistryDeleteExternal(t *testing.T) {
 			}},
 		},
 	}
-	registry.CreateService(ctx, svc)
+	registry.CreateService(ctx, svc, rest.ValidateAllObjectFunc)
 	storage.Delete(ctx, svc.Name)
 	if e, a := "foo", registry.DeletedID; e != a {
 		t.Errorf("Expected %v, but got %v", e, a)
@@ -484,7 +542,8 @@ func TestServiceRegistryDeleteExternal(t *testing.T) {
 
 func TestServiceRegistryUpdateExternalService(t *testing.T) {
 	ctx := genericapirequest.NewDefaultContext()
-	storage, _ := NewTestREST(t, nil)
+	storage, registry, server := NewTestREST(t, nil)
+	defer server.Terminate(t)
 
 	// Create non-external load balancer.
 	svc1 := &api.Service{
@@ -500,28 +559,30 @@ func TestServiceRegistryUpdateExternalService(t *testing.T) {
 			}},
 		},
 	}
-	if _, err := storage.Create(ctx, svc1, false); err != nil {
+	if _, err := storage.Create(ctx, svc1, rest.ValidateAllObjectFunc, false); err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 
 	// Modify load balancer to be external.
-	svc2 := deepCloneService(svc1)
+	svc2 := svc1.DeepCopy()
 	svc2.Spec.Type = api.ServiceTypeLoadBalancer
-	if _, _, err := storage.Update(ctx, svc2.Name, rest.DefaultUpdatedObjectInfo(svc2, api.Scheme)); err != nil {
+	if _, _, err := storage.Update(ctx, svc2.Name, rest.DefaultUpdatedObjectInfo(svc2), rest.ValidateAllObjectFunc, rest.ValidateAllObjectUpdateFunc); err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
+	defer releaseServiceNodePorts(t, ctx, svc2.Name, storage, registry)
 
 	// Change port.
-	svc3 := deepCloneService(svc2)
+	svc3 := svc2.DeepCopy()
 	svc3.Spec.Ports[0].Port = 6504
-	if _, _, err := storage.Update(ctx, svc3.Name, rest.DefaultUpdatedObjectInfo(svc3, api.Scheme)); err != nil {
+	if _, _, err := storage.Update(ctx, svc3.Name, rest.DefaultUpdatedObjectInfo(svc3), rest.ValidateAllObjectFunc, rest.ValidateAllObjectUpdateFunc); err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 }
 
 func TestServiceRegistryUpdateMultiPortExternalService(t *testing.T) {
 	ctx := genericapirequest.NewDefaultContext()
-	storage, _ := NewTestREST(t, nil)
+	storage, registry, server := NewTestREST(t, nil)
+	defer server.Terminate(t)
 
 	// Create external load balancer.
 	svc1 := &api.Service{
@@ -543,27 +604,29 @@ func TestServiceRegistryUpdateMultiPortExternalService(t *testing.T) {
 			}},
 		},
 	}
-	if _, err := storage.Create(ctx, svc1, false); err != nil {
+	if _, err := storage.Create(ctx, svc1, rest.ValidateAllObjectFunc, false); err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
+	defer releaseServiceNodePorts(t, ctx, svc1.Name, storage, registry)
 
 	// Modify ports
-	svc2 := deepCloneService(svc1)
+	svc2 := svc1.DeepCopy()
 	svc2.Spec.Ports[1].Port = 8088
-	if _, _, err := storage.Update(ctx, svc2.Name, rest.DefaultUpdatedObjectInfo(svc2, api.Scheme)); err != nil {
+	if _, _, err := storage.Update(ctx, svc2.Name, rest.DefaultUpdatedObjectInfo(svc2), rest.ValidateAllObjectFunc, rest.ValidateAllObjectUpdateFunc); err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 }
 
 func TestServiceRegistryGet(t *testing.T) {
 	ctx := genericapirequest.NewDefaultContext()
-	storage, registry := NewTestREST(t, nil)
+	storage, registry, server := NewTestREST(t, nil)
+	defer server.Terminate(t)
 	registry.CreateService(ctx, &api.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "foo"},
 		Spec: api.ServiceSpec{
 			Selector: map[string]string{"bar": "baz"},
 		},
-	})
+	}, rest.ValidateAllObjectFunc)
 	storage.Get(ctx, "foo", &metav1.GetOptions{})
 	if e, a := "foo", registry.GottenID; e != a {
 		t.Errorf("Expected %v, but got %v", e, a)
@@ -576,11 +639,25 @@ func TestServiceRegistryResourceLocation(t *testing.T) {
 		Items: []api.Endpoints{
 			{
 				ObjectMeta: metav1.ObjectMeta{
+					Name:      "bad",
+					Namespace: metav1.NamespaceDefault,
+				},
+				Subsets: []api.EndpointSubset{{
+					Addresses: []api.EndpointAddress{
+						{IP: "1.2.3.4", TargetRef: &api.ObjectReference{Name: "foo", Namespace: "doesn't exist"}},
+						{IP: "1.2.3.4", TargetRef: &api.ObjectReference{Name: "doesn't exist", Namespace: metav1.NamespaceDefault}},
+						{IP: "23.2.3.4", TargetRef: &api.ObjectReference{Name: "foo", Namespace: metav1.NamespaceDefault}},
+					},
+					Ports: []api.EndpointPort{{Name: "", Port: 80}, {Name: "p", Port: 93}},
+				}},
+			},
+			{
+				ObjectMeta: metav1.ObjectMeta{
 					Name:      "foo",
 					Namespace: metav1.NamespaceDefault,
 				},
 				Subsets: []api.EndpointSubset{{
-					Addresses: []api.EndpointAddress{{IP: "1.2.3.4"}},
+					Addresses: []api.EndpointAddress{{IP: "1.2.3.4", TargetRef: &api.ObjectReference{Name: "foo", Namespace: metav1.NamespaceDefault}}},
 					Ports:     []api.EndpointPort{{Name: "", Port: 80}, {Name: "p", Port: 93}},
 				}},
 			},
@@ -593,30 +670,65 @@ func TestServiceRegistryResourceLocation(t *testing.T) {
 					Addresses: []api.EndpointAddress{},
 					Ports:     []api.EndpointPort{{Name: "", Port: 80}, {Name: "p", Port: 93}},
 				}, {
-					Addresses: []api.EndpointAddress{{IP: "1.2.3.4"}},
+					Addresses: []api.EndpointAddress{{IP: "1.2.3.4", TargetRef: &api.ObjectReference{Name: "foo", Namespace: metav1.NamespaceDefault}}},
 					Ports:     []api.EndpointPort{{Name: "", Port: 80}, {Name: "p", Port: 93}},
 				}, {
-					Addresses: []api.EndpointAddress{{IP: "1.2.3.5"}},
+					Addresses: []api.EndpointAddress{{IP: "1.2.3.5", TargetRef: &api.ObjectReference{Name: "bar", Namespace: metav1.NamespaceDefault}}},
 					Ports:     []api.EndpointPort{},
 				}},
 			},
 		},
 	}
-	storage, registry := NewTestREST(t, endpoints)
-	registry.CreateService(ctx, &api.Service{
-		ObjectMeta: metav1.ObjectMeta{Name: "foo"},
-		Spec: api.ServiceSpec{
-			Selector: map[string]string{"bar": "baz"},
-			Ports: []api.ServicePort{
-				// Service port 9393 should route to endpoint port "p", which is port 93
-				{Name: "p", Port: 9393, TargetPort: intstr.FromString("p")},
-
-				// Service port 93 should route to unnamed endpoint port, which is port 80
-				// This is to test that the service port definition is used when determining resource location
-				{Name: "", Port: 93, TargetPort: intstr.FromInt(80)},
+	pods := &api.PodList{
+		Items: []api.Pod{
+			{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "foo",
+					Namespace: metav1.NamespaceDefault,
+				},
+				Spec: api.PodSpec{
+					RestartPolicy: "Always",
+					DNSPolicy:     "Default",
+					Containers:    []api.Container{{Name: "bar", Image: "test", ImagePullPolicy: api.PullIfNotPresent, TerminationMessagePolicy: api.TerminationMessageReadFile}},
+				},
+				Status: api.PodStatus{
+					PodIP: "1.2.3.4",
+				},
+			},
+			{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "bar",
+					Namespace: metav1.NamespaceDefault,
+				},
+				Spec: api.PodSpec{
+					RestartPolicy: "Always",
+					DNSPolicy:     "Default",
+					Containers:    []api.Container{{Name: "bar", Image: "test", ImagePullPolicy: api.PullIfNotPresent, TerminationMessagePolicy: api.TerminationMessageReadFile}},
+				},
+				Status: api.PodStatus{
+					PodIP: "1.2.3.5",
+				},
 			},
 		},
-	})
+	}
+	storage, registry, server := NewTestRESTWithPods(t, endpoints, pods)
+	defer server.Terminate(t)
+	for _, name := range []string{"foo", "bad"} {
+		registry.CreateService(ctx, &api.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Spec: api.ServiceSpec{
+				Selector: map[string]string{"bar": "baz"},
+				Ports: []api.ServicePort{
+					// Service port 9393 should route to endpoint port "p", which is port 93
+					{Name: "p", Port: 9393, TargetPort: intstr.FromString("p")},
+
+					// Service port 93 should route to unnamed endpoint port, which is port 80
+					// This is to test that the service port definition is used when determining resource location
+					{Name: "", Port: 93, TargetPort: intstr.FromInt(80)},
+				},
+			},
+		}, rest.ValidateAllObjectFunc)
+	}
 	redirector := rest.Redirector(storage)
 
 	// Test a simple id.
@@ -689,23 +801,30 @@ func TestServiceRegistryResourceLocation(t *testing.T) {
 	if _, _, err = redirector.ResourceLocation(ctx, "bar"); err == nil {
 		t.Errorf("unexpected nil error")
 	}
+
+	// Test a simple id.
+	_, _, err = redirector.ResourceLocation(ctx, "bad")
+	if err == nil {
+		t.Errorf("Unexpected nil error")
+	}
 }
 
 func TestServiceRegistryList(t *testing.T) {
 	ctx := genericapirequest.NewDefaultContext()
-	storage, registry := NewTestREST(t, nil)
+	storage, registry, server := NewTestREST(t, nil)
+	defer server.Terminate(t)
 	registry.CreateService(ctx, &api.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "foo", Namespace: metav1.NamespaceDefault},
 		Spec: api.ServiceSpec{
 			Selector: map[string]string{"bar": "baz"},
 		},
-	})
+	}, rest.ValidateAllObjectFunc)
 	registry.CreateService(ctx, &api.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "foo2", Namespace: metav1.NamespaceDefault},
 		Spec: api.ServiceSpec{
 			Selector: map[string]string{"bar2": "baz2"},
 		},
-	})
+	}, rest.ValidateAllObjectFunc)
 	registry.List.ResourceVersion = "1"
 	s, _ := storage.List(ctx, nil)
 	sl := s.(*api.ServiceList)
@@ -724,7 +843,8 @@ func TestServiceRegistryList(t *testing.T) {
 }
 
 func TestServiceRegistryIPAllocation(t *testing.T) {
-	storage, _ := NewTestREST(t, nil)
+	storage, _, server := NewTestREST(t, nil)
+	defer server.Terminate(t)
 
 	svc1 := &api.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "foo"},
@@ -740,7 +860,7 @@ func TestServiceRegistryIPAllocation(t *testing.T) {
 		},
 	}
 	ctx := genericapirequest.NewDefaultContext()
-	created_svc1, _ := storage.Create(ctx, svc1, false)
+	created_svc1, _ := storage.Create(ctx, svc1, rest.ValidateAllObjectFunc, false)
 	created_service_1 := created_svc1.(*api.Service)
 	if created_service_1.Name != "foo" {
 		t.Errorf("Expected foo, but got %v", created_service_1.Name)
@@ -762,7 +882,7 @@ func TestServiceRegistryIPAllocation(t *testing.T) {
 			}},
 		}}
 	ctx = genericapirequest.NewDefaultContext()
-	created_svc2, _ := storage.Create(ctx, svc2, false)
+	created_svc2, _ := storage.Create(ctx, svc2, rest.ValidateAllObjectFunc, false)
 	created_service_2 := created_svc2.(*api.Service)
 	if created_service_2.Name != "bar" {
 		t.Errorf("Expected bar, but got %v", created_service_2.Name)
@@ -795,7 +915,7 @@ func TestServiceRegistryIPAllocation(t *testing.T) {
 		},
 	}
 	ctx = genericapirequest.NewDefaultContext()
-	created_svc3, err := storage.Create(ctx, svc3, false)
+	created_svc3, err := storage.Create(ctx, svc3, rest.ValidateAllObjectFunc, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -806,7 +926,8 @@ func TestServiceRegistryIPAllocation(t *testing.T) {
 }
 
 func TestServiceRegistryIPReallocation(t *testing.T) {
-	storage, _ := NewTestREST(t, nil)
+	storage, _, server := NewTestREST(t, nil)
+	defer server.Terminate(t)
 
 	svc1 := &api.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "foo"},
@@ -822,7 +943,7 @@ func TestServiceRegistryIPReallocation(t *testing.T) {
 		},
 	}
 	ctx := genericapirequest.NewDefaultContext()
-	created_svc1, _ := storage.Create(ctx, svc1, false)
+	created_svc1, _ := storage.Create(ctx, svc1, rest.ValidateAllObjectFunc, false)
 	created_service_1 := created_svc1.(*api.Service)
 	if created_service_1.Name != "foo" {
 		t.Errorf("Expected foo, but got %v", created_service_1.Name)
@@ -850,7 +971,7 @@ func TestServiceRegistryIPReallocation(t *testing.T) {
 		},
 	}
 	ctx = genericapirequest.NewDefaultContext()
-	created_svc2, _ := storage.Create(ctx, svc2, false)
+	created_svc2, _ := storage.Create(ctx, svc2, rest.ValidateAllObjectFunc, false)
 	created_service_2 := created_svc2.(*api.Service)
 	if created_service_2.Name != "bar" {
 		t.Errorf("Expected bar, but got %v", created_service_2.Name)
@@ -861,7 +982,8 @@ func TestServiceRegistryIPReallocation(t *testing.T) {
 }
 
 func TestServiceRegistryIPUpdate(t *testing.T) {
-	storage, _ := NewTestREST(t, nil)
+	storage, _, server := NewTestREST(t, nil)
+	defer server.Terminate(t)
 
 	svc := &api.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "foo", ResourceVersion: "1"},
@@ -877,7 +999,7 @@ func TestServiceRegistryIPUpdate(t *testing.T) {
 		},
 	}
 	ctx := genericapirequest.NewDefaultContext()
-	created_svc, _ := storage.Create(ctx, svc, false)
+	created_svc, _ := storage.Create(ctx, svc, rest.ValidateAllObjectFunc, false)
 	created_service := created_svc.(*api.Service)
 	if created_service.Spec.Ports[0].Port != 6502 {
 		t.Errorf("Expected port 6502, but got %v", created_service.Spec.Ports[0].Port)
@@ -886,10 +1008,10 @@ func TestServiceRegistryIPUpdate(t *testing.T) {
 		t.Errorf("Unexpected ClusterIP: %s", created_service.Spec.ClusterIP)
 	}
 
-	update := deepCloneService(created_service)
+	update := created_service.DeepCopy()
 	update.Spec.Ports[0].Port = 6503
 
-	updated_svc, _, _ := storage.Update(ctx, update.Name, rest.DefaultUpdatedObjectInfo(update, api.Scheme))
+	updated_svc, _, _ := storage.Update(ctx, update.Name, rest.DefaultUpdatedObjectInfo(update), rest.ValidateAllObjectFunc, rest.ValidateAllObjectUpdateFunc)
 	updated_service := updated_svc.(*api.Service)
 	if updated_service.Spec.Ports[0].Port != 6503 {
 		t.Errorf("Expected port 6503, but got %v", updated_service.Spec.Ports[0].Port)
@@ -904,18 +1026,19 @@ func TestServiceRegistryIPUpdate(t *testing.T) {
 		}
 	}
 
-	update = deepCloneService(created_service)
+	update = created_service.DeepCopy()
 	update.Spec.Ports[0].Port = 6503
 	update.Spec.ClusterIP = testIP // Error: Cluster IP is immutable
 
-	_, _, err := storage.Update(ctx, update.Name, rest.DefaultUpdatedObjectInfo(update, api.Scheme))
+	_, _, err := storage.Update(ctx, update.Name, rest.DefaultUpdatedObjectInfo(update), rest.ValidateAllObjectFunc, rest.ValidateAllObjectUpdateFunc)
 	if err == nil || !errors.IsInvalid(err) {
 		t.Errorf("Unexpected error type: %v", err)
 	}
 }
 
 func TestServiceRegistryIPLoadBalancer(t *testing.T) {
-	storage, _ := NewTestREST(t, nil)
+	storage, registry, server := NewTestREST(t, nil)
+	defer server.Terminate(t)
 
 	svc := &api.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "foo", ResourceVersion: "1"},
@@ -931,7 +1054,12 @@ func TestServiceRegistryIPLoadBalancer(t *testing.T) {
 		},
 	}
 	ctx := genericapirequest.NewDefaultContext()
-	created_svc, _ := storage.Create(ctx, svc, false)
+	created_svc, err := storage.Create(ctx, svc, rest.ValidateAllObjectFunc, false)
+	if created_svc == nil || err != nil {
+		t.Errorf("Unexpected failure creating service %v", err)
+	}
+	defer releaseServiceNodePorts(t, ctx, svc.Name, storage, registry)
+
 	created_service := created_svc.(*api.Service)
 	if created_service.Spec.Ports[0].Port != 6502 {
 		t.Errorf("Expected port 6502, but got %v", created_service.Spec.Ports[0].Port)
@@ -940,22 +1068,23 @@ func TestServiceRegistryIPLoadBalancer(t *testing.T) {
 		t.Errorf("Unexpected ClusterIP: %s", created_service.Spec.ClusterIP)
 	}
 
-	update := deepCloneService(created_service)
+	update := created_service.DeepCopy()
 
-	_, _, err := storage.Update(ctx, update.Name, rest.DefaultUpdatedObjectInfo(update, api.Scheme))
+	_, _, err = storage.Update(ctx, update.Name, rest.DefaultUpdatedObjectInfo(update), rest.ValidateAllObjectFunc, rest.ValidateAllObjectUpdateFunc)
 	if err != nil {
 		t.Errorf("Unexpected error %v", err)
 	}
 }
 
 func TestUpdateServiceWithConflictingNamespace(t *testing.T) {
-	storage, _ := NewTestREST(t, nil)
+	storage, _, server := NewTestREST(t, nil)
+	defer server.Terminate(t)
 	service := &api.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "not-default"},
 	}
 
 	ctx := genericapirequest.NewDefaultContext()
-	obj, created, err := storage.Update(ctx, service.Name, rest.DefaultUpdatedObjectInfo(service, api.Scheme))
+	obj, created, err := storage.Update(ctx, service.Name, rest.DefaultUpdatedObjectInfo(service), rest.ValidateAllObjectFunc, rest.ValidateAllObjectUpdateFunc)
 	if obj != nil || created {
 		t.Error("Expected a nil object, but we got a value or created was true")
 	}
@@ -970,7 +1099,8 @@ func TestUpdateServiceWithConflictingNamespace(t *testing.T) {
 // and type is LoadBalancer.
 func TestServiceRegistryExternalTrafficHealthCheckNodePortAllocation(t *testing.T) {
 	ctx := genericapirequest.NewDefaultContext()
-	storage, _ := NewTestREST(t, nil)
+	storage, registry, server := NewTestREST(t, nil)
+	defer server.Terminate(t)
 	svc := &api.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "external-lb-esipp"},
 		Spec: api.ServiceSpec{
@@ -985,57 +1115,23 @@ func TestServiceRegistryExternalTrafficHealthCheckNodePortAllocation(t *testing.
 			ExternalTrafficPolicy: api.ServiceExternalTrafficPolicyTypeLocal,
 		},
 	}
-	created_svc, err := storage.Create(ctx, svc, false)
+	created_svc, err := storage.Create(ctx, svc, rest.ValidateAllObjectFunc, false)
 	if created_svc == nil || err != nil {
 		t.Errorf("Unexpected failure creating service %v", err)
 	}
+	defer releaseServiceNodePorts(t, ctx, svc.Name, storage, registry)
+
 	created_service := created_svc.(*api.Service)
 	if !service.NeedsHealthCheck(created_service) {
 		t.Errorf("Expecting health check needed, returned health check not needed instead")
 	}
-	port := service.GetServiceHealthCheckNodePort(created_service)
+	port := created_service.Spec.HealthCheckNodePort
 	if port == 0 {
 		t.Errorf("Failed to allocate health check node port and set the HealthCheckNodePort")
+	} else {
+		// Release the health check node port at the end of the test case.
+		storage.serviceNodePorts.Release(int(port))
 	}
-
-}
-
-// Validate allocation of a nodePort when ExternalTraffic beta annotation is set to OnlyLocal
-// and type is LoadBalancer.
-func TestServiceRegistryExternalTrafficHealthCheckNodePortAllocationBeta(t *testing.T) {
-	ctx := genericapirequest.NewDefaultContext()
-	storage, _ := NewTestREST(t, nil)
-	svc := &api.Service{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "external-lb-esipp",
-			Annotations: map[string]string{
-				api.BetaAnnotationExternalTraffic: api.AnnotationValueExternalTrafficLocal,
-			},
-		},
-		Spec: api.ServiceSpec{
-			Selector:        map[string]string{"bar": "baz"},
-			SessionAffinity: api.ServiceAffinityNone,
-			Type:            api.ServiceTypeLoadBalancer,
-			Ports: []api.ServicePort{{
-				Port:       6502,
-				Protocol:   api.ProtocolTCP,
-				TargetPort: intstr.FromInt(6502),
-			}},
-		},
-	}
-	created_svc, err := storage.Create(ctx, svc, false)
-	if created_svc == nil || err != nil {
-		t.Errorf("Unexpected failure creating service %v", err)
-	}
-	created_service := created_svc.(*api.Service)
-	if !service.NeedsHealthCheck(created_service) {
-		t.Errorf("Expecting health check needed, returned health check not needed instead")
-	}
-	port := service.GetServiceHealthCheckNodePort(created_service)
-	if port == 0 {
-		t.Errorf("Failed to allocate health check node port and set the HealthCheckNodePort")
-	}
-
 }
 
 // Validate using the user specified nodePort when ExternalTrafficPolicy is set to Local
@@ -1043,7 +1139,8 @@ func TestServiceRegistryExternalTrafficHealthCheckNodePortAllocationBeta(t *test
 func TestServiceRegistryExternalTrafficHealthCheckNodePortUserAllocation(t *testing.T) {
 	randomNodePort := generateRandomNodePort()
 	ctx := genericapirequest.NewDefaultContext()
-	storage, _ := NewTestREST(t, nil)
+	storage, registry, server := NewTestREST(t, nil)
+	defer server.Terminate(t)
 	svc := &api.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "external-lb-esipp"},
 		Spec: api.ServiceSpec{
@@ -1059,69 +1156,34 @@ func TestServiceRegistryExternalTrafficHealthCheckNodePortUserAllocation(t *test
 			HealthCheckNodePort:   randomNodePort,
 		},
 	}
-	created_svc, err := storage.Create(ctx, svc, false)
+	created_svc, err := storage.Create(ctx, svc, rest.ValidateAllObjectFunc, false)
 	if created_svc == nil || err != nil {
 		t.Fatalf("Unexpected failure creating service :%v", err)
 	}
-	created_service := created_svc.(*api.Service)
-	if !service.NeedsHealthCheck(created_service) {
-		t.Errorf("Expecting health check needed, returned health check not needed instead")
-	}
-	port := service.GetServiceHealthCheckNodePort(created_service)
-	if port == 0 {
-		t.Errorf("Failed to allocate health check node port and set the HealthCheckNodePort")
-	}
-	if port != randomNodePort {
-		t.Errorf("Failed to allocate requested nodePort expected %d, got %d", randomNodePort, port)
-	}
-}
+	defer releaseServiceNodePorts(t, ctx, svc.Name, storage, registry)
 
-// Validate using the user specified nodePort when ExternalTraffic beta annotation is set to OnlyLocal
-// and type is LoadBalancer.
-func TestServiceRegistryExternalTrafficHealthCheckNodePortUserAllocationBeta(t *testing.T) {
-	randomNodePort := generateRandomNodePort()
-	ctx := genericapirequest.NewDefaultContext()
-	storage, _ := NewTestREST(t, nil)
-	svc := &api.Service{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "external-lb-esipp",
-			Annotations: map[string]string{
-				api.BetaAnnotationExternalTraffic:     api.AnnotationValueExternalTrafficLocal,
-				api.BetaAnnotationHealthCheckNodePort: fmt.Sprintf("%v", randomNodePort),
-			},
-		},
-		Spec: api.ServiceSpec{
-			Selector:        map[string]string{"bar": "baz"},
-			SessionAffinity: api.ServiceAffinityNone,
-			Type:            api.ServiceTypeLoadBalancer,
-			Ports: []api.ServicePort{{
-				Port:       6502,
-				Protocol:   api.ProtocolTCP,
-				TargetPort: intstr.FromInt(6502),
-			}},
-		},
-	}
-	created_svc, err := storage.Create(ctx, svc, false)
-	if created_svc == nil || err != nil {
-		t.Fatalf("Unexpected failure creating service :%v", err)
-	}
 	created_service := created_svc.(*api.Service)
 	if !service.NeedsHealthCheck(created_service) {
 		t.Errorf("Expecting health check needed, returned health check not needed instead")
 	}
-	port := service.GetServiceHealthCheckNodePort(created_service)
+	port := created_service.Spec.HealthCheckNodePort
 	if port == 0 {
 		t.Errorf("Failed to allocate health check node port and set the HealthCheckNodePort")
 	}
 	if port != randomNodePort {
 		t.Errorf("Failed to allocate requested nodePort expected %d, got %d", randomNodePort, port)
+	}
+	if port != 0 {
+		// Release the health check node port at the end of the test case.
+		storage.serviceNodePorts.Release(int(port))
 	}
 }
 
 // Validate that the service creation fails when the requested port number is -1.
 func TestServiceRegistryExternalTrafficHealthCheckNodePortNegative(t *testing.T) {
 	ctx := genericapirequest.NewDefaultContext()
-	storage, _ := NewTestREST(t, nil)
+	storage, _, server := NewTestREST(t, nil)
+	defer server.Terminate(t)
 	svc := &api.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "external-lb-esipp"},
 		Spec: api.ServiceSpec{
@@ -1137,37 +1199,7 @@ func TestServiceRegistryExternalTrafficHealthCheckNodePortNegative(t *testing.T)
 			HealthCheckNodePort:   int32(-1),
 		},
 	}
-	created_svc, err := storage.Create(ctx, svc, false)
-	if created_svc == nil || err != nil {
-		return
-	}
-	t.Errorf("Unexpected creation of service with invalid HealthCheckNodePort specified")
-}
-
-// Validate that the service creation fails when the requested port number in beta annotation is -1.
-func TestServiceRegistryExternalTrafficHealthCheckNodePortNegativeBeta(t *testing.T) {
-	ctx := genericapirequest.NewDefaultContext()
-	storage, _ := NewTestREST(t, nil)
-	svc := &api.Service{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "external-lb-esipp",
-			Annotations: map[string]string{
-				api.BetaAnnotationExternalTraffic:     api.AnnotationValueExternalTrafficLocal,
-				api.BetaAnnotationHealthCheckNodePort: "-1",
-			},
-		},
-		Spec: api.ServiceSpec{
-			Selector:        map[string]string{"bar": "baz"},
-			SessionAffinity: api.ServiceAffinityNone,
-			Type:            api.ServiceTypeLoadBalancer,
-			Ports: []api.ServicePort{{
-				Port:       6502,
-				Protocol:   api.ProtocolTCP,
-				TargetPort: intstr.FromInt(6502),
-			}},
-		},
-	}
-	created_svc, err := storage.Create(ctx, svc, false)
+	created_svc, err := storage.Create(ctx, svc, rest.ValidateAllObjectFunc, false)
 	if created_svc == nil || err != nil {
 		return
 	}
@@ -1177,7 +1209,8 @@ func TestServiceRegistryExternalTrafficHealthCheckNodePortNegativeBeta(t *testin
 // Validate that the health check nodePort is not allocated when ExternalTrafficPolicy is set to Global.
 func TestServiceRegistryExternalTrafficGlobal(t *testing.T) {
 	ctx := genericapirequest.NewDefaultContext()
-	storage, _ := NewTestREST(t, nil)
+	storage, registry, server := NewTestREST(t, nil)
+	defer server.Terminate(t)
 	svc := &api.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "external-lb-esipp"},
 		Spec: api.ServiceSpec{
@@ -1192,87 +1225,565 @@ func TestServiceRegistryExternalTrafficGlobal(t *testing.T) {
 			ExternalTrafficPolicy: api.ServiceExternalTrafficPolicyTypeCluster,
 		},
 	}
-	created_svc, err := storage.Create(ctx, svc, false)
+	created_svc, err := storage.Create(ctx, svc, rest.ValidateAllObjectFunc, false)
 	if created_svc == nil || err != nil {
 		t.Errorf("Unexpected failure creating service %v", err)
 	}
+	defer releaseServiceNodePorts(t, ctx, svc.Name, storage, registry)
+
 	created_service := created_svc.(*api.Service)
 	if service.NeedsHealthCheck(created_service) {
 		t.Errorf("Expecting health check not needed, returned health check needed instead")
 	}
 	// Make sure the service does not have the health check node port allocated
-	port := service.GetServiceHealthCheckNodePort(created_service)
+	port := created_service.Spec.HealthCheckNodePort
 	if port != 0 {
+		// Release the health check node port at the end of the test case.
+		storage.serviceNodePorts.Release(int(port))
 		t.Errorf("Unexpected allocation of health check node port: %v", port)
 	}
 }
 
-// Validate that the health check nodePort is not allocated when ExternalTraffic beta annotation is set to Global.
-func TestServiceRegistryExternalTrafficGlobalBeta(t *testing.T) {
-	ctx := genericapirequest.NewDefaultContext()
-	storage, _ := NewTestREST(t, nil)
-	svc := &api.Service{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "external-lb-esipp",
-			Annotations: map[string]string{
-				api.BetaAnnotationExternalTraffic: api.AnnotationValueExternalTrafficGlobal,
+func TestInitClusterIP(t *testing.T) {
+	storage, _, server := NewTestREST(t, nil)
+	defer server.Terminate(t)
+
+	testCases := []struct {
+		name            string
+		svc             *api.Service
+		expectClusterIP bool
+	}{
+		{
+			name: "Allocate new ClusterIP",
+			svc: &api.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
+				Spec: api.ServiceSpec{
+					Selector:        map[string]string{"bar": "baz"},
+					SessionAffinity: api.ServiceAffinityNone,
+					Type:            api.ServiceTypeClusterIP,
+					Ports: []api.ServicePort{{
+						Port:       6502,
+						Protocol:   api.ProtocolTCP,
+						TargetPort: intstr.FromInt(6502),
+					}},
+				},
 			},
+			expectClusterIP: true,
 		},
-		Spec: api.ServiceSpec{
-			Selector:        map[string]string{"bar": "baz"},
-			SessionAffinity: api.ServiceAffinityNone,
-			Type:            api.ServiceTypeLoadBalancer,
-			Ports: []api.ServicePort{{
-				Port:       6502,
-				Protocol:   api.ProtocolTCP,
-				TargetPort: intstr.FromInt(6502),
-			}},
+		{
+			name: "Allocate specified ClusterIP",
+			svc: &api.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
+				Spec: api.ServiceSpec{
+					Selector:        map[string]string{"bar": "baz"},
+					SessionAffinity: api.ServiceAffinityNone,
+					Type:            api.ServiceTypeClusterIP,
+					ClusterIP:       "1.2.3.4",
+					Ports: []api.ServicePort{{
+						Port:       6502,
+						Protocol:   api.ProtocolTCP,
+						TargetPort: intstr.FromInt(6502),
+					}},
+				},
+			},
+			expectClusterIP: true,
+		},
+		{
+			name: "Shouldn't allocate ClusterIP",
+			svc: &api.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
+				Spec: api.ServiceSpec{
+					Selector:        map[string]string{"bar": "baz"},
+					SessionAffinity: api.ServiceAffinityNone,
+					Type:            api.ServiceTypeClusterIP,
+					ClusterIP:       api.ClusterIPNone,
+					Ports: []api.ServicePort{{
+						Port:       6502,
+						Protocol:   api.ProtocolTCP,
+						TargetPort: intstr.FromInt(6502),
+					}},
+				},
+			},
+			expectClusterIP: false,
 		},
 	}
-	created_svc, err := storage.Create(ctx, svc, false)
-	if created_svc == nil || err != nil {
-		t.Errorf("Unexpected failure creating service %v", err)
-	}
-	created_service := created_svc.(*api.Service)
-	if service.NeedsHealthCheck(created_service) {
-		t.Errorf("Expecting health check not needed, returned health check needed instead")
-	}
-	// Make sure the service does not have the health check node port allocated
-	port := service.GetServiceHealthCheckNodePort(created_service)
-	if port != 0 {
-		t.Errorf("Unexpected allocation of health check node port: %v", port)
+
+	for _, test := range testCases {
+		hasAllocatedIP, err := storage.initClusterIP(test.svc)
+		if err != nil {
+			t.Errorf("%q: unexpected error: %v", test.name, err)
+		}
+
+		if hasAllocatedIP != test.expectClusterIP {
+			t.Errorf("%q: expected %v, but got %v", test.name, test.expectClusterIP, hasAllocatedIP)
+		}
+
+		if test.expectClusterIP {
+			if !storage.serviceIPs.Has(net.ParseIP(test.svc.Spec.ClusterIP)) {
+				t.Errorf("%q: unexpected ClusterIP %q, out of range", test.name, test.svc.Spec.ClusterIP)
+			}
+		}
+
+		if test.name == "Allocate specified ClusterIP" && test.svc.Spec.ClusterIP != "1.2.3.4" {
+			t.Errorf("%q: expected ClusterIP %q, but got %q", test.name, "1.2.3.4", test.svc.Spec.ClusterIP)
+		}
+
+		if hasAllocatedIP {
+			if helper.IsServiceIPSet(test.svc) {
+				storage.serviceIPs.Release(net.ParseIP(test.svc.Spec.ClusterIP))
+			}
+		}
 	}
 }
 
-// Validate that the health check nodePort is not allocated when service type is ClusterIP
-func TestServiceRegistryExternalTrafficAnnotationClusterIP(t *testing.T) {
-	ctx := genericapirequest.NewDefaultContext()
-	storage, _ := NewTestREST(t, nil)
-	svc := &api.Service{
-		ObjectMeta: metav1.ObjectMeta{Name: "external-lb-esipp",
-			Annotations: map[string]string{
-				api.BetaAnnotationExternalTraffic: api.AnnotationValueExternalTrafficGlobal,
+func TestInitNodePorts(t *testing.T) {
+	storage, _, server := NewTestREST(t, nil)
+	defer server.Terminate(t)
+	nodePortOp := portallocator.StartOperation(storage.serviceNodePorts)
+	defer nodePortOp.Finish()
+
+	testCases := []struct {
+		name                     string
+		service                  *api.Service
+		expectSpecifiedNodePorts []int
+	}{
+		{
+			name: "Service doesn't have specified NodePort",
+			service: &api.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
+				Spec: api.ServiceSpec{
+					Selector: map[string]string{"bar": "baz"},
+					Type:     api.ServiceTypeNodePort,
+					Ports: []api.ServicePort{
+						{
+							Name:       "port-tcp",
+							Port:       53,
+							TargetPort: intstr.FromInt(6502),
+							Protocol:   api.ProtocolTCP,
+						},
+					},
+				},
 			},
+			expectSpecifiedNodePorts: []int{},
 		},
-		Spec: api.ServiceSpec{
-			Selector:        map[string]string{"bar": "baz"},
-			SessionAffinity: api.ServiceAffinityNone,
-			Type:            api.ServiceTypeClusterIP,
-			Ports: []api.ServicePort{{
-				Port:       6502,
-				Protocol:   api.ProtocolTCP,
-				TargetPort: intstr.FromInt(6502),
-			}},
+		{
+			name: "Service has one specified NodePort",
+			service: &api.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
+				Spec: api.ServiceSpec{
+					Selector: map[string]string{"bar": "baz"},
+					Type:     api.ServiceTypeNodePort,
+					Ports: []api.ServicePort{{
+						Name:       "port-tcp",
+						Port:       53,
+						TargetPort: intstr.FromInt(6502),
+						Protocol:   api.ProtocolTCP,
+						NodePort:   30053,
+					}},
+				},
+			},
+			expectSpecifiedNodePorts: []int{30053},
+		},
+		{
+			name: "Service has two same ports with different protocols and specifies same NodePorts",
+			service: &api.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
+				Spec: api.ServiceSpec{
+					Selector: map[string]string{"bar": "baz"},
+					Type:     api.ServiceTypeNodePort,
+					Ports: []api.ServicePort{
+						{
+							Name:       "port-tcp",
+							Port:       53,
+							TargetPort: intstr.FromInt(6502),
+							Protocol:   api.ProtocolTCP,
+							NodePort:   30054,
+						},
+						{
+							Name:       "port-udp",
+							Port:       53,
+							TargetPort: intstr.FromInt(6502),
+							Protocol:   api.ProtocolUDP,
+							NodePort:   30054,
+						},
+					},
+				},
+			},
+			expectSpecifiedNodePorts: []int{30054, 30054},
+		},
+		{
+			name: "Service has two same ports with different protocols and specifies different NodePorts",
+			service: &api.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
+				Spec: api.ServiceSpec{
+					Selector: map[string]string{"bar": "baz"},
+					Type:     api.ServiceTypeNodePort,
+					Ports: []api.ServicePort{
+						{
+							Name:       "port-tcp",
+							Port:       53,
+							TargetPort: intstr.FromInt(6502),
+							Protocol:   api.ProtocolTCP,
+							NodePort:   30055,
+						},
+						{
+							Name:       "port-udp",
+							Port:       53,
+							TargetPort: intstr.FromInt(6502),
+							Protocol:   api.ProtocolUDP,
+							NodePort:   30056,
+						},
+					},
+				},
+			},
+			expectSpecifiedNodePorts: []int{30055, 30056},
+		},
+		{
+			name: "Service has two different ports with different protocols and specifies different NodePorts",
+			service: &api.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
+				Spec: api.ServiceSpec{
+					Selector: map[string]string{"bar": "baz"},
+					Type:     api.ServiceTypeNodePort,
+					Ports: []api.ServicePort{
+						{
+							Name:       "port-tcp",
+							Port:       53,
+							TargetPort: intstr.FromInt(6502),
+							Protocol:   api.ProtocolTCP,
+							NodePort:   30057,
+						},
+						{
+							Name:       "port-udp",
+							Port:       54,
+							TargetPort: intstr.FromInt(6502),
+							Protocol:   api.ProtocolUDP,
+							NodePort:   30058,
+						},
+					},
+				},
+			},
+			expectSpecifiedNodePorts: []int{30057, 30058},
+		},
+		{
+			name: "Service has two same ports with different protocols but only specifies one NodePort",
+			service: &api.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
+				Spec: api.ServiceSpec{
+					Selector: map[string]string{"bar": "baz"},
+					Type:     api.ServiceTypeNodePort,
+					Ports: []api.ServicePort{
+						{
+							Name:       "port-tcp",
+							Port:       53,
+							TargetPort: intstr.FromInt(6502),
+							Protocol:   api.ProtocolTCP,
+							NodePort:   30059,
+						},
+						{
+							Name:       "port-udp",
+							Port:       53,
+							TargetPort: intstr.FromInt(6502),
+							Protocol:   api.ProtocolUDP,
+						},
+					},
+				},
+			},
+			expectSpecifiedNodePorts: []int{30059, 30059},
 		},
 	}
-	created_svc, err := storage.Create(ctx, svc, false)
-	if created_svc == nil || err != nil {
-		t.Errorf("Unexpected failure creating service %v", err)
+
+	for _, test := range testCases {
+		err := storage.initNodePorts(test.service, nodePortOp)
+		if err != nil {
+			t.Errorf("%q: unexpected error: %v", test.name, err)
+			continue
+		}
+
+		serviceNodePorts := CollectServiceNodePorts(test.service)
+		if len(test.expectSpecifiedNodePorts) == 0 {
+			for _, nodePort := range serviceNodePorts {
+				if !storage.serviceNodePorts.Has(nodePort) {
+					t.Errorf("%q: unexpected NodePort %d, out of range", test.name, nodePort)
+				}
+			}
+		} else if !reflect.DeepEqual(serviceNodePorts, test.expectSpecifiedNodePorts) {
+			t.Errorf("%q: expected NodePorts %v, but got %v", test.name, test.expectSpecifiedNodePorts, serviceNodePorts)
+		}
+		for i := range serviceNodePorts {
+			nodePort := serviceNodePorts[i]
+			// Release the node port at the end of the test case.
+			storage.serviceNodePorts.Release(nodePort)
+		}
 	}
-	created_service := created_svc.(*api.Service)
-	// Make sure that ClusterIP services do not have the health check node port allocated
-	port := service.GetServiceHealthCheckNodePort(created_service)
-	if port != 0 {
-		t.Errorf("Unexpected allocation of health check node port annotation %s", api.BetaAnnotationHealthCheckNodePort)
+}
+
+func TestUpdateNodePorts(t *testing.T) {
+	storage, _, server := NewTestREST(t, nil)
+	defer server.Terminate(t)
+	nodePortOp := portallocator.StartOperation(storage.serviceNodePorts)
+	defer nodePortOp.Finish()
+
+	testCases := []struct {
+		name                     string
+		oldService               *api.Service
+		newService               *api.Service
+		expectSpecifiedNodePorts []int
+	}{
+		{
+			name: "Old service and new service have the same NodePort",
+			oldService: &api.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
+				Spec: api.ServiceSpec{
+					Selector:        map[string]string{"bar": "baz"},
+					SessionAffinity: api.ServiceAffinityNone,
+					Type:            api.ServiceTypeNodePort,
+					Ports: []api.ServicePort{{
+						Port:       6502,
+						Protocol:   api.ProtocolTCP,
+						TargetPort: intstr.FromInt(6502),
+						NodePort:   30053,
+					}},
+				},
+			},
+			newService: &api.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
+				Spec: api.ServiceSpec{
+					Selector:        map[string]string{"bar": "baz"},
+					SessionAffinity: api.ServiceAffinityNone,
+					Type:            api.ServiceTypeNodePort,
+					Ports: []api.ServicePort{{
+						Port:       6502,
+						Protocol:   api.ProtocolTCP,
+						TargetPort: intstr.FromInt(6502),
+						NodePort:   30053,
+					}},
+				},
+			},
+			expectSpecifiedNodePorts: []int{30053},
+		},
+		{
+			name: "Old service has more NodePorts than new service has",
+			oldService: &api.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
+				Spec: api.ServiceSpec{
+					Selector:        map[string]string{"bar": "baz"},
+					SessionAffinity: api.ServiceAffinityNone,
+					Type:            api.ServiceTypeNodePort,
+					Ports: []api.ServicePort{
+						{
+							Name:       "port-tcp",
+							Port:       53,
+							TargetPort: intstr.FromInt(6502),
+							Protocol:   api.ProtocolTCP,
+							NodePort:   30053,
+						},
+						{
+							Name:       "port-udp",
+							Port:       53,
+							TargetPort: intstr.FromInt(6502),
+							Protocol:   api.ProtocolUDP,
+							NodePort:   30053,
+						},
+					},
+				},
+			},
+			newService: &api.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
+				Spec: api.ServiceSpec{
+					Selector:        map[string]string{"bar": "baz"},
+					SessionAffinity: api.ServiceAffinityNone,
+					Type:            api.ServiceTypeNodePort,
+					Ports: []api.ServicePort{
+						{
+							Name:       "port-tcp",
+							Port:       53,
+							TargetPort: intstr.FromInt(6502),
+							Protocol:   api.ProtocolTCP,
+							NodePort:   30053,
+						},
+					},
+				},
+			},
+			expectSpecifiedNodePorts: []int{30053},
+		},
+		{
+			name: "Change protocol of ServicePort without changing NodePort",
+			oldService: &api.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
+				Spec: api.ServiceSpec{
+					Selector:        map[string]string{"bar": "baz"},
+					SessionAffinity: api.ServiceAffinityNone,
+					Type:            api.ServiceTypeNodePort,
+					Ports: []api.ServicePort{
+						{
+							Name:       "port-tcp",
+							Port:       53,
+							TargetPort: intstr.FromInt(6502),
+							Protocol:   api.ProtocolTCP,
+							NodePort:   30053,
+						},
+					},
+				},
+			},
+			newService: &api.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
+				Spec: api.ServiceSpec{
+					Selector:        map[string]string{"bar": "baz"},
+					SessionAffinity: api.ServiceAffinityNone,
+					Type:            api.ServiceTypeNodePort,
+					Ports: []api.ServicePort{
+						{
+							Name:       "port-udp",
+							Port:       53,
+							TargetPort: intstr.FromInt(6502),
+							Protocol:   api.ProtocolUDP,
+							NodePort:   30053,
+						},
+					},
+				},
+			},
+			expectSpecifiedNodePorts: []int{30053},
+		},
+		{
+			name: "Should allocate NodePort when changing service type to NodePort",
+			oldService: &api.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
+				Spec: api.ServiceSpec{
+					Selector:        map[string]string{"bar": "baz"},
+					SessionAffinity: api.ServiceAffinityNone,
+					Type:            api.ServiceTypeClusterIP,
+					Ports: []api.ServicePort{{
+						Port:       6502,
+						Protocol:   api.ProtocolTCP,
+						TargetPort: intstr.FromInt(6502),
+					}},
+				},
+			},
+			newService: &api.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
+				Spec: api.ServiceSpec{
+					Selector:        map[string]string{"bar": "baz"},
+					SessionAffinity: api.ServiceAffinityNone,
+					Type:            api.ServiceTypeNodePort,
+					Ports: []api.ServicePort{{
+						Port:       6502,
+						Protocol:   api.ProtocolTCP,
+						TargetPort: intstr.FromInt(6502),
+					}},
+				},
+			},
+			expectSpecifiedNodePorts: []int{},
+		},
+		{
+			name: "Add new ServicePort with a different protocol without changing port numbers",
+			oldService: &api.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
+				Spec: api.ServiceSpec{
+					Selector:        map[string]string{"bar": "baz"},
+					SessionAffinity: api.ServiceAffinityNone,
+					Type:            api.ServiceTypeNodePort,
+					Ports: []api.ServicePort{
+						{
+							Name:       "port-tcp",
+							Port:       53,
+							TargetPort: intstr.FromInt(6502),
+							Protocol:   api.ProtocolTCP,
+							NodePort:   30053,
+						},
+					},
+				},
+			},
+			newService: &api.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
+				Spec: api.ServiceSpec{
+					Selector:        map[string]string{"bar": "baz"},
+					SessionAffinity: api.ServiceAffinityNone,
+					Type:            api.ServiceTypeNodePort,
+					Ports: []api.ServicePort{
+						{
+							Name:       "port-tcp",
+							Port:       53,
+							TargetPort: intstr.FromInt(6502),
+							Protocol:   api.ProtocolTCP,
+							NodePort:   30053,
+						},
+						{
+							Name:       "port-udp",
+							Port:       53,
+							TargetPort: intstr.FromInt(6502),
+							Protocol:   api.ProtocolUDP,
+							NodePort:   30053,
+						},
+					},
+				},
+			},
+			expectSpecifiedNodePorts: []int{30053, 30053},
+		},
+		{
+			name: "Change service type from ClusterIP to NodePort with same NodePort number but different protocols",
+			oldService: &api.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
+				Spec: api.ServiceSpec{
+					Selector:        map[string]string{"bar": "baz"},
+					SessionAffinity: api.ServiceAffinityNone,
+					Type:            api.ServiceTypeClusterIP,
+					Ports: []api.ServicePort{{
+						Port:       53,
+						Protocol:   api.ProtocolTCP,
+						TargetPort: intstr.FromInt(6502),
+					}},
+				},
+			},
+			newService: &api.Service{
+				ObjectMeta: metav1.ObjectMeta{Name: "foo"},
+				Spec: api.ServiceSpec{
+					Selector:        map[string]string{"bar": "baz"},
+					SessionAffinity: api.ServiceAffinityNone,
+					Type:            api.ServiceTypeNodePort,
+					Ports: []api.ServicePort{
+						{
+							Name:       "port-tcp",
+							Port:       53,
+							TargetPort: intstr.FromInt(6502),
+							Protocol:   api.ProtocolTCP,
+							NodePort:   30053,
+						},
+						{
+							Name:       "port-udp",
+							Port:       53,
+							TargetPort: intstr.FromInt(6502),
+							Protocol:   api.ProtocolUDP,
+							NodePort:   30053,
+						},
+					},
+				},
+			},
+			expectSpecifiedNodePorts: []int{30053, 30053},
+		},
+	}
+
+	for _, test := range testCases {
+		err := storage.updateNodePorts(test.oldService, test.newService, nodePortOp)
+		if err != nil {
+			t.Errorf("%q: unexpected error: %v", test.name, err)
+			continue
+		}
+
+		serviceNodePorts := CollectServiceNodePorts(test.newService)
+		if len(test.expectSpecifiedNodePorts) == 0 {
+			for _, nodePort := range serviceNodePorts {
+				if !storage.serviceNodePorts.Has(nodePort) {
+					t.Errorf("%q: unexpected NodePort %d, out of range", test.name, nodePort)
+				}
+			}
+		} else if !reflect.DeepEqual(serviceNodePorts, test.expectSpecifiedNodePorts) {
+			t.Errorf("%q: expected NodePorts %v, but got %v", test.name, test.expectSpecifiedNodePorts, serviceNodePorts)
+		}
+		for i := range serviceNodePorts {
+			nodePort := serviceNodePorts[i]
+			// Release the node port at the end of the test case.
+			storage.serviceNodePorts.Release(nodePort)
+		}
 	}
 }

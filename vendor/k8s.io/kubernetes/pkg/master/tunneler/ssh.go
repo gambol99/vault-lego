@@ -29,7 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/clock"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/kubernetes/pkg/ssh"
-	"k8s.io/kubernetes/pkg/util"
+	utilfile "k8s.io/kubernetes/pkg/util/file"
 
 	"github.com/golang/glog"
 	"github.com/prometheus/client_golang/prometheus"
@@ -56,11 +56,16 @@ func TunnelSyncHealthChecker(tunneler Tunneler) func(req *http.Request) error {
 		}
 		lag := tunneler.SecondsSinceSync()
 		if lag > 600 {
-			return fmt.Errorf("Tunnel sync is taking to long: %d", lag)
+			return fmt.Errorf("Tunnel sync is taking too long: %d", lag)
 		}
 		sshKeyLag := tunneler.SecondsSinceSSHKeySync()
-		if sshKeyLag > 600 {
-			return fmt.Errorf("SSHKey sync is taking to long: %d", sshKeyLag)
+		// Since we are syncing ssh-keys every 5 minutes, the allowed
+		// lag since last sync should be more than 2x higher than that
+		// to allow for single failure, which can always happen.
+		// For now set it to 3x, which is 15 minutes.
+		// For more details see: http://pr.k8s.io/59347
+		if sshKeyLag > 900 {
+			return fmt.Errorf("SSHKey sync is taking too long: %d", sshKeyLag)
 		}
 		return nil
 	}
@@ -116,7 +121,7 @@ func (c *SSHTunneler) Run(getAddresses AddressFunc) {
 
 	// public keyfile is written last, so check for that.
 	publicKeyFile := c.SSHKeyfile + ".pub"
-	exists, err := util.FileExists(publicKeyFile)
+	exists, err := utilfile.FileExists(publicKeyFile)
 	if err != nil {
 		glog.Errorf("Error detecting if key exists: %v", err)
 	} else if !exists {
@@ -205,7 +210,7 @@ func generateSSHKey(privateKeyfile, publicKeyfile string) error {
 	}
 	// If private keyfile already exists, we must have only made it halfway
 	// through last time, so delete it.
-	exists, err := util.FileExists(privateKeyfile)
+	exists, err := utilfile.FileExists(privateKeyfile)
 	if err != nil {
 		glog.Errorf("Error detecting if private key exists: %v", err)
 	} else if exists {

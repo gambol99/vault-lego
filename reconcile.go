@@ -24,7 +24,7 @@ import (
 	"time"
 
 	"github.com/Sirupsen/logrus"
-	extensions_v1beta1 "k8s.io/client-go/pkg/apis/extensions/v1beta1"
+	extensions_v1beta1 "k8s.io/api/extensions/v1beta1"
 )
 
 // reconcileIngress is responsible for processing the ingress resources
