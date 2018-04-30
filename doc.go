@@ -22,7 +22,7 @@ import (
 )
 
 var (
-	release = "v0.0.5"
+	release = "v0.0.9"
 	gitsha  = "no gitsha provided"
 	author  = "Rohith Jayawardene"
 	version = release + " (git+sha: " + gitsha + ")"
