@@ -106,7 +106,7 @@ func (c *controller) reconcileIngress() {
 							"secret":    tls.SecretName,
 						}).Info("certificate is or has expired, attempting to renew")
 					}
-					
+
 					if !expiring && !dnsNamesChanged {
 						logrus.WithFields(logrus.Fields{
 							"name":      x.Name,
@@ -240,7 +240,6 @@ func (c *controller) checkDNSNamesChanged(name, namespace, secret string, hosts 
 
 	return changed, nil
 }
-
 
 // isIngressOK is responsible for validating the ingress resource
 func isIngressOK(ing *extensions_v1beta1.Ingress) error {

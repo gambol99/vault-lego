@@ -102,7 +102,7 @@ func haveDNSNamesChanged(content []byte, hosts []string) (bool, error) {
 		"cert_hosts":    strings.Join(crt.DNSNames, ","),
 		"ingress_hosts": strings.Join(hosts, ","),
 	}).Debugf("comparing certficate and ingress hosts")
-	
+
 	for _, certHost := range crt.DNSNames {
 		found := false
 		for _, specHost := range hosts {
