@@ -84,6 +84,40 @@ func isCertificateExpiring(content []byte, threshold time.Duration) (bool, error
 	return false, nil
 }
 
+// haveDNSNamesChanged parses and checks if the certificate hosts have changed
+func haveDNSNamesChanged(content []byte, hosts []string) (bool, error) {
+	// decode the pem content
+	block, _ := pem.Decode(content)
+	if block == nil {
+		return false, errors.New("unable to parse the pem block")
+	}
+	// decode the certificate
+	crt, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return false, err
+	}
+
+	// step: spit out some logging
+	logrus.WithFields(logrus.Fields{
+		"cert_hosts":    strings.Join(crt.DNSNames, ","),
+		"ingress_hosts": strings.Join(hosts, ","),
+	}).Debugf("comparing certficate and ingress hosts")
+	
+	for _, certHost := range crt.DNSNames {
+		found := false
+		for _, specHost := range hosts {
+			if certHost == specHost {
+				found = true
+			}
+		}
+		if !found {
+			return true, nil
+		}
+	}
+
+	return false, nil
+}
+
 // createVaultClient is responsible for creating a vault client
 func createVaultClient(host, token string) (*api.Client, error) {
 	logrus.Debugf("creating vault client, host: %s", host)

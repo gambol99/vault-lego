@@ -77,28 +77,46 @@ func (c *controller) reconcileIngress() {
 					return err
 				}
 				if found {
-					// check if the certificate is coming up for renewal
-					expiring, err := c.checkCertificateExpiring(x.Name, x.Namespace, tls.SecretName)
+					// check if the certificate DNS names are still the same
+					dnsNamesChanged, err := c.checkDNSNamesChanged(x.Name, x.Namespace, tls.SecretName, tls.Hosts)
 					if err != nil {
 						return err
 					}
-					// is is close or expired?
-					if !expiring {
+
+					if dnsNamesChanged {
 						logrus.WithFields(logrus.Fields{
 							"name":      x.Name,
 							"namespace": x.Namespace,
 							"hosts":     strings.Join(tls.Hosts, ","),
 							"secret":    tls.SecretName,
-						}).Debug("certificate not near or expired")
+						}).Info("certificate DNS names changed, attempting to renew")
+					}
+
+					// check if the certificate is coming up for renewal
+					expiring, err := c.checkCertificateExpiring(x.Name, x.Namespace, tls.SecretName)
+					if err != nil {
+						return err
+					}
+
+					if expiring {
+						logrus.WithFields(logrus.Fields{
+							"name":      x.Name,
+							"namespace": x.Namespace,
+							"hosts":     strings.Join(tls.Hosts, ","),
+							"secret":    tls.SecretName,
+						}).Info("certificate is or has expired, attempting to renew")
+					}
+					
+					if !expiring && !dnsNamesChanged {
+						logrus.WithFields(logrus.Fields{
+							"name":      x.Name,
+							"namespace": x.Namespace,
+							"hosts":     strings.Join(tls.Hosts, ","),
+							"secret":    tls.SecretName,
+						}).Debug("certificate not near expiration; DNS names didn't change")
 
 						return nil
 					}
-					logrus.WithFields(logrus.Fields{
-						"name":      x.Name,
-						"namespace": x.Namespace,
-						"hosts":     strings.Join(tls.Hosts, ","),
-						"secret":    tls.SecretName,
-					}).Info("certificate is or has expired, attempting to renew")
 				}
 
 				// step: make a request for a certificate
@@ -197,6 +215,32 @@ func (c *controller) checkCertificateExpiring(name, namespace, secret string) (b
 
 	return expired, nil
 }
+
+// checkDNSNamesChanged is responsible for checking if defined hosts have changed
+func (c *controller) checkDNSNamesChanged(name, namespace, secret string, hosts []string) (bool, error) {
+	// step: grab the secret from kubernetes
+	cert, err := c.getSecret(secret, namespace)
+	if err != nil {
+		return false, err
+	}
+
+	// step: spit out some logging
+	logrus.WithFields(logrus.Fields{
+		"name":          name,
+		"namespace":     namespace,
+		"ingress_hosts": strings.Join(hosts, ","),
+		"secret":        secret,
+	}).Debugf("checking if the certifacte hosts have changed")
+
+	// step: check if the certificate hosts have changed
+	changed, err := haveDNSNamesChanged(cert.cert, hosts)
+	if err != nil {
+		return false, err
+	}
+
+	return changed, nil
+}
+
 
 // isIngressOK is responsible for validating the ingress resource
 func isIngressOK(ing *extensions_v1beta1.Ingress) error {
