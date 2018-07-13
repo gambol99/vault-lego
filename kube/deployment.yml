@@ -11,7 +11,8 @@ spec:
     spec:
       containers:
       - name: vault-lego
-        image: catac/vault-lego:v0.0.8
+        image: catac/vault-lego:latest
+        args: ["--verbose"]
         resources:
           limits:
             cpu: 100m

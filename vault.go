@@ -115,6 +115,18 @@ func haveDNSNamesChanged(content []byte, hosts []string) (bool, error) {
 		}
 	}
 
+	for _, ingHost := range hosts {
+		found := false
+		for _, certHost := range crt.DNSNames {
+			if ingHost == certHost {
+				found = true
+			}
+		}
+		if !found {
+			return true, nil
+		}
+	}
+
 	return false, nil
 }
 
