@@ -28,9 +28,9 @@ import (
 )
 
 // createIngressWatcher is responsible for creating a watcher on ingress resources
-func (c *controller) createIngressWatcher() (chan struct{}, chan struct{}) {
+func (c *controller) createIngressWatcher(reconcileTTL time.Duration) (chan struct{}, chan struct{}) {
 	// step: the reconcile period
-	resyncPeriod := time.Duration(60 * time.Second)
+	resyncPeriod := time.Duration(reconcileTTL)
 	// step: create the update channel
 	updateCh := make(chan struct{}, 10)
 	// the stop channel

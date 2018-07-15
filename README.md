@@ -92,7 +92,8 @@ spec:
     spec:
       containers:
       - name: vault-lego
-        image: quay.io/catac/vault-lego:latest
+        image: catac/vault-lego:latest
+        imagePullPolicy: Always
         resources:
           limits:
             cpu: 100m

@@ -101,24 +101,17 @@ func isValidConfig(config *Config) error {
 
 // reconcile is the main reconcilation method
 func (c *controller) reconcile() error {
-	// step: create a ticker for reconcilation
-	ticker := time.NewTicker(c.config.reconcileTTL)
-
 	// step: create a watch of the ingress resources
-	watcherCh, _ := c.createIngressWatcher()
+	watcherCh, _ := c.createIngressWatcher(c.config.reconcileTTL)
 
 	// step: setup the ratelimiter for ingress
 	c.rate = flowcontrol.NewTokenBucketRateLimiter(0.1, 1)
 
 	for {
 		select {
-		// a time interval for checking config
-		case <-ticker.C:
-			logrus.Debugf("reconcilation ticker has fired")
-			go c.reconcileIngress()
 		// a ingress resource updated or created
 		case <-watcherCh:
-			logrus.Debugf("a change to ingress has occured")
+			logrus.Debugf("ingress watcher has fired")
 			go c.reconcileIngress()
 		}
 	}
