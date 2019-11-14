@@ -30,7 +30,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	core "k8s.io/client-go/testing"
 	"k8s.io/kubernetes/pkg/volume"
-	"k8s.io/kubernetes/pkg/volume/util/volumehelper"
+	"k8s.io/kubernetes/pkg/volume/util"
 )
 
 const TestPluginName = "kubernetes.io/testPlugin"
@@ -142,7 +142,7 @@ func CreateTestClient() *fake.Clientset {
 						"name": nodeName,
 					},
 					Annotations: map[string]string{
-						volumehelper.ControllerManagedAttachAnnotation: "true",
+						util.ControllerManagedAttachAnnotation: "true",
 					},
 				},
 				Status: v1.NodeStatus{
@@ -153,7 +153,6 @@ func CreateTestClient() *fake.Clientset {
 						},
 					},
 				},
-				Spec: v1.NodeSpec{ExternalID: string(nodeName)},
 			}
 			obj.Items = append(obj.Items, node)
 		}
@@ -295,12 +294,20 @@ func (plugin *TestPlugin) NewAttacher() (volume.Attacher, error) {
 	return &attacher, nil
 }
 
+func (plugin *TestPlugin) NewDeviceMounter() (volume.DeviceMounter, error) {
+	return plugin.NewAttacher()
+}
+
 func (plugin *TestPlugin) NewDetacher() (volume.Detacher, error) {
 	detacher := testPluginDetacher{
 		detachedVolumeMap: plugin.detachedVolumeMap,
 		pluginLock:        plugin.pluginLock,
 	}
 	return &detacher, nil
+}
+
+func (plugin *TestPlugin) NewDeviceUnmounter() (volume.DeviceUnmounter, error) {
+	return plugin.NewDetacher()
 }
 
 func (plugin *TestPlugin) GetDeviceMountRefs(deviceMountPath string) ([]string, error) {

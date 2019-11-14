@@ -17,24 +17,23 @@ limitations under the License.
 package proxy
 
 import (
+	"bytes"
 	"fmt"
-	"runtime"
 
-	apps "k8s.io/api/apps/v1beta2"
+	apps "k8s.io/api/apps/v1"
 	"k8s.io/api/core/v1"
 	rbac "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kuberuntime "k8s.io/apimachinery/pkg/runtime"
 	clientset "k8s.io/client-go/kubernetes"
+	clientsetscheme "k8s.io/client-go/kubernetes/scheme"
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
-	kubeadmconstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
+	"k8s.io/kubernetes/cmd/kubeadm/app/componentconfigs"
+	"k8s.io/kubernetes/cmd/kubeadm/app/constants"
+	"k8s.io/kubernetes/cmd/kubeadm/app/images"
 	kubeadmutil "k8s.io/kubernetes/cmd/kubeadm/app/util"
 	"k8s.io/kubernetes/cmd/kubeadm/app/util/apiclient"
-	"k8s.io/kubernetes/pkg/api/legacyscheme"
-	kubeproxyconfigscheme "k8s.io/kubernetes/pkg/proxy/apis/kubeproxyconfig/scheme"
-	kubeproxyconfigv1alpha1 "k8s.io/kubernetes/pkg/proxy/apis/kubeproxyconfig/v1alpha1"
-	"k8s.io/kubernetes/pkg/util/version"
-	"k8s.io/kubernetes/plugin/pkg/scheduler/algorithm"
+	rbachelper "k8s.io/kubernetes/pkg/apis/rbac/v1"
 )
 
 const (
@@ -47,7 +46,7 @@ const (
 )
 
 // EnsureProxyAddon creates the kube-proxy addons
-func EnsureProxyAddon(cfg *kubeadmapi.MasterConfiguration, client clientset.Interface) error {
+func EnsureProxyAddon(cfg *kubeadmapi.InitConfiguration, client clientset.Interface) error {
 	if err := CreateServiceAccount(client); err != nil {
 		return fmt.Errorf("error when creating kube-proxy service account: %v", err)
 	}
@@ -58,63 +57,35 @@ func EnsureProxyAddon(cfg *kubeadmapi.MasterConfiguration, client clientset.Inte
 		return err
 	}
 
-	proxyBytes, err := kubeadmutil.MarshalToYamlForCodecsWithShift(cfg.KubeProxy.Config, kubeproxyconfigv1alpha1.SchemeGroupVersion,
-		kubeproxyconfigscheme.Codecs)
+	proxyBytes, err := componentconfigs.Known[componentconfigs.KubeProxyConfigurationKind].Marshal(cfg.ComponentConfigs.KubeProxy)
 	if err != nil {
 		return fmt.Errorf("error when marshaling: %v", err)
 	}
-	// Parse the given kubernetes version
-	k8sVersion, err := version.ParseSemantic(cfg.KubernetesVersion)
-	if err != nil {
-		return fmt.Errorf("couldn't parse kubernetes version %q: %v", cfg.KubernetesVersion, err)
-	}
+	var prefixBytes bytes.Buffer
+	apiclient.PrintBytesWithLinePrefix(&prefixBytes, proxyBytes, "    ")
 	var proxyConfigMapBytes, proxyDaemonSetBytes []byte
-	if k8sVersion.AtLeast(kubeadmconstants.MinimumKubeProxyComponentConfigVersion) {
-		proxyConfigMapBytes, err = kubeadmutil.ParseTemplate(KubeProxyConfigMap19,
-			struct {
-				MasterEndpoint string
-				ProxyConfig    string
-			}{
-				MasterEndpoint: masterEndpoint,
-				ProxyConfig:    proxyBytes,
-			})
-		if err != nil {
-			return fmt.Errorf("error when parsing kube-proxy configmap template: %v", err)
-		}
-		proxyDaemonSetBytes, err = kubeadmutil.ParseTemplate(KubeProxyDaemonSet19, struct{ ImageRepository, Arch, Version, ImageOverride, ClusterCIDR, MasterTaintKey, CloudTaintKey string }{
-			ImageRepository: cfg.GetControlPlaneImageRepository(),
-			Arch:            runtime.GOARCH,
-			Version:         kubeadmutil.KubernetesVersionToImageTag(cfg.KubernetesVersion),
-			ImageOverride:   cfg.UnifiedControlPlaneImage,
-			MasterTaintKey:  kubeadmconstants.LabelNodeRoleMaster,
-			CloudTaintKey:   algorithm.TaintExternalCloudProvider,
+	proxyConfigMapBytes, err = kubeadmutil.ParseTemplate(KubeProxyConfigMap19,
+		struct {
+			MasterEndpoint    string
+			ProxyConfig       string
+			ProxyConfigMap    string
+			ProxyConfigMapKey string
+		}{
+			MasterEndpoint:    masterEndpoint,
+			ProxyConfig:       prefixBytes.String(),
+			ProxyConfigMap:    constants.KubeProxyConfigMap,
+			ProxyConfigMapKey: constants.KubeProxyConfigMapKey,
 		})
-		if err != nil {
-			return fmt.Errorf("error when parsing kube-proxy daemonset template: %v", err)
-		}
-	} else {
-		proxyConfigMapBytes, err = kubeadmutil.ParseTemplate(KubeProxyConfigMap18,
-			struct {
-				MasterEndpoint string
-			}{
-				MasterEndpoint: masterEndpoint,
-			})
-		if err != nil {
-			return fmt.Errorf("error when parsing kube-proxy configmap template: %v", err)
-		}
-
-		proxyDaemonSetBytes, err = kubeadmutil.ParseTemplate(KubeProxyDaemonSet18, struct{ ImageRepository, Arch, Version, ImageOverride, ClusterCIDR, MasterTaintKey, CloudTaintKey string }{
-			ImageRepository: cfg.GetControlPlaneImageRepository(),
-			Arch:            runtime.GOARCH,
-			Version:         kubeadmutil.KubernetesVersionToImageTag(cfg.KubernetesVersion),
-			ImageOverride:   cfg.UnifiedControlPlaneImage,
-			ClusterCIDR:     getClusterCIDR(cfg.Networking.PodSubnet),
-			MasterTaintKey:  kubeadmconstants.LabelNodeRoleMaster,
-			CloudTaintKey:   algorithm.TaintExternalCloudProvider,
-		})
-		if err != nil {
-			return fmt.Errorf("error when parsing kube-proxy daemonset template: %v", err)
-		}
+	if err != nil {
+		return fmt.Errorf("error when parsing kube-proxy configmap template: %v", err)
+	}
+	proxyDaemonSetBytes, err = kubeadmutil.ParseTemplate(KubeProxyDaemonSet19, struct{ Image, ProxyConfigMap, ProxyConfigMapKey string }{
+		Image:             images.GetKubeControlPlaneImage(constants.KubeProxy, &cfg.ClusterConfiguration),
+		ProxyConfigMap:    constants.KubeProxyConfigMap,
+		ProxyConfigMapKey: constants.KubeProxyConfigMapKey,
+	})
+	if err != nil {
+		return fmt.Errorf("error when parsing kube-proxy daemonset template: %v", err)
 	}
 	if err := createKubeProxyAddon(proxyConfigMapBytes, proxyDaemonSetBytes, client); err != nil {
 		return err
@@ -145,7 +116,7 @@ func CreateRBACRules(client clientset.Interface) error {
 
 func createKubeProxyAddon(configMapBytes, daemonSetbytes []byte, client clientset.Interface) error {
 	kubeproxyConfigMap := &v1.ConfigMap{}
-	if err := kuberuntime.DecodeInto(legacyscheme.Codecs.UniversalDecoder(), configMapBytes, kubeproxyConfigMap); err != nil {
+	if err := kuberuntime.DecodeInto(clientsetscheme.Codecs.UniversalDecoder(), configMapBytes, kubeproxyConfigMap); err != nil {
 		return fmt.Errorf("unable to decode kube-proxy configmap %v", err)
 	}
 
@@ -155,7 +126,7 @@ func createKubeProxyAddon(configMapBytes, daemonSetbytes []byte, client clientse
 	}
 
 	kubeproxyDaemonSet := &apps.DaemonSet{}
-	if err := kuberuntime.DecodeInto(legacyscheme.Codecs.UniversalDecoder(), daemonSetbytes, kubeproxyDaemonSet); err != nil {
+	if err := kuberuntime.DecodeInto(clientsetscheme.Codecs.UniversalDecoder(), daemonSetbytes, kubeproxyDaemonSet); err != nil {
 		return fmt.Errorf("unable to decode kube-proxy daemonset %v", err)
 	}
 
@@ -164,7 +135,7 @@ func createKubeProxyAddon(configMapBytes, daemonSetbytes []byte, client clientse
 }
 
 func createClusterRoleBindings(client clientset.Interface) error {
-	return apiclient.CreateOrUpdateClusterRoleBinding(client, &rbac.ClusterRoleBinding{
+	if err := apiclient.CreateOrUpdateClusterRoleBinding(client, &rbac.ClusterRoleBinding{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "kubeadm:node-proxier",
 		},
@@ -180,12 +151,39 @@ func createClusterRoleBindings(client clientset.Interface) error {
 				Namespace: metav1.NamespaceSystem,
 			},
 		},
-	})
-}
-
-func getClusterCIDR(podsubnet string) string {
-	if len(podsubnet) == 0 {
-		return ""
+	}); err != nil {
+		return err
 	}
-	return "- --cluster-cidr=" + podsubnet
+
+	// Create a role for granting read only access to the kube-proxy component config ConfigMap
+	if err := apiclient.CreateOrUpdateRole(client, &rbac.Role{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      constants.KubeProxyConfigMap,
+			Namespace: metav1.NamespaceSystem,
+		},
+		Rules: []rbac.PolicyRule{
+			rbachelper.NewRule("get").Groups("").Resources("configmaps").Names(constants.KubeProxyConfigMap).RuleOrDie(),
+		},
+	}); err != nil {
+		return err
+	}
+
+	// Bind the role to bootstrap tokens for allowing fetchConfiguration during join
+	return apiclient.CreateOrUpdateRoleBinding(client, &rbac.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      constants.KubeProxyConfigMap,
+			Namespace: metav1.NamespaceSystem,
+		},
+		RoleRef: rbac.RoleRef{
+			APIGroup: rbac.GroupName,
+			Kind:     "Role",
+			Name:     constants.KubeProxyConfigMap,
+		},
+		Subjects: []rbac.Subject{
+			{
+				Kind: rbac.GroupKind,
+				Name: constants.NodeBootstrapTokenAuthGroup,
+			},
+		},
+	})
 }

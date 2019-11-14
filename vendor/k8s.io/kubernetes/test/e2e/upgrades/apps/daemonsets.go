@@ -60,9 +60,10 @@ func (t *DaemonSetUpgradeTest) Setup(f *framework.Framework) {
 				Spec: v1.PodSpec{
 					Containers: []v1.Container{
 						{
-							Name:  daemonSetName,
-							Image: image,
-							Ports: []v1.ContainerPort{{ContainerPort: 9376}},
+							Name:            daemonSetName,
+							Image:           image,
+							Ports:           []v1.ContainerPort{{ContainerPort: 9376}},
+							SecurityContext: &v1.SecurityContext{},
 						},
 					},
 				},
@@ -119,18 +120,18 @@ func (t *DaemonSetUpgradeTest) validateRunningDaemonSet(f *framework.Framework) 
 }
 
 func checkRunningOnAllNodes(f *framework.Framework, namespace string, selector map[string]string) (bool, error) {
-	nodeList, err := f.ClientSet.Core().Nodes().List(metav1.ListOptions{})
+	nodeList, err := f.ClientSet.CoreV1().Nodes().List(metav1.ListOptions{})
 	if err != nil {
 		return false, err
 	}
 
 	nodeNames := make([]string, 0)
 	for _, node := range nodeList.Items {
-		if len(node.Spec.Taints) == 0 {
-			nodeNames = append(nodeNames, node.Name)
-		} else {
-			framework.Logf("Node %v not expected to have DaemonSet pod, has taints %v", node.Name, node.Spec.Taints)
+		if len(node.Spec.Taints) != 0 {
+			framework.Logf("Ignore taints %v on Node %v for DaemonSet Pod.", node.Spec.Taints, node.Name)
 		}
+		// DaemonSet Pods are expected to run on all the nodes in e2e.
+		nodeNames = append(nodeNames, node.Name)
 	}
 
 	return checkDaemonPodOnNodes(f, namespace, selector, nodeNames)
@@ -139,7 +140,7 @@ func checkRunningOnAllNodes(f *framework.Framework, namespace string, selector m
 func checkDaemonPodOnNodes(f *framework.Framework, namespace string, labelSet map[string]string, nodeNames []string) (bool, error) {
 	selector := labels.Set(labelSet).AsSelector()
 	options := metav1.ListOptions{LabelSelector: selector.String()}
-	podList, err := f.ClientSet.Core().Pods(namespace).List(options)
+	podList, err := f.ClientSet.CoreV1().Pods(namespace).List(options)
 	if err != nil {
 		return false, err
 	}

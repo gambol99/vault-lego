@@ -2,7 +2,7 @@ NAME=vault-lego
 AUTHOR ?= catac
 AUTHOR_EMAIL=catalin.cirstoiu@gmail.com
 REGISTRY=index.docker.io
-GOVERSION=1.10.1
+GOVERSION=1.13.4
 ROOT_DIR=${PWD}
 HARDWARE=$(shell uname -m)
 GIT_SHA=$(shell git --no-pager describe --always --dirty)
@@ -11,7 +11,7 @@ VERSION ?= $(shell awk '/release.*=/ { print $$3 }' doc.go | sed 's/"//g')
 DEPS=$(shell go list -f '{{range .TestImports}}{{.}} {{end}}' ./...)
 PACKAGES=$(shell go list ./...)
 LFLAGS ?= -X main.gitsha=${GIT_SHA}
-VETARGS ?= -asmdecl -atomic -bool -buildtags -copylocks -methods -nilfunc -printf -rangeloops -shift -structtags -unsafeptr
+VETARGS ?= -asmdecl -atomic -bool -buildtags -copylocks -methods -nilfunc -printf -rangeloops -shift -structtag -unsafeptr
 
 .PHONY: test authors changelog build docker static release lint cover vet
 
@@ -72,10 +72,10 @@ deps:
 
 vet:
 	@echo "--> Running go vet $(VETARGS) ."
-	@go tool vet 2>/dev/null ; if [ $$? -eq 3 ]; then \
+	@go vet 2>/dev/null ; if [ $$? -eq 3 ]; then \
 		go get golang.org/x/tools/cmd/vet; \
 	fi
-	@go tool vet $(VETARGS) *.go
+	@go vet $(VETARGS) *.go
 
 lint:
 	@echo "--> Running golint"

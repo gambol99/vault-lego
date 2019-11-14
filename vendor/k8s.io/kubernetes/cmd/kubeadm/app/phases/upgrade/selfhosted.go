@@ -20,7 +20,7 @@ import (
 	"fmt"
 	"time"
 
-	apps "k8s.io/api/apps/v1beta2"
+	apps "k8s.io/api/apps/v1"
 	"k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clientset "k8s.io/client-go/kubernetes"
@@ -81,7 +81,7 @@ type controlPlaneComponentResources struct {
 //       -> Backup component v1 is Deleted
 //    5. Wait for Self-Hosted component v2 Running to become active
 //    6. Repeat for all control plane components
-func SelfHostedControlPlane(client clientset.Interface, waiter apiclient.Waiter, cfg *kubeadmapi.MasterConfiguration, k8sVersion *version.Version) error {
+func SelfHostedControlPlane(client clientset.Interface, waiter apiclient.Waiter, cfg *kubeadmapi.InitConfiguration, k8sVersion *version.Version) error {
 
 	// Adjust the timeout slightly to something self-hosting specific
 	waiter.SetTimeout(selfHostingWaitTimeout)
@@ -119,7 +119,7 @@ func SelfHostedControlPlane(client clientset.Interface, waiter apiclient.Waiter,
 		// During this upgrade; the temporary/backup component will take over
 		if err := apiclient.TryRunCommand(func() error {
 
-			if _, err := client.AppsV1beta2().DaemonSets(newDS.ObjectMeta.Namespace).Update(newDS); err != nil {
+			if _, err := client.AppsV1().DaemonSets(newDS.ObjectMeta.Namespace).Update(newDS); err != nil {
 				return fmt.Errorf("couldn't update self-hosted component's DaemonSet: %v", err)
 			}
 			return nil
@@ -158,7 +158,7 @@ func SelfHostedControlPlane(client clientset.Interface, waiter apiclient.Waiter,
 }
 
 // BuildUpgradedDaemonSetsFromConfig takes a config object and the current version and returns the DaemonSet objects to post to the master
-func BuildUpgradedDaemonSetsFromConfig(cfg *kubeadmapi.MasterConfiguration, k8sVersion *version.Version) map[string]*apps.DaemonSet {
+func BuildUpgradedDaemonSetsFromConfig(cfg *kubeadmapi.InitConfiguration, k8sVersion *version.Version) map[string]*apps.DaemonSet {
 	// Here the map of different mutators to use for the control plane's podspec is stored
 	mutators := selfhosting.GetMutatorsFromFeatureGates(cfg.FeatureGates)
 	// Get the new PodSpecs to use
@@ -256,7 +256,7 @@ func getCurrentControlPlaneComponentResources(client clientset.Interface) (map[s
 		if err := apiclient.TryRunCommand(func() error {
 			var tryrunerr error
 			// Try to get the current self-hosted component
-			currentDS, tryrunerr = client.AppsV1beta2().DaemonSets(metav1.NamespaceSystem).Get(dsName, metav1.GetOptions{})
+			currentDS, tryrunerr = client.AppsV1().DaemonSets(metav1.NamespaceSystem).Get(dsName, metav1.GetOptions{})
 			return tryrunerr // note that tryrunerr is most likely nil here (in successful cases)
 		}, selfHostingFailureThreshold); err != nil {
 			return nil, err

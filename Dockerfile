@@ -1,4 +1,4 @@
-FROM alpine:3.7
+FROM alpine:3.10
 LABEL maintainer="catalin.cirstoiu@gmail.com"
 
 ADD bin/vault-lego /vault-lego

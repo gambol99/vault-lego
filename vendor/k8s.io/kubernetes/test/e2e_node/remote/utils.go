@@ -27,7 +27,7 @@ import (
 // utils.go contains functions used across test suites.
 
 const (
-	cniVersion       = "v0.6.0"
+	cniVersion       = "v0.7.5"
 	cniArch          = "amd64"
 	cniDirectory     = "cni/bin" // The CNI tarball places binaries under directory under "cni/bin".
 	cniConfDirectory = "cni/net.d"
@@ -56,7 +56,7 @@ func setupCNI(host, workspace string) error {
 	cniPath := filepath.Join(workspace, cniDirectory)
 	cmd := getSSHCommand(" ; ",
 		fmt.Sprintf("mkdir -p %s", cniPath),
-		fmt.Sprintf("wget -O - %s | tar -xz -C %s", cniURL, cniPath),
+		fmt.Sprintf("curl -s -L %s | tar -xz -C %s", cniURL, cniPath),
 	)
 	if output, err := SSH(host, "sh", "-c", cmd); err != nil {
 		return fmt.Errorf("failed to install cni plugin on %q: %v output: %q", host, err, output)

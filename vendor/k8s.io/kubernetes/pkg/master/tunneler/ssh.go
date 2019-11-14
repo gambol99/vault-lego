@@ -17,6 +17,7 @@ limitations under the License.
 package tunneler
 
 import (
+	"context"
 	"fmt"
 	"io/ioutil"
 	"net"
@@ -35,14 +36,14 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-type InstallSSHKey func(user string, data []byte) error
+type InstallSSHKey func(ctx context.Context, user string, data []byte) error
 
 type AddressFunc func() (addresses []string, err error)
 
 type Tunneler interface {
 	Run(AddressFunc)
 	Stop()
-	Dial(net, addr string) (net.Conn, error)
+	Dial(ctx context.Context, net, addr string) (net.Conn, error)
 	SecondsSinceSync() int64
 	SecondsSinceSSHKeySync() int64
 }
@@ -148,8 +149,8 @@ func (c *SSHTunneler) Stop() {
 	}
 }
 
-func (c *SSHTunneler) Dial(net, addr string) (net.Conn, error) {
-	return c.tunnels.Dial(net, addr)
+func (c *SSHTunneler) Dial(ctx context.Context, net, addr string) (net.Conn, error) {
+	return c.tunnels.Dial(ctx, net, addr)
 }
 
 func (c *SSHTunneler) SecondsSinceSync() int64 {
@@ -180,7 +181,7 @@ func (c *SSHTunneler) installSSHKeySyncLoop(user, publicKeyfile string) {
 			glog.Errorf("Failed to encode public key: %v", err)
 			return
 		}
-		if err := c.InstallSSHKey(user, keyData); err != nil {
+		if err := c.InstallSSHKey(context.TODO(), user, keyData); err != nil {
 			glog.Errorf("Failed to install ssh key: %v", err)
 			return
 		}

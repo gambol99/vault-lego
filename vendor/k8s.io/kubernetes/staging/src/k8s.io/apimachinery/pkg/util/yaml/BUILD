@@ -9,13 +9,13 @@ load(
 go_test(
     name = "go_default_test",
     srcs = ["decoder_test.go"],
-    importpath = "k8s.io/apimachinery/pkg/util/yaml",
-    library = ":go_default_library",
+    embed = [":go_default_library"],
 )
 
 go_library(
     name = "go_default_library",
     srcs = ["decoder.go"],
+    importmap = "k8s.io/kubernetes/vendor/k8s.io/apimachinery/pkg/util/yaml",
     importpath = "k8s.io/apimachinery/pkg/util/yaml",
     deps = [
         "//vendor/github.com/ghodss/yaml:go_default_library",

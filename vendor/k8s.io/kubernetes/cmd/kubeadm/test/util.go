@@ -26,8 +26,10 @@ import (
 	"github.com/renstrom/dedent"
 
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
+	kubeadmapiv1alpha3 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1alpha3"
 	kubeadmconstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
 	"k8s.io/kubernetes/cmd/kubeadm/app/phases/certs/pkiutil"
+	configutil "k8s.io/kubernetes/cmd/kubeadm/app/util/config"
 	certtestutil "k8s.io/kubernetes/cmd/kubeadm/test/certs"
 )
 
@@ -42,10 +44,10 @@ func SetupTempDir(t *testing.T) string {
 	return tmpdir
 }
 
-// SetupMasterConfigurationFile is a utility function for kubeadm testing that writes a master configuration file
+// SetupInitConfigurationFile is a utility function for kubeadm testing that writes a master configuration file
 // into /config subfolder of a given temporary directory.
-// The funtion returns the path of the created master configuration file.
-func SetupMasterConfigurationFile(t *testing.T, tmpdir string, cfg *kubeadmapi.MasterConfiguration) string {
+// The function returns the path of the created master configuration file.
+func SetupInitConfigurationFile(t *testing.T, tmpdir string, cfg *kubeadmapi.InitConfiguration) string {
 
 	cfgPath := filepath.Join(tmpdir, "config/masterconfig.yaml")
 	if err := os.MkdirAll(filepath.Dir(cfgPath), os.FileMode(0755)); err != nil {
@@ -53,13 +55,18 @@ func SetupMasterConfigurationFile(t *testing.T, tmpdir string, cfg *kubeadmapi.M
 	}
 
 	cfgTemplate := template.Must(template.New("init").Parse(dedent.Dedent(`
-		apiVersion: kubeadm.k8s.io/v1alpha1
-		kind: MasterConfiguration
+		apiVersion: kubeadm.k8s.io/v1alpha3
+		kind: InitConfiguration
+		apiEndpoint:
+		  advertiseAddress: {{.APIEndpoint.AdvertiseAddress}}
+		  bindPort: {{.APIEndpoint.BindPort}}
+		nodeRegistration:
+		  name: {{.NodeRegistration.Name}}
+		---
+		apiVersion: kubeadm.k8s.io/v1alpha3
+		kind: ClusterConfiguration
 		certificatesDir: {{.CertificatesDir}}
-		api:
-		   advertiseAddress: {{.API.AdvertiseAddress}}
-		   bindPort: {{.API.BindPort}}
-		nodeName: {{.NodeName}}
+		kubernetesVersion: v1.11.0
 		`)))
 
 	f, err := os.Create(cfgPath)
@@ -89,7 +96,7 @@ func SetupEmptyFiles(t *testing.T, tmpdir string, fileNames ...string) {
 
 // SetupPkiDirWithCertificateAuthorithy is a utility function for kubeadm testing that creates a
 // CertificateAuthorithy cert/key pair into /pki subfolder of a given temporary directory.
-// The funtion returns the path of the created pki.
+// The function returns the path of the created pki.
 func SetupPkiDirWithCertificateAuthorithy(t *testing.T, tmpdir string) string {
 	caCert, caKey := certtestutil.SetupCertificateAuthorithy(t)
 
@@ -134,4 +141,14 @@ func AssertFileExists(t *testing.T, dirName string, fileNames ...string) {
 			t.Errorf("file %s does not exist", fileName)
 		}
 	}
+}
+
+// GetDefaultInternalConfig returns a defaulted kubeadmapi.InitConfiguration
+func GetDefaultInternalConfig(t *testing.T) *kubeadmapi.InitConfiguration {
+	internalcfg, err := configutil.ConfigFileAndDefaultsToInternalConfig("", &kubeadmapiv1alpha3.InitConfiguration{})
+	if err != nil {
+		t.Fatalf("unexpected error getting default config: %v", err)
+	}
+
+	return internalcfg
 }

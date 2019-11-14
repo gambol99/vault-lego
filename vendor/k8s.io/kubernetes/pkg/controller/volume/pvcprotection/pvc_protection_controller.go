@@ -26,17 +26,15 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	coreinformers "k8s.io/client-go/informers/core/v1"
 	clientset "k8s.io/client-go/kubernetes"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/kubernetes/pkg/controller"
-	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/util/metrics"
+	"k8s.io/kubernetes/pkg/util/slice"
 	volumeutil "k8s.io/kubernetes/pkg/volume/util"
-	"k8s.io/kubernetes/pkg/volume/util/volumehelper"
 )
 
 // Controller is controller that removes PVCProtectionFinalizer
@@ -52,16 +50,16 @@ type Controller struct {
 
 	queue workqueue.RateLimitingInterface
 
-	// allows overriding for testing
-	features utilfeature.FeatureGate
+	// allows overriding of StorageObjectInUseProtection feature Enabled/Disabled for testing
+	storageObjectInUseProtectionEnabled bool
 }
 
-// NewPVCProtectionController returns a new *{VCProtectionController.
-func NewPVCProtectionController(pvcInformer coreinformers.PersistentVolumeClaimInformer, podInformer coreinformers.PodInformer, cl clientset.Interface) *Controller {
+// NewPVCProtectionController returns a new instance of PVCProtectionController.
+func NewPVCProtectionController(pvcInformer coreinformers.PersistentVolumeClaimInformer, podInformer coreinformers.PodInformer, cl clientset.Interface, storageObjectInUseProtectionFeatureEnabled bool) *Controller {
 	e := &Controller{
-		client:   cl,
-		queue:    workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "pvcprotection"),
-		features: utilfeature.DefaultFeatureGate,
+		client: cl,
+		queue:  workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "pvcprotection"),
+		storageObjectInUseProtectionEnabled: storageObjectInUseProtectionFeatureEnabled,
 	}
 	if cl != nil && cl.CoreV1().RESTClient().GetRateLimiter() != nil {
 		metrics.RegisterMetricAndTrackRateLimiterUsage("persistentvolumeclaim_protection_controller", cl.CoreV1().RESTClient().GetRateLimiter())
@@ -147,7 +145,7 @@ func (c *Controller) processPVC(pvcNamespace, pvcName string) error {
 	glog.V(4).Infof("Processing PVC %s/%s", pvcNamespace, pvcName)
 	startTime := time.Now()
 	defer func() {
-		glog.V(4).Infof("Finished processing PVC %s/%s (%v)", pvcNamespace, pvcName, time.Now().Sub(startTime))
+		glog.V(4).Infof("Finished processing PVC %s/%s (%v)", pvcNamespace, pvcName, time.Since(startTime))
 	}()
 
 	pvc, err := c.pvcLister.PersistentVolumeClaims(pvcNamespace).Get(pvcName)
@@ -159,7 +157,7 @@ func (c *Controller) processPVC(pvcNamespace, pvcName string) error {
 		return err
 	}
 
-	if volumeutil.IsPVCBeingDeleted(pvc) && volumeutil.IsProtectionFinalizerPresent(pvc) {
+	if isDeletionCandidate(pvc) {
 		// PVC should be deleted. Check if it's used and remove finalizer if
 		// it's not.
 		isUsed, err := c.isBeingUsed(pvc)
@@ -171,7 +169,7 @@ func (c *Controller) processPVC(pvcNamespace, pvcName string) error {
 		}
 	}
 
-	if !volumeutil.IsPVCBeingDeleted(pvc) && !volumeutil.IsProtectionFinalizerPresent(pvc) {
+	if needToAddFinalizer(pvc) {
 		// PVC is not being deleted -> it should have the finalizer. The
 		// finalizer should be added by admission plugin, this is just to add
 		// the finalizer to old PVCs that were created before the admission
@@ -182,16 +180,15 @@ func (c *Controller) processPVC(pvcNamespace, pvcName string) error {
 }
 
 func (c *Controller) addFinalizer(pvc *v1.PersistentVolumeClaim) error {
-	// Skip adding Finalizer in case the PVC Protection feature is not enabled
-	if !c.features.Enabled(features.PVCProtection) {
+	// Skip adding Finalizer in case the StorageObjectInUseProtection feature is not enabled
+	if !c.storageObjectInUseProtectionEnabled {
 		return nil
 	}
-
 	claimClone := pvc.DeepCopy()
-	volumeutil.AddProtectionFinalizer(claimClone)
+	claimClone.ObjectMeta.Finalizers = append(claimClone.ObjectMeta.Finalizers, volumeutil.PVCProtectionFinalizer)
 	_, err := c.client.CoreV1().PersistentVolumeClaims(claimClone.Namespace).Update(claimClone)
 	if err != nil {
-		glog.V(3).Infof("Error adding protection finalizer to PVC %s/%s: %v", pvc.Namespace, pvc.Name)
+		glog.V(3).Infof("Error adding protection finalizer to PVC %s/%s: %v", pvc.Namespace, pvc.Name, err)
 		return err
 	}
 	glog.V(3).Infof("Added protection finalizer to PVC %s/%s", pvc.Namespace, pvc.Name)
@@ -200,7 +197,7 @@ func (c *Controller) addFinalizer(pvc *v1.PersistentVolumeClaim) error {
 
 func (c *Controller) removeFinalizer(pvc *v1.PersistentVolumeClaim) error {
 	claimClone := pvc.DeepCopy()
-	volumeutil.RemoveProtectionFinalizer(claimClone)
+	claimClone.ObjectMeta.Finalizers = slice.RemoveString(claimClone.ObjectMeta.Finalizers, volumeutil.PVCProtectionFinalizer, nil)
 	_, err := c.client.CoreV1().PersistentVolumeClaims(claimClone.Namespace).Update(claimClone)
 	if err != nil {
 		glog.V(3).Infof("Error removing protection finalizer from PVC %s/%s: %v", pvc.Namespace, pvc.Name, err)
@@ -211,11 +208,6 @@ func (c *Controller) removeFinalizer(pvc *v1.PersistentVolumeClaim) error {
 }
 
 func (c *Controller) isBeingUsed(pvc *v1.PersistentVolumeClaim) (bool, error) {
-	// if PVC protection is disabled - we do not care about PVC in use by pod or not
-	if !c.features.Enabled(features.PVCProtection) {
-		return false, nil
-	}
-
 	pods, err := c.podLister.Pods(pvc.Namespace).List(labels.Everything())
 	if err != nil {
 		return false, err
@@ -227,11 +219,6 @@ func (c *Controller) isBeingUsed(pvc *v1.PersistentVolumeClaim) (bool, error) {
 			// pretty sure it won't be scheduled in parallel to this check.
 			// Therefore this pod does not block the PVC from deletion.
 			glog.V(4).Infof("Skipping unscheduled pod %s when checking PVC %s/%s", pod.Name, pvc.Namespace, pvc.Name)
-			continue
-		}
-		if volumehelper.IsPodTerminated(pod, pod.Status) {
-			// This pod is being unmounted/detached or is already
-			// unmounted/detached. It does not block the PVC from deletion.
 			continue
 		}
 		for _, volume := range pod.Spec.Volumes {
@@ -263,7 +250,7 @@ func (c *Controller) pvcAddedUpdated(obj interface{}) {
 	}
 	glog.V(4).Infof("Got event on PVC %s", key)
 
-	if (!volumeutil.IsPVCBeingDeleted(pvc) && !volumeutil.IsProtectionFinalizerPresent(pvc)) || (volumeutil.IsPVCBeingDeleted(pvc) && volumeutil.IsProtectionFinalizerPresent(pvc)) {
+	if needToAddFinalizer(pvc) || isDeletionCandidate(pvc) {
 		c.queue.Add(key)
 	}
 }
@@ -285,7 +272,7 @@ func (c *Controller) podAddedDeletedUpdated(obj interface{}, deleted bool) {
 	}
 
 	// Filter out pods that can't help us to remove a finalizer on PVC
-	if !deleted && !volumehelper.IsPodTerminated(pod, pod.Status) && pod.Spec.NodeName != "" {
+	if !deleted && !volumeutil.IsPodTerminated(pod, pod.Status) && pod.Spec.NodeName != "" {
 		return
 	}
 
@@ -297,4 +284,12 @@ func (c *Controller) podAddedDeletedUpdated(obj interface{}, deleted bool) {
 			c.queue.Add(pod.Namespace + "/" + volume.PersistentVolumeClaim.ClaimName)
 		}
 	}
+}
+
+func isDeletionCandidate(pvc *v1.PersistentVolumeClaim) bool {
+	return pvc.ObjectMeta.DeletionTimestamp != nil && slice.ContainsString(pvc.ObjectMeta.Finalizers, volumeutil.PVCProtectionFinalizer, nil)
+}
+
+func needToAddFinalizer(pvc *v1.PersistentVolumeClaim) bool {
+	return pvc.ObjectMeta.DeletionTimestamp == nil && !slice.ContainsString(pvc.ObjectMeta.Finalizers, volumeutil.PVCProtectionFinalizer, nil)
 }

@@ -53,7 +53,7 @@ type policyList []*abac.Policy
 
 // TODO: Have policies be created via an API call and stored in REST storage.
 func NewFromFile(path string) (policyList, error) {
-	// File format is one map per line.  This allows easy concatentation of files,
+	// File format is one map per line.  This allows easy concatenation of files,
 	// comments in files, and identification of errors by line number.
 	file, err := os.Open(path)
 	if err != nil {
@@ -227,7 +227,7 @@ func (pl policyList) Authorize(a authorizer.Attributes) (authorizer.Decision, st
 			return authorizer.DecisionAllow, "", nil
 		}
 	}
-	return authorizer.DecisionNoOpinion, "No policy matched.", nil
+	return authorizer.DecisionNoOpinion, "no ABAC policy matched", nil
 	// TODO: Benchmark how much time policy matching takes with a medium size
 	// policy file, compared to other steps such as encoding/decoding.
 	// Then, add Caching only if needed.

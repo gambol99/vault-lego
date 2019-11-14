@@ -17,20 +17,24 @@ limitations under the License.
 package cmd
 
 import (
-	"bytes"
 	"net/http"
 	"strings"
 	"testing"
 
+	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/client-go/rest/fake"
 	cmdtesting "k8s.io/kubernetes/pkg/kubectl/cmd/testing"
-	"k8s.io/kubernetes/pkg/printers"
+	"k8s.io/kubernetes/pkg/kubectl/scheme"
 )
 
 func TestPatchObject(t *testing.T) {
 	_, svc, _ := testData()
 
-	f, tf, codec, _ := cmdtesting.NewAPIFactory()
+	tf := cmdtesting.NewTestFactory().WithNamespace("test")
+	defer tf.Cleanup()
+
+	codec := scheme.Codecs.LegacyCodec(scheme.Scheme.PrioritizedVersionsAllGroups()...)
+
 	tf.UnstructuredClient = &fake.RESTClient{
 		NegotiatedSerializer: unstructuredSerializer,
 		Client: fake.CreateHTTPClient(func(req *http.Request) (*http.Response, error) {
@@ -50,10 +54,9 @@ func TestPatchObject(t *testing.T) {
 			}
 		}),
 	}
-	tf.Namespace = "test"
-	buf := bytes.NewBuffer([]byte{})
+	stream, _, buf, _ := genericclioptions.NewTestIOStreams()
 
-	cmd := NewCmdPatch(f, buf)
+	cmd := NewCmdPatch(tf, stream)
 	cmd.Flags().Set("namespace", "test")
 	cmd.Flags().Set("patch", `{"spec":{"type":"NodePort"}}`)
 	cmd.Flags().Set("output", "name")
@@ -68,7 +71,11 @@ func TestPatchObject(t *testing.T) {
 func TestPatchObjectFromFile(t *testing.T) {
 	_, svc, _ := testData()
 
-	f, tf, codec, _ := cmdtesting.NewAPIFactory()
+	tf := cmdtesting.NewTestFactory().WithNamespace("test")
+	defer tf.Cleanup()
+
+	codec := scheme.Codecs.LegacyCodec(scheme.Scheme.PrioritizedVersionsAllGroups()...)
+
 	tf.UnstructuredClient = &fake.RESTClient{
 		NegotiatedSerializer: unstructuredSerializer,
 		Client: fake.CreateHTTPClient(func(req *http.Request) (*http.Response, error) {
@@ -81,14 +88,13 @@ func TestPatchObjectFromFile(t *testing.T) {
 			}
 		}),
 	}
-	tf.Namespace = "test"
-	buf := bytes.NewBuffer([]byte{})
+	stream, _, buf, _ := genericclioptions.NewTestIOStreams()
 
-	cmd := NewCmdPatch(f, buf)
+	cmd := NewCmdPatch(tf, stream)
 	cmd.Flags().Set("namespace", "test")
 	cmd.Flags().Set("patch", `{"spec":{"type":"NodePort"}}`)
 	cmd.Flags().Set("output", "name")
-	cmd.Flags().Set("filename", "../../../examples/guestbook/frontend-service.yaml")
+	cmd.Flags().Set("filename", "../../../test/e2e/testing-manifests/guestbook/frontend-service.yaml")
 	cmd.Run(cmd, []string{})
 
 	// uses the name from the response
@@ -102,7 +108,11 @@ func TestPatchNoop(t *testing.T) {
 	getObject := &svc.Items[0]
 	patchObject := &svc.Items[0]
 
-	f, tf, codec, _ := cmdtesting.NewAPIFactory()
+	tf := cmdtesting.NewTestFactory().WithNamespace("test")
+	defer tf.Cleanup()
+
+	codec := scheme.Codecs.LegacyCodec(scheme.Scheme.PrioritizedVersionsAllGroups()...)
+
 	tf.UnstructuredClient = &fake.RESTClient{
 		NegotiatedSerializer: unstructuredSerializer,
 		Client: fake.CreateHTTPClient(func(req *http.Request) (*http.Response, error) {
@@ -117,7 +127,6 @@ func TestPatchNoop(t *testing.T) {
 			}
 		}),
 	}
-	tf.Namespace = "test"
 
 	// Patched
 	{
@@ -126,12 +135,12 @@ func TestPatchNoop(t *testing.T) {
 			patchObject.Annotations = map[string]string{}
 		}
 		patchObject.Annotations["foo"] = "bar"
-		buf := bytes.NewBuffer([]byte{})
-		cmd := NewCmdPatch(f, buf)
+		stream, _, buf, _ := genericclioptions.NewTestIOStreams()
+		cmd := NewCmdPatch(tf, stream)
 		cmd.Flags().Set("namespace", "test")
 		cmd.Flags().Set("patch", `{"metadata":{"annotations":{"foo":"bar"}}}`)
 		cmd.Run(cmd, []string{"services", "frontend"})
-		if buf.String() != "service \"baz\" patched\n" {
+		if buf.String() != "service/baz patched\n" {
 			t.Errorf("unexpected output: %s", buf.String())
 		}
 	}
@@ -146,8 +155,11 @@ func TestPatchObjectFromFileOutput(t *testing.T) {
 	}
 	svcCopy.Labels["post-patch"] = "post-patch-value"
 
-	f, tf, codec, _ := cmdtesting.NewAPIFactory()
-	tf.Printer = &printers.YAMLPrinter{}
+	tf := cmdtesting.NewTestFactory().WithNamespace("test")
+	defer tf.Cleanup()
+
+	codec := scheme.Codecs.LegacyCodec(scheme.Scheme.PrioritizedVersionsAllGroups()...)
+
 	tf.UnstructuredClient = &fake.RESTClient{
 		NegotiatedSerializer: unstructuredSerializer,
 		Client: fake.CreateHTTPClient(func(req *http.Request) (*http.Response, error) {
@@ -162,14 +174,13 @@ func TestPatchObjectFromFileOutput(t *testing.T) {
 			}
 		}),
 	}
-	tf.Namespace = "test"
-	buf := bytes.NewBuffer([]byte{})
+	stream, _, buf, _ := genericclioptions.NewTestIOStreams()
 
-	cmd := NewCmdPatch(f, buf)
+	cmd := NewCmdPatch(tf, stream)
 	cmd.Flags().Set("namespace", "test")
 	cmd.Flags().Set("patch", `{"spec":{"type":"NodePort"}}`)
 	cmd.Flags().Set("output", "yaml")
-	cmd.Flags().Set("filename", "../../../examples/guestbook/frontend-service.yaml")
+	cmd.Flags().Set("filename", "../../../test/e2e/testing-manifests/guestbook/frontend-service.yaml")
 	cmd.Run(cmd, []string{})
 
 	t.Log(buf.String())

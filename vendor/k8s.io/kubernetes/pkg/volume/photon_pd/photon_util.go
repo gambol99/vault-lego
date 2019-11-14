@@ -88,10 +88,12 @@ func (util *PhotonDiskUtil) CreateVolume(p *photonPersistentDiskProvisioner) (pd
 	}
 
 	capacity := p.options.PVC.Spec.Resources.Requests[v1.ResourceName(v1.ResourceStorage)]
-	volSizeBytes := capacity.Value()
-	// PhotonController works with GB, convert to GB with rounding up
-	volSizeGB := int(volume.RoundUpSize(volSizeBytes, 1024*1024*1024))
-	name := volume.GenerateVolumeName(p.options.ClusterName, p.options.PVName, 255)
+	// PhotonController works with GiB, convert to GiB with rounding up
+	volSizeGB, err := volumeutil.RoundUpToGiBInt(capacity)
+	if err != nil {
+		return "", 0, "", err
+	}
+	name := volumeutil.GenerateVolumeName(p.options.ClusterName, p.options.PVName, 255)
 	volumeOptions := &photon.VolumeOptions{
 		CapacityGB: volSizeGB,
 		Tags:       *p.options.CloudTags,

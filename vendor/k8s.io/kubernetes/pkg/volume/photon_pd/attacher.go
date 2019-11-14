@@ -17,6 +17,7 @@ limitations under the License.
 package photon_pd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path"
@@ -31,7 +32,6 @@ import (
 	"k8s.io/kubernetes/pkg/util/mount"
 	"k8s.io/kubernetes/pkg/volume"
 	volumeutil "k8s.io/kubernetes/pkg/volume/util"
-	"k8s.io/kubernetes/pkg/volume/util/volumehelper"
 )
 
 type photonPersistentDiskAttacher struct {
@@ -40,7 +40,12 @@ type photonPersistentDiskAttacher struct {
 }
 
 var _ volume.Attacher = &photonPersistentDiskAttacher{}
+
+var _ volume.DeviceMounter = &photonPersistentDiskAttacher{}
+
 var _ volume.AttachableVolumePlugin = &photonPersistentDiskPlugin{}
+
+var _ volume.DeviceMountableVolumePlugin = &photonPersistentDiskPlugin{}
 
 func (plugin *photonPersistentDiskPlugin) NewAttacher() (volume.Attacher, error) {
 	photonCloud, err := getCloudProvider(plugin.host.GetCloudProvider())
@@ -53,6 +58,10 @@ func (plugin *photonPersistentDiskPlugin) NewAttacher() (volume.Attacher, error)
 		host:        plugin.host,
 		photonDisks: photonCloud,
 	}, nil
+}
+
+func (plugin *photonPersistentDiskPlugin) NewDeviceMounter() (volume.DeviceMounter, error) {
+	return plugin.NewAttacher()
 }
 
 // Attaches the volume specified by the given spec to the given host.
@@ -68,7 +77,7 @@ func (attacher *photonPersistentDiskAttacher) Attach(spec *volume.Spec, nodeName
 		glog.Errorf("Photon Controller attacher: Attach failed to get volume source")
 		return "", err
 	}
-	attached, err := attacher.photonDisks.DiskIsAttached(volumeSource.PdID, nodeName)
+	attached, err := attacher.photonDisks.DiskIsAttached(context.TODO(), volumeSource.PdID, nodeName)
 
 	if err != nil {
 		glog.Warningf("Photon Controller: couldn't check if disk is Attached for host %s, will try attach disk: %+v", hostName, err)
@@ -78,7 +87,7 @@ func (attacher *photonPersistentDiskAttacher) Attach(spec *volume.Spec, nodeName
 	if !attached {
 		glog.V(4).Infof("Photon Controller: Attach disk called for host %s", hostName)
 
-		err = attacher.photonDisks.AttachDisk(volumeSource.PdID, nodeName)
+		err = attacher.photonDisks.AttachDisk(context.TODO(), volumeSource.PdID, nodeName)
 		if err != nil {
 			glog.Errorf("Error attaching volume %q to node %q: %+v", volumeSource.PdID, nodeName, err)
 			return "", err
@@ -104,7 +113,7 @@ func (attacher *photonPersistentDiskAttacher) VolumesAreAttached(specs []*volume
 		volumesAttachedCheck[spec] = true
 		volumeSpecMap[volumeSource.PdID] = spec
 	}
-	attachedResult, err := attacher.photonDisks.DisksAreAttached(pdIDList, nodeName)
+	attachedResult, err := attacher.photonDisks.DisksAreAttached(context.TODO(), pdIDList, nodeName)
 	if err != nil {
 		glog.Errorf(
 			"Error checking if volumes (%v) are attached to current node (%q). err=%v",
@@ -182,7 +191,7 @@ func (attacher *photonPersistentDiskAttacher) GetDeviceMountPath(spec *volume.Sp
 // by deviceMountPath; returns a list of paths.
 func (plugin *photonPersistentDiskPlugin) GetDeviceMountRefs(deviceMountPath string) ([]string, error) {
 	mounter := plugin.host.GetMounter(plugin.GetPluginName())
-	return mount.GetMountRefs(mounter, deviceMountPath)
+	return mounter.GetMountRefs(deviceMountPath)
 }
 
 // MountDevice mounts device to global mount point.
@@ -210,8 +219,8 @@ func (attacher *photonPersistentDiskAttacher) MountDevice(spec *volume.Spec, dev
 	options := []string{}
 
 	if notMnt {
-		diskMounter := volumehelper.NewSafeFormatAndMountFromHost(photonPersistentDiskPluginName, attacher.host)
-		mountOptions := volume.MountOptionFromSpec(spec)
+		diskMounter := volumeutil.NewSafeFormatAndMountFromHost(photonPersistentDiskPluginName, attacher.host)
+		mountOptions := volumeutil.MountOptionFromSpec(spec)
 		err = diskMounter.FormatAndMount(devicePath, deviceMountPath, volumeSource.FSType, mountOptions)
 		if err != nil {
 			os.Remove(deviceMountPath)
@@ -229,6 +238,8 @@ type photonPersistentDiskDetacher struct {
 
 var _ volume.Detacher = &photonPersistentDiskDetacher{}
 
+var _ volume.DeviceUnmounter = &photonPersistentDiskDetacher{}
+
 func (plugin *photonPersistentDiskPlugin) NewDetacher() (volume.Detacher, error) {
 	photonCloud, err := getCloudProvider(plugin.host.GetCloudProvider())
 	if err != nil {
@@ -242,12 +253,16 @@ func (plugin *photonPersistentDiskPlugin) NewDetacher() (volume.Detacher, error)
 	}, nil
 }
 
+func (plugin *photonPersistentDiskPlugin) NewDeviceUnmounter() (volume.DeviceUnmounter, error) {
+	return plugin.NewDetacher()
+}
+
 // Detach the given device from the given host.
 func (detacher *photonPersistentDiskDetacher) Detach(volumeName string, nodeName types.NodeName) error {
 
 	hostName := string(nodeName)
 	pdID := volumeName
-	attached, err := detacher.photonDisks.DiskIsAttached(pdID, nodeName)
+	attached, err := detacher.photonDisks.DiskIsAttached(context.TODO(), pdID, nodeName)
 	if err != nil {
 		// Log error and continue with detach
 		glog.Errorf(
@@ -261,7 +276,7 @@ func (detacher *photonPersistentDiskDetacher) Detach(volumeName string, nodeName
 		return nil
 	}
 
-	if err := detacher.photonDisks.DetachDisk(pdID, nodeName); err != nil {
+	if err := detacher.photonDisks.DetachDisk(context.TODO(), pdID, nodeName); err != nil {
 		glog.Errorf("Error detaching volume %q: %v", pdID, err)
 		return err
 	}

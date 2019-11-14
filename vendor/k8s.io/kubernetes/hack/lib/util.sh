@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Copyright 2014 The Kubernetes Authors.
 #
@@ -18,11 +18,26 @@ kube::util::sortable_date() {
   date "+%Y%m%d-%H%M%S"
 }
 
+# arguments: target, item1, item2, item3, ...
+# returns 0 if target is in the given items, 1 otherwise.
+kube::util::array_contains() {
+  local search="$1"
+  local element
+  shift
+  for element; do
+    if [[ "${element}" == "${search}" ]]; then
+      return 0
+     fi
+  done
+  return 1
+}
+
 kube::util::wait_for_url() {
   local url=$1
   local prefix=${2:-}
   local wait=${3:-1}
   local times=${4:-30}
+  local maxtime=${5:-1}
 
   which curl >/dev/null || {
     kube::log::usage "curl must be installed"
@@ -30,13 +45,13 @@ kube::util::wait_for_url() {
   }
 
   local i
-  for i in $(seq 1 $times); do
+  for i in $(seq 1 "$times"); do
     local out
-    if out=$(curl --max-time 1 -gkfs $url 2>/dev/null); then
+    if out=$(curl --max-time "$maxtime" -gkfs "$url" 2>/dev/null); then
       kube::log::status "On try ${i}, ${prefix}: ${out}"
       return 0
     fi
-    sleep ${wait}
+    sleep "${wait}"
   done
   kube::log::error "Timed out waiting for ${prefix} to answer at ${url}; tried ${times} waiting ${wait} between each"
   return 1
@@ -148,10 +163,11 @@ kube::util::find-binary-for-platform() {
     "${KUBE_ROOT}/platforms/${platform}/${lookfor}"
   )
   # Also search for binary in bazel build tree.
-  # In some cases we have to name the binary $BINARY_bin, since there was a
-  # directory named $BINARY next to it.
+  # The bazel go rules place some binaries in subtrees like
+  # "bazel-bin/source/path/linux_amd64_pure_stripped/binaryname", so make sure
+  # the platform name is matched in the path.
   locations+=($(find "${KUBE_ROOT}/bazel-bin/" -type f -executable \
-    \( -name "${lookfor}" -o -name "${lookfor}_bin" \) 2>/dev/null || true) )
+    \( -path "*/${platform/\//_}*/${lookfor}" -o -path "*/${lookfor}" \) 2>/dev/null || true) )
 
   # List most recently-updated location.
   local -r bin=$( (ls -t "${locations[@]}" 2>/dev/null || true) | head -1 )
@@ -208,7 +224,7 @@ kube::util::gen-docs() {
 # Puts a placeholder for every generated doc. This makes the link checker work.
 kube::util::set-placeholder-gen-docs() {
   local list_file="${KUBE_ROOT}/docs/.generated_docs"
-  if [ -e ${list_file} ]; then
+  if [[ -e "${list_file}" ]]; then
     # remove all of the old docs; we don't want to check them in.
     while read file; do
       if [[ "${list_file}" != "${KUBE_ROOT}/${file}" ]]; then
@@ -243,11 +259,9 @@ kube::util::remove-gen-docs() {
 kube::util::group-version-to-pkg-path() {
   staging_apis=(
   $(
-    pushd ${KUBE_ROOT}/staging/src/k8s.io/api > /dev/null
-      find . -name types.go | xargs -n1 dirname | sed "s|\./||g" | sort
-    popd > /dev/null
-  )
-  )
+    cd "${KUBE_ROOT}/staging/src/k8s.io/api" &&
+    find . -name types.go -exec dirname {} \; | sed "s|\./||g" | sort
+  ))
 
   local group_version="$1"
 
@@ -273,17 +287,8 @@ kube::util::group-version-to-pkg-path() {
     meta/v1)
       echo "vendor/k8s.io/apimachinery/pkg/apis/meta/v1"
       ;;
-    meta/v1)
-      echo "../vendor/k8s.io/apimachinery/pkg/apis/meta/v1"
-      ;;
-    meta/v1alpha1)
-      echo "vendor/k8s.io/apimachinery/pkg/apis/meta/v1alpha1"
-      ;;
-    meta/v1alpha1)
-      echo "../vendor/k8s.io/apimachinery/pkg/apis/meta/v1alpha1"
-      ;;
-    unversioned)
-      echo "pkg/api/unversioned"
+    meta/v1beta1)
+      echo "vendor/k8s.io/apimachinery/pkg/apis/meta/v1beta1"
       ;;
     *.k8s.io)
       echo "pkg/apis/${group_version%.*k8s.io}"
@@ -317,7 +322,7 @@ kube::util::gv-to-swagger-name() {
 # Assumed vars:
 # SWAGGER_API_PATH: Base path for swaggerapi on apiserver. Ex:
 # http://localhost:8080/swaggerapi.
-# SWAGGER_ROOT_DIR: Root dir where we want to to save the fetched spec.
+# SWAGGER_ROOT_DIR: Root dir where we want to save the fetched spec.
 # VERSIONS: Array of group versions to include in swagger spec.
 kube::util::fetch-swagger-spec() {
   for ver in ${VERSIONS}; do
@@ -437,17 +442,27 @@ kube::util::ensure_clean_working_dir() {
 # Ensure that the given godep version is installed and in the path.  Almost
 # nobody should use any version but the default.
 kube::util::ensure_godep_version() {
-  GODEP_VERSION=${1:-"v79"} # this version is known to work
+  GODEP_VERSION=${1:-"v80"} # this version is known to work
 
   if [[ "$(godep version 2>/dev/null)" == *"godep ${GODEP_VERSION}"* ]]; then
     return
   fi
 
   kube::log::status "Installing godep version ${GODEP_VERSION}"
-  go install ./vendor/github.com/tools/godep/
+  go install k8s.io/kubernetes/vendor/github.com/tools/godep/
+  if ! which godep >/dev/null 2>&1; then
+    kube::log::error "Can't find godep - is your GOPATH 'bin' in your PATH?"
+    kube::log::error "  GOPATH: ${GOPATH}"
+    kube::log::error "  PATH:   ${PATH}"
+    return 1
+  fi
 
   if [[ "$(godep version 2>/dev/null)" != *"godep ${GODEP_VERSION}"* ]]; then
-    kube::log::error "Expected godep ${GODEP_VERSION}, got $(godep version)"
+    kube::log::error "Wrong godep version - is your GOPATH 'bin' in your PATH?"
+    kube::log::error "  expected: godep ${GODEP_VERSION}"
+    kube::log::error "  got:      $(godep version)"
+    kube::log::error "  GOPATH: ${GOPATH}"
+    kube::log::error "  PATH:   ${PATH}"
     return 1
   fi
 }
@@ -457,7 +472,12 @@ kube::util::ensure_godep_version() {
 kube::util::ensure_no_staging_repos_in_gopath() {
   kube::util::ensure_single_dir_gopath
   local error=0
-  for repo in $(ls ${KUBE_ROOT}/staging/src/k8s.io); do
+  for repo_file in "${KUBE_ROOT}"/staging/src/k8s.io/*; do
+    if [[ ! -d "$repo_file" ]]; then
+      # not a directory or there were no files
+      continue;
+    fi
+    repo="$(basename "$repo_file")"
     if [ -e "${GOPATH}/src/k8s.io/${repo}" ]; then
       echo "k8s.io/${repo} exists in GOPATH. Remove before running godep-save.sh." 1>&2
       error=1
@@ -466,36 +486,6 @@ kube::util::ensure_no_staging_repos_in_gopath() {
   if [ "${error}" = "1" ]; then
     exit 1
   fi
-}
-
-# Installs the specified go package at a particular commit.
-# Optionally specify an additional dependency constraint as "pkg@revision".
-kube::util::go_install_from_commit() {
-  local -r pkg=$1
-  local -r commit=$2
-  local -r extra_constraint=${3:-}
-
-  kube::util::ensure-temp-dir
-  mkdir -p "${KUBE_TEMP}/go/src"
-  # TODO(spiffxp): remove this brittle workaround for go getting a package that doesn't exist at HEAD
-  repo=$(echo ${pkg} | cut -d/ -f1-3)
-  git clone "https://${repo}" "${KUBE_TEMP}/go/src/${repo}"
-  # GOPATH="${KUBE_TEMP}/go" go get -d -u "${pkg}"
-  (
-    cd "${KUBE_TEMP}/go/src/${repo}"
-    git fetch # TODO(spiffxp): workaround
-    git checkout -q "${commit}"
-    GOPATH="${KUBE_TEMP}/go" go get -d "${pkg}" #TODO(spiffxp): workaround
-    if [[ "${extra_constraint}" =~ ^(.+)@(.+)$ ]]; then
-      (
-        cd "${KUBE_TEMP}/go/src/${BASH_REMATCH[1]}"
-        git checkout -q "${BASH_REMATCH[2]}"
-      )
-    fi
-    GOPATH="${KUBE_TEMP}/go" go install "${pkg}"
-  )
-  PATH="${KUBE_TEMP}/go/bin:${PATH}"
-  hash -r # force bash to clear PATH cache
 }
 
 # Checks that the GOPATH is simple, i.e. consists only of one directory, not multiple.
@@ -564,6 +554,7 @@ function kube::util::test_openssl_installed {
       echo "Failed to run openssl. Please ensure openssl is installed"
       exit 1
     fi
+
     OPENSSL_BIN=$(command -v openssl)
 }
 
@@ -578,7 +569,7 @@ function kube::util::create_signing_certkey {
     local id=$3
     local purpose=$4
     # Create client ca
-    ${sudo} /bin/bash -e <<EOF
+    ${sudo} /usr/bin/env bash -e <<EOF
     rm -f "${dest_dir}/${id}-ca.crt" "${dest_dir}/${id}-ca.key"
     ${OPENSSL_BIN} req -x509 -sha256 -new -nodes -days 365 -newkey rsa:2048 -keyout "${dest_dir}/${id}-ca.key" -out "${dest_dir}/${id}-ca.crt" -subj "/C=xx/ST=x/L=x/O=x/OU=x/CN=ca/emailAddress=x/"
     echo '{"signing":{"default":{"expiry":"43800h","usages":["signing","key encipherment",${purpose}]}}}' > "${dest_dir}/${id}-ca-config.json"
@@ -600,7 +591,7 @@ function kube::util::create_client_certkey {
         SEP=","
         shift 1
     done
-    ${sudo} /bin/bash -e <<EOF
+    ${sudo} /usr/bin/env bash -e <<EOF
     cd ${dest_dir}
     echo '{"CN":"${cn}","names":[${groups}],"hosts":[""],"key":{"algo":"rsa","size":2048}}' | ${CFSSL_BIN} gencert -ca=${ca}.crt -ca-key=${ca}.key -config=${ca}-config.json - | ${CFSSLJSON_BIN} -bare client-${id}
     mv "client-${id}-key.pem" "client-${id}.key"
@@ -624,7 +615,7 @@ function kube::util::create_serving_certkey {
         SEP=","
         shift 1
     done
-    ${sudo} /bin/bash -e <<EOF
+    ${sudo} /usr/bin/env bash -e <<EOF
     cd ${dest_dir}
     echo '{"CN":"${cn}","hosts":[${hosts}],"key":{"algo":"rsa","size":2048}}' | ${CFSSL_BIN} gencert -ca=${ca}.crt -ca-key=${ca}.key -config=${ca}-config.json - | ${CFSSLJSON_BIN} -bare serving-${id}
     mv "serving-${id}-key.pem" "serving-${id}.key"
@@ -666,7 +657,7 @@ EOF
 
     # flatten the kubeconfig files to make them self contained
     username=$(whoami)
-    ${sudo} /bin/bash -e <<EOF
+    ${sudo} /usr/bin/env bash -e <<EOF
     $(kube::util::find-binary kubectl) --kubeconfig="${dest_dir}/${client_id}.kubeconfig" config view --minify --flatten > "/tmp/${client_id}.kubeconfig"
     mv -f "/tmp/${client_id}.kubeconfig" "${dest_dir}/${client_id}.kubeconfig"
     chown ${username} "${dest_dir}/${client_id}.kubeconfig"
@@ -811,6 +802,8 @@ if [[ -z "${color_start-}" ]]; then
   declare -r color_red="${color_start}0;31m"
   declare -r color_yellow="${color_start}0;33m"
   declare -r color_green="${color_start}0;32m"
+  declare -r color_blue="${color_start}1;34m"
+  declare -r color_cyan="${color_start}1;36m"
   declare -r color_norm="${color_start}0m"
 fi
 

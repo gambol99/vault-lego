@@ -36,6 +36,15 @@ func EtcdUpgrade(target_storage, target_version string) error {
 	}
 }
 
+func IngressUpgrade(isUpgrade bool) error {
+	switch TestContext.Provider {
+	case "gce":
+		return ingressUpgradeGCE(isUpgrade)
+	default:
+		return fmt.Errorf("IngressUpgrade() is not implemented for provider %s", TestContext.Provider)
+	}
+}
+
 func MasterUpgrade(v string) error {
 	switch TestContext.Provider {
 	case "gce":
@@ -54,9 +63,30 @@ func etcdUpgradeGCE(target_storage, target_version string) error {
 		os.Environ(),
 		"TEST_ETCD_VERSION="+target_version,
 		"STORAGE_BACKEND="+target_storage,
-		"TEST_ETCD_IMAGE=3.1.11")
+		"TEST_ETCD_IMAGE=3.2.24-1")
 
 	_, _, err := RunCmdEnv(env, gceUpgradeScript(), "-l", "-M")
+	return err
+}
+
+func ingressUpgradeGCE(isUpgrade bool) error {
+	var command string
+	if isUpgrade {
+		// User specified image to upgrade to.
+		targetImage := TestContext.IngressUpgradeImage
+		if targetImage != "" {
+			command = fmt.Sprintf("sudo sed -i -re 's|(image:)(.*)|\\1 %s|' /etc/kubernetes/manifests/glbc.manifest", targetImage)
+		} else {
+			// Upgrade to latest HEAD image.
+			command = "sudo sed -i -re 's/(image:)(.*)/\\1 gcr.io\\/k8s-ingress-image-push\\/ingress-gce-e2e-glbc-amd64:master/' /etc/kubernetes/manifests/glbc.manifest"
+		}
+	} else {
+		// Downgrade to latest release image.
+		command = "sudo sed -i -re 's/(image:)(.*)/\\1 k8s.gcr.io\\/ingress-gce-glbc-amd64:v1.1.1/' /etc/kubernetes/manifests/glbc.manifest"
+	}
+	// Kubelet should restart glbc automatically.
+	sshResult, err := NodeExec(GetMasterHost(), command)
+	LogSSHResult(sshResult)
 	return err
 }
 
@@ -73,7 +103,7 @@ func masterUpgradeGCE(rawV string, enableKubeProxyDaemonSet bool) error {
 		env = append(env,
 			"TEST_ETCD_VERSION="+TestContext.EtcdUpgradeVersion,
 			"STORAGE_BACKEND="+TestContext.EtcdUpgradeStorage,
-			"TEST_ETCD_IMAGE=3.1.11")
+			"TEST_ETCD_IMAGE=3.2.24-1")
 	} else {
 		// In e2e tests, we skip the confirmation prompt about
 		// implicit etcd upgrades to simulate the user entering "y".
@@ -175,16 +205,7 @@ func NodeUpgrade(f *Framework, v string, img string) error {
 	if err != nil {
 		return err
 	}
-
-	// Wait for it to complete and validate nodes are healthy.
-	//
-	// TODO(ihmccreery) We shouldn't have to wait for nodes to be ready in
-	// GKE; the operation shouldn't return until they all are.
-	Logf("Waiting up to %v for all nodes to be ready after the upgrade", RestartNodeReadyAgainTimeout)
-	if _, err := CheckNodesReady(f.ClientSet, TestContext.CloudConfig.NumNodes, RestartNodeReadyAgainTimeout); err != nil {
-		return err
-	}
-	return nil
+	return waitForNodesReadyAfterUpgrade(f)
 }
 
 // TODO(mrhohn): Remove this function when kube-proxy is run as a DaemonSet by default.
@@ -193,9 +214,20 @@ func NodeUpgradeGCEWithKubeProxyDaemonSet(f *Framework, v string, img string, en
 	if err := nodeUpgradeGCE(v, img, enableKubeProxyDaemonSet); err != nil {
 		return err
 	}
+	return waitForNodesReadyAfterUpgrade(f)
+}
+
+func waitForNodesReadyAfterUpgrade(f *Framework) error {
 	// Wait for it to complete and validate nodes are healthy.
-	Logf("Waiting up to %v for all nodes to be ready after the upgrade", RestartNodeReadyAgainTimeout)
-	if _, err := CheckNodesReady(f.ClientSet, TestContext.CloudConfig.NumNodes, RestartNodeReadyAgainTimeout); err != nil {
+	//
+	// TODO(ihmccreery) We shouldn't have to wait for nodes to be ready in
+	// GKE; the operation shouldn't return until they all are.
+	numNodes, err := NumberOfRegisteredNodes(f.ClientSet)
+	if err != nil {
+		return fmt.Errorf("couldn't detect number of nodes")
+	}
+	Logf("Waiting up to %v for all %d nodes to be ready after the upgrade", RestartNodeReadyAgainTimeout, numNodes)
+	if _, err := CheckNodesReady(f.ClientSet, numNodes, RestartNodeReadyAgainTimeout); err != nil {
 		return err
 	}
 	return nil

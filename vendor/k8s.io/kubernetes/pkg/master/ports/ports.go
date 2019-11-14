@@ -26,12 +26,14 @@ const (
 	// SchedulerPort is the default port for the scheduler status server.
 	// May be overridden by a flag at startup.
 	SchedulerPort = 10251
-	// ControllerManagerPort is the default port for the controller manager status server.
+	// InsecureKubeControllerManagerPort is the default port for the controller manager status server.
 	// May be overridden by a flag at startup.
-	ControllerManagerPort = 10252
-	// CloudControllerManagerPort is the default port for the cloud controller manager server.
-	// This value may be overriden by a flag at startup.
-	CloudControllerManagerPort = 10253
+	// Deprecated: use the secure KubeControllerManagerPort instead.
+	InsecureKubeControllerManagerPort = 10252
+	// InsecureCloudControllerManagerPort is the default port for the cloud controller manager server.
+	// This value may be overridden by a flag at startup.
+	// Deprecated: use the secure CloudControllerManagerPort instead.
+	InsecureCloudControllerManagerPort = 10253
 	// KubeletReadOnlyPort exposes basic read-only services from the kubelet.
 	// May be overridden by a flag at startup.
 	// This is necessary for heapster to collect monitoring stats from the kubelet
@@ -41,4 +43,10 @@ const (
 	// ProxyHealthzPort is the default port for the proxy healthz server.
 	// May be overridden by a flag at startup.
 	ProxyHealthzPort = 10256
+	// KubeControllerManagerPort is the default port for the controller manager status server.
+	// May be overridden by a flag at startup.
+	KubeControllerManagerPort = 10257
+	// CloudControllerManagerPort is the default port for the cloud controller manager server.
+	// This value may be overridden by a flag at startup.
+	CloudControllerManagerPort = 10258
 )

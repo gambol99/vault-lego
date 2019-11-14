@@ -20,7 +20,7 @@ import (
 	"time"
 
 	internalapi "k8s.io/kubernetes/pkg/kubelet/apis/cri"
-	runtimeapi "k8s.io/kubernetes/pkg/kubelet/apis/cri/v1alpha1/runtime"
+	runtimeapi "k8s.io/kubernetes/pkg/kubelet/apis/cri/runtime/v1alpha2"
 	"k8s.io/kubernetes/pkg/kubelet/metrics"
 )
 
@@ -140,6 +140,15 @@ func (in instrumentedRuntimeService) UpdateContainerResources(containerID string
 	return err
 }
 
+func (in instrumentedRuntimeService) ReopenContainerLog(containerID string) error {
+	const operation = "reopen_container_log"
+	defer recordOperation(operation, time.Now())
+
+	err := in.service.ReopenContainerLog(containerID)
+	recordError(operation, err)
+	return err
+}
+
 func (in instrumentedRuntimeService) ExecSync(containerID string, cmd []string, timeout time.Duration) ([]byte, []byte, error) {
 	const operation = "exec_sync"
 	defer recordOperation(operation, time.Now())
@@ -167,11 +176,11 @@ func (in instrumentedRuntimeService) Attach(req *runtimeapi.AttachRequest) (*run
 	return resp, err
 }
 
-func (in instrumentedRuntimeService) RunPodSandbox(config *runtimeapi.PodSandboxConfig) (string, error) {
+func (in instrumentedRuntimeService) RunPodSandbox(config *runtimeapi.PodSandboxConfig, runtimeHandler string) (string, error) {
 	const operation = "run_podsandbox"
 	defer recordOperation(operation, time.Now())
 
-	out, err := in.service.RunPodSandbox(config)
+	out, err := in.service.RunPodSandbox(config, runtimeHandler)
 	recordError(operation, err)
 	return out, err
 }

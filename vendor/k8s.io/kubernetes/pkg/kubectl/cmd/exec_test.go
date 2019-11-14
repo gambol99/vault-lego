@@ -29,12 +29,14 @@ import (
 
 	"github.com/spf13/cobra"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/cli-runtime/pkg/genericclioptions"
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/rest/fake"
 	"k8s.io/client-go/tools/remotecommand"
-	api "k8s.io/kubernetes/pkg/apis/core"
 	cmdtesting "k8s.io/kubernetes/pkg/kubectl/cmd/testing"
+	"k8s.io/kubernetes/pkg/kubectl/scheme"
 	"k8s.io/kubernetes/pkg/kubectl/util/term"
 )
 
@@ -128,44 +130,50 @@ func TestPodAndContainer(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
-		f, tf, _, ns := cmdtesting.NewAPIFactory()
-		tf.Client = &fake.RESTClient{
-			NegotiatedSerializer: ns,
-			Client:               fake.CreateHTTPClient(func(req *http.Request) (*http.Response, error) { return nil, nil }),
-		}
-		tf.Namespace = "test"
-		tf.ClientConfig = defaultClientConfig()
+		t.Run(test.name, func(t *testing.T) {
+			tf := cmdtesting.NewTestFactory().WithNamespace("test")
+			defer tf.Cleanup()
 
-		cmd := &cobra.Command{}
-		options := test.p
-		err := options.Complete(f, cmd, test.args, test.argsLenAtDash)
-		if test.expectError && err == nil {
-			t.Errorf("%s: unexpected non-error", test.name)
-		}
-		if !test.expectError && err != nil {
-			t.Errorf("%s: unexpected error: %v", test.name, err)
-		}
-		if err != nil {
-			continue
-		}
-		if options.PodName != test.expectedPod {
-			t.Errorf("%s: expected: %s, got: %s", test.name, test.expectedPod, options.PodName)
-		}
-		if options.ContainerName != test.expectedContainer {
-			t.Errorf("%s: expected: %s, got: %s", test.name, test.expectedContainer, options.ContainerName)
-		}
-		if !reflect.DeepEqual(test.expectedArgs, options.Command) {
-			t.Errorf("%s: expected: %v, got %v", test.name, test.expectedArgs, options.Command)
-		}
+			ns := scheme.Codecs
+
+			tf.Client = &fake.RESTClient{
+				NegotiatedSerializer: ns,
+				Client:               fake.CreateHTTPClient(func(req *http.Request) (*http.Response, error) { return nil, nil }),
+			}
+			tf.ClientConfigVal = defaultClientConfig()
+
+			cmd := &cobra.Command{}
+			options := test.p
+			options.ErrOut = bytes.NewBuffer([]byte{})
+			err := options.Complete(tf, cmd, test.args, test.argsLenAtDash)
+			if test.expectError && err == nil {
+				t.Errorf("%s: unexpected non-error", test.name)
+			}
+			if !test.expectError && err != nil {
+				t.Errorf("%s: unexpected error: %v", test.name, err)
+			}
+			if err != nil {
+				return
+			}
+			if options.PodName != test.expectedPod {
+				t.Errorf("%s: expected: %s, got: %s", test.name, test.expectedPod, options.PodName)
+			}
+			if options.ContainerName != test.expectedContainer {
+				t.Errorf("%s: expected: %s, got: %s", test.name, test.expectedContainer, options.ContainerName)
+			}
+			if !reflect.DeepEqual(test.expectedArgs, options.Command) {
+				t.Errorf("%s: expected: %v, got %v", test.name, test.expectedArgs, options.Command)
+			}
+		})
 	}
 }
 
 func TestExec(t *testing.T) {
 	version := "v1"
 	tests := []struct {
-		name, podPath, execPath, container string
-		pod                                *api.Pod
-		execErr                            bool
+		name, podPath, execPath string
+		pod                     *corev1.Pod
+		execErr                 bool
 	}{
 		{
 			name:     "pod exec",
@@ -182,96 +190,94 @@ func TestExec(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
-		f, tf, codec, ns := cmdtesting.NewAPIFactory()
-		tf.Client = &fake.RESTClient{
-			NegotiatedSerializer: ns,
-			Client: fake.CreateHTTPClient(func(req *http.Request) (*http.Response, error) {
-				switch p, m := req.URL.Path, req.Method; {
-				case p == test.podPath && m == "GET":
-					body := objBody(codec, test.pod)
-					return &http.Response{StatusCode: 200, Header: defaultHeader(), Body: body}, nil
-				default:
-					// Ensures no GET is performed when deleting by name
-					t.Errorf("%s: unexpected request: %s %#v\n%#v", test.name, req.Method, req.URL, req)
-					return nil, fmt.Errorf("unexpected request")
-				}
-			}),
-		}
-		tf.Namespace = "test"
-		tf.ClientConfig = defaultClientConfig()
-		bufOut := bytes.NewBuffer([]byte{})
-		bufErr := bytes.NewBuffer([]byte{})
-		bufIn := bytes.NewBuffer([]byte{})
-		ex := &fakeRemoteExecutor{}
-		if test.execErr {
-			ex.execErr = fmt.Errorf("exec error")
-		}
-		params := &ExecOptions{
-			StreamOptions: StreamOptions{
-				PodName:       "foo",
-				ContainerName: "bar",
-				In:            bufIn,
-				Out:           bufOut,
-				Err:           bufErr,
-			},
-			Executor: ex,
-		}
-		cmd := &cobra.Command{}
-		args := []string{"test", "command"}
-		if err := params.Complete(f, cmd, args, -1); err != nil {
-			t.Fatal(err)
-		}
-		err := params.Run()
-		if test.execErr && err != ex.execErr {
-			t.Errorf("%s: Unexpected exec error: %v", test.name, err)
-			continue
-		}
-		if !test.execErr && err != nil {
-			t.Errorf("%s: Unexpected error: %v", test.name, err)
-			continue
-		}
-		if test.execErr {
-			continue
-		}
-		if ex.url.Path != test.execPath {
-			t.Errorf("%s: Did not get expected path for exec request", test.name)
-			continue
-		}
-		if ex.method != "POST" {
-			t.Errorf("%s: Did not get method for exec request: %s", test.name, ex.method)
-		}
+		t.Run(test.name, func(t *testing.T) {
+			tf := cmdtesting.NewTestFactory().WithNamespace("test")
+			defer tf.Cleanup()
+
+			codec := scheme.Codecs.LegacyCodec(scheme.Scheme.PrioritizedVersionsAllGroups()...)
+			ns := scheme.Codecs
+
+			tf.Client = &fake.RESTClient{
+				NegotiatedSerializer: ns,
+				Client: fake.CreateHTTPClient(func(req *http.Request) (*http.Response, error) {
+					switch p, m := req.URL.Path, req.Method; {
+					case p == test.podPath && m == "GET":
+						body := objBody(codec, test.pod)
+						return &http.Response{StatusCode: 200, Header: defaultHeader(), Body: body}, nil
+					default:
+						t.Errorf("%s: unexpected request: %s %#v\n%#v", test.name, req.Method, req.URL, req)
+						return nil, fmt.Errorf("unexpected request")
+					}
+				}),
+			}
+			tf.ClientConfigVal = defaultClientConfig()
+			ex := &fakeRemoteExecutor{}
+			if test.execErr {
+				ex.execErr = fmt.Errorf("exec error")
+			}
+			params := &ExecOptions{
+				StreamOptions: StreamOptions{
+					PodName:       "foo",
+					ContainerName: "bar",
+					IOStreams:     genericclioptions.NewTestIOStreamsDiscard(),
+				},
+				Executor: ex,
+			}
+			cmd := &cobra.Command{}
+			args := []string{"test", "command"}
+			if err := params.Complete(tf, cmd, args, -1); err != nil {
+				t.Fatal(err)
+			}
+			err := params.Run()
+			if test.execErr && err != ex.execErr {
+				t.Errorf("%s: Unexpected exec error: %v", test.name, err)
+				return
+			}
+			if !test.execErr && err != nil {
+				t.Errorf("%s: Unexpected error: %v", test.name, err)
+				return
+			}
+			if test.execErr {
+				return
+			}
+			if ex.url.Path != test.execPath {
+				t.Errorf("%s: Did not get expected path for exec request", test.name)
+				return
+			}
+			if ex.method != "POST" {
+				t.Errorf("%s: Did not get method for exec request: %s", test.name, ex.method)
+			}
+		})
 	}
 }
 
-func execPod() *api.Pod {
-	return &api.Pod{
+func execPod() *corev1.Pod {
+	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: "foo", Namespace: "test", ResourceVersion: "10"},
-		Spec: api.PodSpec{
-			RestartPolicy: api.RestartPolicyAlways,
-			DNSPolicy:     api.DNSClusterFirst,
-			Containers: []api.Container{
+		Spec: corev1.PodSpec{
+			RestartPolicy: corev1.RestartPolicyAlways,
+			DNSPolicy:     corev1.DNSClusterFirst,
+			Containers: []corev1.Container{
 				{
 					Name: "bar",
 				},
 			},
 		},
-		Status: api.PodStatus{
-			Phase: api.PodRunning,
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
 		},
 	}
 }
 
 func TestSetupTTY(t *testing.T) {
-	stderr := &bytes.Buffer{}
+	streams, _, _, stderr := genericclioptions.NewTestIOStreams()
 
 	// test 1 - don't attach stdin
 	o := &StreamOptions{
 		// InterruptParent: ,
-		Stdin: false,
-		In:    &bytes.Buffer{},
-		Out:   &bytes.Buffer{},
-		Err:   stderr,
-		TTY:   true,
+		Stdin:     false,
+		IOStreams: streams,
+		TTY:       true,
 	}
 
 	tty := o.setupTTY()
@@ -319,7 +325,7 @@ func TestSetupTTY(t *testing.T) {
 	// test 3 - request a TTY, but stdin is not a terminal
 	o.Stdin = true
 	o.In = &bytes.Buffer{}
-	o.Err = stderr
+	o.ErrOut = stderr
 	o.TTY = true
 
 	tty = o.setupTTY()

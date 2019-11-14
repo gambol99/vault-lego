@@ -30,7 +30,6 @@ import (
 	"k8s.io/kubernetes/pkg/util/mount"
 	"k8s.io/kubernetes/pkg/volume"
 	volumeutil "k8s.io/kubernetes/pkg/volume/util"
-	"k8s.io/kubernetes/pkg/volume/util/volumehelper"
 )
 
 type vsphereVMDKAttacher struct {
@@ -39,10 +38,15 @@ type vsphereVMDKAttacher struct {
 }
 
 var _ volume.Attacher = &vsphereVMDKAttacher{}
+
+var _ volume.DeviceMounter = &vsphereVMDKAttacher{}
+
 var _ volume.AttachableVolumePlugin = &vsphereVolumePlugin{}
 
+var _ volume.DeviceMountableVolumePlugin = &vsphereVolumePlugin{}
+
 // Singleton key mutex for keeping attach operations for the same host atomic
-var attachdetachMutex = keymutex.NewKeyMutex()
+var attachdetachMutex = keymutex.NewHashed(0)
 
 func (plugin *vsphereVolumePlugin) NewAttacher() (volume.Attacher, error) {
 	vsphereCloud, err := getCloudProvider(plugin.host.GetCloudProvider())
@@ -54,6 +58,10 @@ func (plugin *vsphereVolumePlugin) NewAttacher() (volume.Attacher, error) {
 		host:           plugin.host,
 		vsphereVolumes: vsphereCloud,
 	}, nil
+}
+
+func (plugin *vsphereVolumePlugin) NewDeviceMounter() (volume.DeviceMounter, error) {
+	return plugin.NewAttacher()
 }
 
 // Attaches the volume specified by the given spec to the given host.
@@ -192,7 +200,7 @@ func (attacher *vsphereVMDKAttacher) GetDeviceMountPath(spec *volume.Spec) (stri
 // by deviceMountPath; returns a list of paths.
 func (plugin *vsphereVolumePlugin) GetDeviceMountRefs(deviceMountPath string) ([]string, error) {
 	mounter := plugin.host.GetMounter(plugin.GetPluginName())
-	return mount.GetMountRefs(mounter, deviceMountPath)
+	return mounter.GetMountRefs(deviceMountPath)
 }
 
 // MountDevice mounts device to global mount point.
@@ -219,8 +227,8 @@ func (attacher *vsphereVMDKAttacher) MountDevice(spec *volume.Spec, devicePath s
 	options := []string{}
 
 	if notMnt {
-		diskMounter := volumehelper.NewSafeFormatAndMountFromHost(vsphereVolumePluginName, attacher.host)
-		mountOptions := volume.MountOptionFromSpec(spec, options...)
+		diskMounter := volumeutil.NewSafeFormatAndMountFromHost(vsphereVolumePluginName, attacher.host)
+		mountOptions := volumeutil.MountOptionFromSpec(spec, options...)
 		err = diskMounter.FormatAndMount(devicePath, deviceMountPath, volumeSource.FSType, mountOptions)
 		if err != nil {
 			os.Remove(deviceMountPath)
@@ -238,6 +246,8 @@ type vsphereVMDKDetacher struct {
 
 var _ volume.Detacher = &vsphereVMDKDetacher{}
 
+var _ volume.DeviceUnmounter = &vsphereVMDKDetacher{}
+
 func (plugin *vsphereVolumePlugin) NewDetacher() (volume.Detacher, error) {
 	vsphereCloud, err := getCloudProvider(plugin.host.GetCloudProvider())
 	if err != nil {
@@ -248,6 +258,10 @@ func (plugin *vsphereVolumePlugin) NewDetacher() (volume.Detacher, error) {
 		mounter:        plugin.host.GetMounter(plugin.GetPluginName()),
 		vsphereVolumes: vsphereCloud,
 	}, nil
+}
+
+func (plugin *vsphereVolumePlugin) NewDeviceUnmounter() (volume.DeviceUnmounter, error) {
+	return plugin.NewDetacher()
 }
 
 // Detach the given device from the given node.

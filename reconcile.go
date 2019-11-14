@@ -35,15 +35,24 @@ func (c *controller) reconcileIngress() {
 	// step: retrieve a list of ingress resources
 	list, err := c.ingressList()
 	if err != nil {
+		logrus.WithFields(logrus.Fields{
+			"error": err.Error(),
+		}).Error("failed getting ingressList")
 		return
 	}
 
 	// step: check if the ingress resources have changed
 	resources := c.resources.Load().(*extensions_v1beta1.IngressList)
 	if reflect.DeepEqual(resources, list) {
-		logrus.Debugf("nothing to do, the ingress resource have not changed")
+		logrus.Debug("nothing to do, the ingress resource have not changed")
 		return
 	}
+
+	logrus.WithFields(logrus.Fields{
+		"list-count":      len(list.Items),
+		"resources-count": len(resources.Items),
+	}).Debug("processing ingress items")
+
 	// update the resources
 	c.resources.Store(list)
 
@@ -64,7 +73,7 @@ func (c *controller) reconcileIngress() {
 				"name":      x.Name,
 				"namespace": x.Namespace,
 				"error":     err.Error(),
-			}).Errorf("invalid ingress resource")
+			}).Error("invalid ingress resource")
 			continue
 		}
 

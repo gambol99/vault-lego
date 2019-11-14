@@ -25,7 +25,6 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	utilnet "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/apimachinery/pkg/util/wait"
-	utilversion "k8s.io/kubernetes/pkg/util/version"
 	"k8s.io/kubernetes/test/e2e/framework"
 	testutils "k8s.io/kubernetes/test/utils"
 
@@ -33,9 +32,12 @@ import (
 	. "github.com/onsi/gomega"
 )
 
-var uiRedirectRemoved = utilversion.MustParseSemantic("v1.10.0-alpha.0")
-
 var _ = SIGDescribe("Kubernetes Dashboard", func() {
+	BeforeEach(func() {
+		// TODO(kubernetes/kubernetes#61559): Enable dashboard here rather than skip the test.
+		framework.SkipIfProviderIs("gke")
+	})
+
 	const (
 		uiServiceName = "kubernetes-dashboard"
 		uiAppName     = uiServiceName
@@ -89,22 +91,5 @@ var _ = SIGDescribe("Kubernetes Dashboard", func() {
 			return status == http.StatusOK, nil
 		})
 		Expect(err).NotTo(HaveOccurred())
-
-		skipUIRedirect, err := framework.ServerVersionGTE(uiRedirectRemoved, f.ClientSet.Discovery())
-		Expect(err).NotTo(HaveOccurred())
-		if skipUIRedirect {
-			framework.Logf("skipping /ui redirect test")
-		} else {
-			By("Checking that the ApiServer /ui endpoint redirects to a valid server.")
-			var status int
-			err = f.ClientSet.CoreV1().RESTClient().Get().
-				AbsPath(uiRedirect).
-				Timeout(framework.SingleCallTimeout).
-				Do().
-				StatusCode(&status).
-				Error()
-			Expect(err).NotTo(HaveOccurred())
-			Expect(status).To(Equal(http.StatusOK), "Unexpected status from /ui")
-		}
 	})
 })

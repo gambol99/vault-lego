@@ -24,17 +24,18 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/kubernetes/test/e2e/framework"
+	imageutils "k8s.io/kubernetes/test/utils/image"
 )
 
 var _ = Describe("[sig-api-machinery] ConfigMap", func() {
 	f := framework.NewDefaultFramework("configmap")
 
 	/*
-		    Testname: configmap-in-env-field
-		    Description: Make sure config map value can be used as an environment
-			variable in the container (on container.env field)
+		Release : v1.9
+		Testname: ConfigMap, from environment field
+		Description: Create a Pod with an environment variable value set using a value from ConfigMap. A ConfigMap value MUST be accessible in the container environment.
 	*/
-	framework.ConformanceIt("should be consumable via environment variable ", func() {
+	framework.ConformanceIt("should be consumable via environment variable [NodeConformance]", func() {
 		name := "configmap-test-" + string(uuid.NewUUID())
 		configMap := newConfigMap(f, name)
 		By(fmt.Sprintf("Creating configMap %v/%v", f.Namespace.Name, configMap.Name))
@@ -51,7 +52,7 @@ var _ = Describe("[sig-api-machinery] ConfigMap", func() {
 				Containers: []v1.Container{
 					{
 						Name:    "env-test",
-						Image:   busyboxImage,
+						Image:   imageutils.GetE2EImage(imageutils.BusyBox),
 						Command: []string{"sh", "-c", "env"},
 						Env: []v1.EnvVar{
 							{
@@ -78,11 +79,11 @@ var _ = Describe("[sig-api-machinery] ConfigMap", func() {
 	})
 
 	/*
-		    Testname: configmap-envfrom-field
-		    Description: Make sure config map value can be used as an source for
-			environment variables in the container (on container.envFrom field)
+		Release: v1.9
+		Testname: ConfigMap, from environment variables
+		Description: Create a Pod with a environment source from ConfigMap. All ConfigMap values MUST be available as environment variables in the container.
 	*/
-	framework.ConformanceIt("should be consumable via the environment ", func() {
+	framework.ConformanceIt("should be consumable via the environment [NodeConformance]", func() {
 		name := "configmap-test-" + string(uuid.NewUUID())
 		configMap := newEnvFromConfigMap(f, name)
 		By(fmt.Sprintf("Creating configMap %v/%v", f.Namespace.Name, configMap.Name))
@@ -99,7 +100,7 @@ var _ = Describe("[sig-api-machinery] ConfigMap", func() {
 				Containers: []v1.Container{
 					{
 						Name:    "env-test",
-						Image:   busyboxImage,
+						Image:   imageutils.GetE2EImage(imageutils.BusyBox),
 						Command: []string{"sh", "-c", "env"},
 						EnvFrom: []v1.EnvFromSource{
 							{

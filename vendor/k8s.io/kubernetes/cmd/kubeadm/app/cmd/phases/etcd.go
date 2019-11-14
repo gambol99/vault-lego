@@ -22,11 +22,11 @@ import (
 	"github.com/spf13/cobra"
 
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
-	kubeadmapiext "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1alpha1"
+	kubeadmscheme "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/scheme"
+	kubeadmapiv1alpha3 "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1alpha3"
 	cmdutil "k8s.io/kubernetes/cmd/kubeadm/app/cmd/util"
 	kubeadmconstants "k8s.io/kubernetes/cmd/kubeadm/app/constants"
 	etcdphase "k8s.io/kubernetes/cmd/kubeadm/app/phases/etcd"
-	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	"k8s.io/kubernetes/pkg/util/normalizer"
 )
 
@@ -45,7 +45,7 @@ var (
 		`)
 )
 
-// NewCmdEtcd return main command for Etcd phase
+// NewCmdEtcd returns main command for Etcd phase
 func NewCmdEtcd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "etcd",
@@ -61,17 +61,10 @@ func NewCmdEtcd() *cobra.Command {
 // getEtcdSubCommands returns sub commands for etcd phase
 func getEtcdSubCommands(outDir, defaultKubernetesVersion string) []*cobra.Command {
 
-	cfg := &kubeadmapiext.MasterConfiguration{}
-
-	// This is used for unit testing only...
-	// If we wouldn't set this to something, the code would dynamically look up the version from the internet
-	// By setting this explicitely for tests workarounds that
-	if defaultKubernetesVersion != "" {
-		cfg.KubernetesVersion = defaultKubernetesVersion
-	}
+	cfg := &kubeadmapiv1alpha3.InitConfiguration{}
 
 	// Default values for the cobra help text
-	legacyscheme.Scheme.Default(cfg)
+	kubeadmscheme.Scheme.Default(cfg)
 
 	var cfgPath string
 	var subCmds []*cobra.Command
@@ -81,7 +74,7 @@ func getEtcdSubCommands(outDir, defaultKubernetesVersion string) []*cobra.Comman
 		short    string
 		long     string
 		examples string
-		cmdFunc  func(outDir string, cfg *kubeadmapi.MasterConfiguration) error
+		cmdFunc  func(outDir string, cfg *kubeadmapi.InitConfiguration) error
 	}{
 		use:      "local",
 		short:    "Generates the static Pod manifest file for a local, single-node etcd instance",
@@ -96,12 +89,12 @@ func getEtcdSubCommands(outDir, defaultKubernetesVersion string) []*cobra.Comman
 		Short:   properties.short,
 		Long:    properties.long,
 		Example: properties.examples,
-		Run:     runCmdPhase(properties.cmdFunc, &outDir, &cfgPath, cfg),
+		Run:     runCmdPhase(properties.cmdFunc, &outDir, &cfgPath, cfg, defaultKubernetesVersion),
 	}
 
 	// Add flags to the command
 	cmd.Flags().StringVar(&cfg.CertificatesDir, "cert-dir", cfg.CertificatesDir, `The path where certificates are stored`)
-	cmd.Flags().StringVar(&cfgPath, "config", cfgPath, "Path to kubeadm config file (WARNING: Usage of a configuration file is experimental)")
+	cmd.Flags().StringVar(&cfgPath, "config", cfgPath, "Path to kubeadm config file. WARNING: Usage of a configuration file is experimental")
 
 	subCmds = append(subCmds, cmd)
 

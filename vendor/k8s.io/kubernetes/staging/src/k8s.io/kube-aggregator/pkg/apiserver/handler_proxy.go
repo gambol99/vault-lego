@@ -18,7 +18,6 @@ package apiserver
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"net/url"
 	"sync/atomic"
@@ -42,8 +41,6 @@ import (
 // proxyHandler provides a http.Handler which will proxy traffic to locations
 // specified by items implementing Redirector.
 type proxyHandler struct {
-	contextMapper genericapirequest.RequestContextMapper
-
 	// localDelegate is used to satisfy local APIServices
 	localDelegate http.Handler
 
@@ -74,6 +71,8 @@ type proxyHandlingInfo struct {
 	serviceName string
 	// namespace is the namespace the service lives in
 	serviceNamespace string
+	// serviceAvailable indicates this APIService is available or not
+	serviceAvailable bool
 }
 
 func (r *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
@@ -92,17 +91,17 @@ func (r *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	if !handlingInfo.serviceAvailable {
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
 	if handlingInfo.transportBuildingError != nil {
 		http.Error(w, handlingInfo.transportBuildingError.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	ctx, ok := r.contextMapper.Get(req)
-	if !ok {
-		http.Error(w, "missing context", http.StatusInternalServerError)
-		return
-	}
-	user, ok := genericapirequest.UserFrom(ctx)
+	user, ok := genericapirequest.UserFrom(req.Context())
 	if !ok {
 		http.Error(w, "missing user", http.StatusInternalServerError)
 		return
@@ -113,7 +112,8 @@ func (r *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	location.Scheme = "https"
 	rloc, err := r.serviceResolver.ResolveEndpoint(handlingInfo.serviceNamespace, handlingInfo.serviceName)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("missing route (%s)", err.Error()), http.StatusInternalServerError)
+		glog.Errorf("error resolving %s/%s: %v", handlingInfo.serviceNamespace, handlingInfo.serviceName, err)
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	location.Host = rloc.Host
@@ -161,7 +161,8 @@ func maybeWrapForConnectionUpgrades(restConfig *restclient.Config, rt http.Round
 		return nil, true, err
 	}
 	followRedirects := utilfeature.DefaultFeatureGate.Enabled(genericfeatures.StreamingProxyRedirects)
-	upgradeRoundTripper := spdy.NewRoundTripper(tlsConfig, followRedirects)
+	requireSameHostRedirects := utilfeature.DefaultFeatureGate.Enabled(genericfeatures.ValidateProxyRedirects)
+	upgradeRoundTripper := spdy.NewRoundTripper(tlsConfig, followRedirects, requireSameHostRedirects)
 	wrappedRT, err := restclient.HTTPWrappersForConfig(restConfig, upgradeRoundTripper)
 	if err != nil {
 		return nil, true, err
@@ -205,16 +206,14 @@ func (r *proxyHandler) updateAPIService(apiService *apiregistrationapi.APIServic
 		},
 		serviceName:      apiService.Spec.Service.Name,
 		serviceNamespace: apiService.Spec.Service.Namespace,
+		serviceAvailable: apiregistrationapi.IsAPIServiceConditionTrue(apiService, apiregistrationapi.Available),
+	}
+	if r.proxyTransport != nil && r.proxyTransport.DialContext != nil {
+		newInfo.restConfig.Dial = r.proxyTransport.DialContext
 	}
 	newInfo.proxyRoundTripper, newInfo.transportBuildingError = restclient.TransportFor(newInfo.restConfig)
-	if newInfo.transportBuildingError == nil && r.proxyTransport.Dial != nil {
-		switch transport := newInfo.proxyRoundTripper.(type) {
-		case *http.Transport:
-			transport.Dial = r.proxyTransport.Dial
-		default:
-			newInfo.transportBuildingError = fmt.Errorf("unable to set dialer for %s/%s as rest transport is of type %T", apiService.Spec.Service.Namespace, apiService.Spec.Service.Name, newInfo.proxyRoundTripper)
-			glog.Warning(newInfo.transportBuildingError.Error())
-		}
+	if newInfo.transportBuildingError != nil {
+		glog.Warning(newInfo.transportBuildingError.Error())
 	}
 	r.handlingInfo.Store(newInfo)
 }

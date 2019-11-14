@@ -17,25 +17,114 @@ limitations under the License.
 package options
 
 import (
+	"net"
 	"reflect"
 	"testing"
 	"time"
 
 	"github.com/spf13/pflag"
 
+	apimachineryconfig "k8s.io/apimachinery/pkg/apis/config"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/diff"
-	"k8s.io/kubernetes/pkg/apis/componentconfig"
+	apiserverconfig "k8s.io/apiserver/pkg/apis/config"
+	apiserveroptions "k8s.io/apiserver/pkg/server/options"
+	cmoptions "k8s.io/kubernetes/cmd/controller-manager/app/options"
 )
 
+func TestDefaultFlags(t *testing.T) {
+	s, _ := NewCloudControllerManagerOptions()
+
+	expected := &CloudControllerManagerOptions{
+		Generic: &cmoptions.GenericControllerManagerConfigurationOptions{
+			Port:            10253,     // Note: InsecureServingOptions.ApplyTo will write the flag value back into the component config
+			Address:         "0.0.0.0", // Note: InsecureServingOptions.ApplyTo will write the flag value back into the component config
+			MinResyncPeriod: metav1.Duration{Duration: 12 * time.Hour},
+			ClientConnection: apimachineryconfig.ClientConnectionConfiguration{
+				ContentType: "application/vnd.kubernetes.protobuf",
+				QPS:         20.0,
+				Burst:       30,
+			},
+			ControllerStartInterval: metav1.Duration{Duration: 0},
+			LeaderElection: apiserverconfig.LeaderElectionConfiguration{
+				ResourceLock:  "endpoints",
+				LeaderElect:   true,
+				LeaseDuration: metav1.Duration{Duration: 15 * time.Second},
+				RenewDeadline: metav1.Duration{Duration: 10 * time.Second},
+				RetryPeriod:   metav1.Duration{Duration: 2 * time.Second},
+			},
+			Debugging: &cmoptions.DebuggingOptions{
+				EnableContentionProfiling: false,
+			},
+			Controllers: []string{"*"},
+		},
+		KubeCloudShared: &cmoptions.KubeCloudSharedOptions{
+			RouteReconciliationPeriod: metav1.Duration{Duration: 10 * time.Second},
+			NodeMonitorPeriod:         metav1.Duration{Duration: 5 * time.Second},
+			ClusterName:               "kubernetes",
+			ClusterCIDR:               "",
+			AllocateNodeCIDRs:         false,
+			CIDRAllocatorType:         "",
+			ConfigureCloudRoutes:      true,
+			CloudProvider: &cmoptions.CloudProviderOptions{
+				Name:            "",
+				CloudConfigFile: "",
+			},
+		},
+		ServiceController: &cmoptions.ServiceControllerOptions{
+			ConcurrentServiceSyncs: 1,
+		},
+		SecureServing: (&apiserveroptions.SecureServingOptions{
+			BindPort:    10258,
+			BindAddress: net.ParseIP("0.0.0.0"),
+			ServerCert: apiserveroptions.GeneratableKeyCert{
+				CertDirectory: "/var/run/kubernetes",
+				PairName:      "cloud-controller-manager",
+			},
+			HTTP2MaxStreamsPerConnection: 0,
+		}).WithLoopback(),
+		InsecureServing: (&apiserveroptions.DeprecatedInsecureServingOptions{
+			BindAddress: net.ParseIP("0.0.0.0"),
+			BindPort:    int(10253),
+			BindNetwork: "tcp",
+		}).WithLoopback(),
+		Authentication: &apiserveroptions.DelegatingAuthenticationOptions{
+			CacheTTL:   10 * time.Second,
+			ClientCert: apiserveroptions.ClientCertAuthenticationOptions{},
+			RequestHeader: apiserveroptions.RequestHeaderAuthenticationOptions{
+				UsernameHeaders:     []string{"x-remote-user"},
+				GroupHeaders:        []string{"x-remote-group"},
+				ExtraHeaderPrefixes: []string{"x-remote-extra-"},
+			},
+			RemoteKubeConfigFileOptional: true,
+		},
+		Authorization: &apiserveroptions.DelegatingAuthorizationOptions{
+			AllowCacheTTL:                10 * time.Second,
+			DenyCacheTTL:                 10 * time.Second,
+			RemoteKubeConfigFileOptional: true,
+			AlwaysAllowPaths:             []string{"/healthz"}, // note: this does not match /healthz/ or
+		},
+		Kubeconfig: "",
+		Master:     "",
+		NodeStatusUpdateFrequency: metav1.Duration{Duration: 5 * time.Minute},
+	}
+	if !reflect.DeepEqual(expected, s) {
+		t.Errorf("Got different run options than expected.\nDifference detected on:\n%s", diff.ObjectReflectDiff(expected, s))
+	}
+}
+
 func TestAddFlags(t *testing.T) {
-	f := pflag.NewFlagSet("addflagstest", pflag.ContinueOnError)
-	s := NewCloudControllerManagerServer()
-	s.AddFlags(f)
+	fs := pflag.NewFlagSet("addflagstest", pflag.ContinueOnError)
+	s, _ := NewCloudControllerManagerOptions()
+	for _, f := range s.Flags().FlagSets {
+		fs.AddFlagSet(f)
+	}
 
 	args := []string{
 		"--address=192.168.4.10",
 		"--allocate-node-cidrs=true",
+		"--bind-address=192.168.4.21",
+		"--cert-dir=/a/b/c",
 		"--cloud-config=/cloud-config",
 		"--cloud-provider=gce",
 		"--cluster-cidr=1.2.3.4/24",
@@ -43,7 +132,7 @@ func TestAddFlags(t *testing.T) {
 		"--configure-cloud-routes=false",
 		"--contention-profiling=true",
 		"--controller-start-interval=2m",
-		"--min-resync-period=5m",
+		"--http2-max-streams-per-connection=47",
 		"--kube-api-burst=100",
 		"--kube-api-content-type=application/vnd.kubernetes.protobuf",
 		"--kube-api-qps=50.0",
@@ -54,42 +143,84 @@ func TestAddFlags(t *testing.T) {
 		"--leader-elect-resource-lock=configmap",
 		"--leader-elect-retry-period=5s",
 		"--master=192.168.4.20",
-		"--min-resync-period=8h",
+		"--min-resync-period=100m",
+		"--node-status-update-frequency=10m",
 		"--port=10000",
 		"--profiling=false",
-		"--node-status-update-frequency=10m",
 		"--route-reconciliation-period=30s",
-		"--min-resync-period=100m",
+		"--secure-port=10001",
 		"--use-service-account-credentials=false",
 	}
-	f.Parse(args)
+	fs.Parse(args)
 
-	expected := &CloudControllerManagerServer{
-		KubeControllerManagerConfiguration: componentconfig.KubeControllerManagerConfiguration{
-			CloudProvider:             "gce",
-			CloudConfigFile:           "/cloud-config",
-			Port:                      10000,
-			Address:                   "192.168.4.10",
-			ConcurrentServiceSyncs:    1,
-			MinResyncPeriod:           metav1.Duration{Duration: 100 * time.Minute},
-			NodeMonitorPeriod:         metav1.Duration{Duration: 5 * time.Second},
-			ClusterName:               "k8s",
-			ConfigureCloudRoutes:      false,
-			AllocateNodeCIDRs:         true,
-			ContentType:               "application/vnd.kubernetes.protobuf",
-			EnableContentionProfiling: true,
-			KubeAPIQPS:                50.0,
-			KubeAPIBurst:              100,
-			LeaderElection: componentconfig.LeaderElectionConfiguration{
+	expected := &CloudControllerManagerOptions{
+		Generic: &cmoptions.GenericControllerManagerConfigurationOptions{
+			Port:            10253,     // Note: InsecureServingOptions.ApplyTo will write the flag value back into the component config
+			Address:         "0.0.0.0", // Note: InsecureServingOptions.ApplyTo will write the flag value back into the component config
+			MinResyncPeriod: metav1.Duration{Duration: 100 * time.Minute},
+			ClientConnection: apimachineryconfig.ClientConnectionConfiguration{
+				ContentType: "application/vnd.kubernetes.protobuf",
+				QPS:         50.0,
+				Burst:       100,
+			},
+			ControllerStartInterval: metav1.Duration{Duration: 2 * time.Minute},
+			LeaderElection: apiserverconfig.LeaderElectionConfiguration{
 				ResourceLock:  "configmap",
 				LeaderElect:   false,
 				LeaseDuration: metav1.Duration{Duration: 30 * time.Second},
 				RenewDeadline: metav1.Duration{Duration: 15 * time.Second},
 				RetryPeriod:   metav1.Duration{Duration: 5 * time.Second},
 			},
-			ControllerStartInterval:   metav1.Duration{Duration: 2 * time.Minute},
+			Debugging: &cmoptions.DebuggingOptions{
+				EnableContentionProfiling: true,
+			},
+			Controllers: []string{"*"},
+		},
+		KubeCloudShared: &cmoptions.KubeCloudSharedOptions{
+			CloudProvider: &cmoptions.CloudProviderOptions{
+				Name:            "gce",
+				CloudConfigFile: "/cloud-config",
+			},
 			RouteReconciliationPeriod: metav1.Duration{Duration: 30 * time.Second},
+			NodeMonitorPeriod:         metav1.Duration{Duration: 5 * time.Second},
+			ClusterName:               "k8s",
 			ClusterCIDR:               "1.2.3.4/24",
+			AllocateNodeCIDRs:         true,
+			CIDRAllocatorType:         "RangeAllocator",
+			ConfigureCloudRoutes:      false,
+		},
+		ServiceController: &cmoptions.ServiceControllerOptions{
+			ConcurrentServiceSyncs: 1,
+		},
+		SecureServing: (&apiserveroptions.SecureServingOptions{
+			BindPort:    10001,
+			BindAddress: net.ParseIP("192.168.4.21"),
+			ServerCert: apiserveroptions.GeneratableKeyCert{
+				CertDirectory: "/a/b/c",
+				PairName:      "cloud-controller-manager",
+			},
+			HTTP2MaxStreamsPerConnection: 47,
+		}).WithLoopback(),
+		InsecureServing: (&apiserveroptions.DeprecatedInsecureServingOptions{
+			BindAddress: net.ParseIP("192.168.4.10"),
+			BindPort:    int(10000),
+			BindNetwork: "tcp",
+		}).WithLoopback(),
+		Authentication: &apiserveroptions.DelegatingAuthenticationOptions{
+			CacheTTL:   10 * time.Second,
+			ClientCert: apiserveroptions.ClientCertAuthenticationOptions{},
+			RequestHeader: apiserveroptions.RequestHeaderAuthenticationOptions{
+				UsernameHeaders:     []string{"x-remote-user"},
+				GroupHeaders:        []string{"x-remote-group"},
+				ExtraHeaderPrefixes: []string{"x-remote-extra-"},
+			},
+			RemoteKubeConfigFileOptional: true,
+		},
+		Authorization: &apiserveroptions.DelegatingAuthorizationOptions{
+			AllowCacheTTL:                10 * time.Second,
+			DenyCacheTTL:                 10 * time.Second,
+			RemoteKubeConfigFileOptional: true,
+			AlwaysAllowPaths:             []string{"/healthz"}, // note: this does not match /healthz/ or
 		},
 		Kubeconfig: "/kubeconfig",
 		Master:     "192.168.4.20",

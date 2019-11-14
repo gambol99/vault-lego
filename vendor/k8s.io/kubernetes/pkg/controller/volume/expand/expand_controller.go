@@ -26,6 +26,7 @@ import (
 
 	"github.com/golang/glog"
 
+	authenticationv1 "k8s.io/api/authentication/v1"
 	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/runtime"
@@ -36,19 +37,21 @@ import (
 	corelisters "k8s.io/client-go/listers/core/v1"
 	kcache "k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
+	csiclientset "k8s.io/csi-api/pkg/client/clientset/versioned"
 	"k8s.io/kubernetes/pkg/cloudprovider"
 	"k8s.io/kubernetes/pkg/controller"
+	"k8s.io/kubernetes/pkg/controller/volume/events"
 	"k8s.io/kubernetes/pkg/controller/volume/expand/cache"
-	"k8s.io/kubernetes/pkg/util/io"
 	"k8s.io/kubernetes/pkg/util/mount"
 	"k8s.io/kubernetes/pkg/volume"
 	"k8s.io/kubernetes/pkg/volume/util"
 	"k8s.io/kubernetes/pkg/volume/util/operationexecutor"
+	"k8s.io/kubernetes/pkg/volume/util/volumepathhandler"
 )
 
 const (
 	// How often resizing loop runs
-	syncLoopPeriod time.Duration = 30 * time.Second
+	syncLoopPeriod time.Duration = 400 * time.Millisecond
 	// How often pvc populator runs
 	populatorLoopPeriod time.Duration = 2 * time.Minute
 )
@@ -116,14 +119,14 @@ func NewExpandController(
 
 	eventBroadcaster := record.NewBroadcaster()
 	eventBroadcaster.StartLogging(glog.Infof)
-	eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: v1core.New(kubeClient.CoreV1().RESTClient()).Events("")})
-	recorder := eventBroadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "volume_expand"})
-	blkutil := util.NewBlockVolumePathHandler()
+	eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: kubeClient.CoreV1().Events("")})
+	expc.recorder = eventBroadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "volume_expand"})
+	blkutil := volumepathhandler.NewBlockVolumePathHandler()
 
 	expc.opExecutor = operationexecutor.NewOperationExecutor(operationexecutor.NewOperationGenerator(
 		kubeClient,
 		&expc.volumePluginMgr,
-		recorder,
+		expc.recorder,
 		false,
 		blkutil))
 
@@ -140,6 +143,7 @@ func NewExpandController(
 		expc.resizeMap,
 		expc.pvcLister,
 		expc.pvLister,
+		&expc.volumePluginMgr,
 		kubeClient)
 	return expc, nil
 }
@@ -162,18 +166,26 @@ func (expc *expandController) Run(stopCh <-chan struct{}) {
 
 func (expc *expandController) deletePVC(obj interface{}) {
 	pvc, ok := obj.(*v1.PersistentVolumeClaim)
-
-	if pvc == nil || !ok {
-		return
+	if !ok {
+		tombstone, ok := obj.(kcache.DeletedFinalStateUnknown)
+		if !ok {
+			runtime.HandleError(fmt.Errorf("couldn't get object from tombstone %+v", obj))
+			return
+		}
+		pvc, ok = tombstone.Obj.(*v1.PersistentVolumeClaim)
+		if !ok {
+			runtime.HandleError(fmt.Errorf("tombstone contained object that is not a pvc %#v", obj))
+			return
+		}
 	}
 
 	expc.resizeMap.DeletePVC(pvc)
 }
 
 func (expc *expandController) pvcUpdate(oldObj, newObj interface{}) {
-	oldPvc, ok := oldObj.(*v1.PersistentVolumeClaim)
+	oldPVC, ok := oldObj.(*v1.PersistentVolumeClaim)
 
-	if oldPvc == nil || !ok {
+	if oldPVC == nil || !ok {
 		return
 	}
 
@@ -182,12 +194,34 @@ func (expc *expandController) pvcUpdate(oldObj, newObj interface{}) {
 	if newPVC == nil || !ok {
 		return
 	}
-	pv, err := getPersistentVolume(newPVC, expc.pvLister)
-	if err != nil {
-		glog.V(5).Infof("Error getting Persistent Volume for pvc %q : %v", newPVC.UID, err)
-		return
+
+	newSize := newPVC.Spec.Resources.Requests[v1.ResourceStorage]
+	oldSize := oldPVC.Spec.Resources.Requests[v1.ResourceStorage]
+
+	// We perform additional checks inside resizeMap.AddPVCUpdate function
+	// this check here exists to ensure - we do not consider every
+	// PVC update event for resizing, just those where the PVC size changes
+	if newSize.Cmp(oldSize) > 0 {
+		pv, err := getPersistentVolume(newPVC, expc.pvLister)
+		if err != nil {
+			glog.V(5).Infof("Error getting Persistent Volume for PVC %q : %v", newPVC.UID, err)
+			return
+		}
+
+		// Filter PVCs for which the corresponding volume plugins don't allow expansion.
+		volumeSpec := volume.NewSpecFromPersistentVolume(pv, false)
+		volumePlugin, err := expc.volumePluginMgr.FindExpandablePluginBySpec(volumeSpec)
+		if err != nil || volumePlugin == nil {
+			err = fmt.Errorf("didn't find a plugin capable of expanding the volume; " +
+				"waiting for an external controller to process this PVC")
+			expc.recorder.Event(newPVC, v1.EventTypeNormal, events.ExternalExpanding,
+				fmt.Sprintf("Ignoring the PVC: %v.", err))
+			glog.V(3).Infof("Ignoring the PVC %q (uid: %q) : %v.",
+				util.GetPersistentVolumeClaimQualifiedName(newPVC), newPVC.UID, err)
+			return
+		}
+		expc.resizeMap.AddPVCUpdate(newPVC, pv)
 	}
-	expc.resizeMap.AddPVCUpdate(newPVC, pv)
 }
 
 func getPersistentVolume(pvc *v1.PersistentVolumeClaim, pvLister corelisters.PersistentVolumeLister) (*v1.PersistentVolume, error) {
@@ -207,6 +241,10 @@ func (expc *expandController) GetPluginDir(pluginName string) string {
 }
 
 func (expc *expandController) GetVolumeDevicePluginDir(pluginName string) string {
+	return ""
+}
+
+func (expc *expandController) GetPodsDir() string {
 	return ""
 }
 
@@ -246,10 +284,6 @@ func (expc *expandController) GetExec(pluginName string) mount.Exec {
 	return mount.NewOsExec()
 }
 
-func (expc *expandController) GetWriter() io.Writer {
-	return nil
-}
-
 func (expc *expandController) GetHostName() string {
 	return ""
 }
@@ -274,10 +308,25 @@ func (expc *expandController) GetConfigMapFunc() func(namespace, name string) (*
 	}
 }
 
+func (expc *expandController) GetServiceAccountTokenFunc() func(_, _ string, _ *authenticationv1.TokenRequest) (*authenticationv1.TokenRequest, error) {
+	return func(_, _ string, _ *authenticationv1.TokenRequest) (*authenticationv1.TokenRequest, error) {
+		return nil, fmt.Errorf("GetServiceAccountToken unsupported in expandController")
+	}
+}
+
 func (expc *expandController) GetNodeLabels() (map[string]string, error) {
 	return nil, fmt.Errorf("GetNodeLabels unsupported in expandController")
 }
 
 func (expc *expandController) GetNodeName() types.NodeName {
 	return ""
+}
+
+func (expc *expandController) GetEventRecorder() record.EventRecorder {
+	return expc.recorder
+}
+
+func (expc *expandController) GetCSIClient() csiclientset.Interface {
+	// No volume plugin in expand controller needs csi.storage.k8s.io
+	return nil
 }

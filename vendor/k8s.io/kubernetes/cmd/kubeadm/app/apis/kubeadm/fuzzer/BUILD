@@ -3,6 +3,7 @@ package(default_visibility = ["//visibility:public"])
 load(
     "@io_bazel_rules_go//go:def.bzl",
     "go_library",
+    "go_test",
 )
 
 go_library(
@@ -11,12 +12,16 @@ go_library(
     importpath = "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/fuzzer",
     deps = [
         "//cmd/kubeadm/app/apis/kubeadm:go_default_library",
-        "//pkg/kubelet/apis/kubeletconfig/v1alpha1:go_default_library",
-        "//pkg/proxy/apis/kubeproxyconfig/v1alpha1:go_default_library",
-        "//pkg/util/pointer:go_default_library",
+        "//cmd/kubeadm/app/componentconfigs:go_default_library",
+        "//pkg/kubelet/apis/config:go_default_library",
+        "//pkg/proxy/apis/config:go_default_library",
+        "//staging/src/k8s.io/api/core/v1:go_default_library",
+        "//staging/src/k8s.io/apimachinery/pkg/apis/meta/v1:go_default_library",
+        "//staging/src/k8s.io/apimachinery/pkg/runtime/serializer:go_default_library",
+        "//staging/src/k8s.io/kube-proxy/config/v1alpha1:go_default_library",
+        "//staging/src/k8s.io/kubelet/config/v1beta1:go_default_library",
         "//vendor/github.com/google/gofuzz:go_default_library",
-        "//vendor/k8s.io/apimachinery/pkg/apis/meta/v1:go_default_library",
-        "//vendor/k8s.io/apimachinery/pkg/runtime/serializer:go_default_library",
+        "//vendor/k8s.io/utils/pointer:go_default_library",
     ],
 )
 
@@ -31,4 +36,10 @@ filegroup(
     name = "all-srcs",
     srcs = [":package-srcs"],
     tags = ["automanaged"],
+)
+
+go_test(
+    name = "go_default_test",
+    srcs = ["fuzzer_test.go"],
+    embed = [":go_default_library"],
 )

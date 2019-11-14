@@ -49,8 +49,9 @@ func TestCmdVersion(t *testing.T) {
 		{"", NormalExpectedRegex, true},
 	}
 
+	kubeadmPath := getKubeadmPath()
 	for _, rt := range versionTest {
-		stdout, _, actual := RunCmd(*kubeadmPath, "version", rt.args)
+		stdout, _, actual := RunCmd(kubeadmPath, "version", rt.args)
 		if (actual == nil) != rt.expected {
 			t.Errorf(
 				"failed CmdVersion running 'kubeadm version %s' with an error: %v\n\texpected: %t\n\t  actual: %t",
@@ -88,8 +89,9 @@ func TestCmdVersionOutputJsonOrYaml(t *testing.T) {
 		{"--output=yaml", "yaml", true},
 	}
 
+	kubeadmPath := getKubeadmPath()
 	for _, rt := range versionTest {
-		stdout, _, actual := RunCmd(*kubeadmPath, "version", rt.args)
+		stdout, _, actual := RunCmd(kubeadmPath, "version", rt.args)
 		if (actual == nil) != rt.expected {
 			t.Errorf(
 				"failed CmdVersion running 'kubeadm version %s' with an error: %v\n\texpected: %t\n\t  actual: %t",
@@ -117,12 +119,12 @@ func TestCmdVersionOutputJsonOrYaml(t *testing.T) {
 
 			m := obj.(map[string]interface{})
 			if m["clientVersion"] == nil {
-				t.Errorf("failed to get the infomation of clientVersion from 'kubeadm version %s'", rt.args)
+				t.Errorf("failed to get the information of clientVersion from 'kubeadm version %s'", rt.args)
 			}
 			info := m["clientVersion"].(map[string]interface{})
 			for _, key := range VersionInfo {
 				if len(info[key].(string)) == 0 {
-					t.Errorf("failed to get the infomation of %s from 'kubeadm version %s'", key, rt.args)
+					t.Errorf("failed to get the information of %s from 'kubeadm version %s'", key, rt.args)
 				}
 			}
 		}

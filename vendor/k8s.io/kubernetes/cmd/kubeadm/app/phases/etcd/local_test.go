@@ -32,8 +32,16 @@ import (
 func TestGetEtcdPodSpec(t *testing.T) {
 
 	// Creates a Master Configuration
-	cfg := &kubeadmapi.MasterConfiguration{
-		KubernetesVersion: "v1.7.0",
+	cfg := &kubeadmapi.InitConfiguration{
+		ClusterConfiguration: kubeadmapi.ClusterConfiguration{
+			KubernetesVersion: "v1.7.0",
+			Etcd: kubeadmapi.Etcd{
+				Local: &kubeadmapi.LocalEtcd{
+					DataDir: "/var/lib/etcd",
+					Image:   "",
+				},
+			},
+		},
 	}
 
 	// Executes GetEtcdPodSpec
@@ -41,7 +49,7 @@ func TestGetEtcdPodSpec(t *testing.T) {
 
 	// Assert each specs refers to the right pod
 	if spec.Spec.Containers[0].Name != kubeadmconstants.Etcd {
-		t.Errorf("getKubeConfigSpecs spec for etcd contains pod %s, expectes %s", spec.Spec.Containers[0].Name, kubeadmconstants.Etcd)
+		t.Errorf("getKubeConfigSpecs spec for etcd contains pod %s, expects %s", spec.Spec.Containers[0].Name, kubeadmconstants.Etcd)
 	}
 }
 
@@ -52,8 +60,16 @@ func TestCreateLocalEtcdStaticPodManifestFile(t *testing.T) {
 	defer os.RemoveAll(tmpdir)
 
 	// Creates a Master Configuration
-	cfg := &kubeadmapi.MasterConfiguration{
-		KubernetesVersion: "v1.7.0",
+	cfg := &kubeadmapi.InitConfiguration{
+		ClusterConfiguration: kubeadmapi.ClusterConfiguration{
+			KubernetesVersion: "v1.7.0",
+			Etcd: kubeadmapi.Etcd{
+				Local: &kubeadmapi.LocalEtcd{
+					DataDir: "/var/lib/etcd",
+					Image:   "k8s.gcr.io/etcd",
+				},
+			},
+		},
 	}
 
 	// Execute createStaticPodFunction
@@ -70,46 +86,110 @@ func TestCreateLocalEtcdStaticPodManifestFile(t *testing.T) {
 
 func TestGetEtcdCommand(t *testing.T) {
 	var tests = []struct {
-		cfg      *kubeadmapi.MasterConfiguration
+		cfg      *kubeadmapi.InitConfiguration
 		expected []string
 	}{
 		{
-			cfg: &kubeadmapi.MasterConfiguration{
-				Etcd: kubeadmapi.Etcd{DataDir: "/var/lib/etcd"},
-			},
-			expected: []string{
-				"etcd",
-				"--listen-client-urls=http://127.0.0.1:2379",
-				"--advertise-client-urls=http://127.0.0.1:2379",
-				"--data-dir=/var/lib/etcd",
-			},
-		},
-		{
-			cfg: &kubeadmapi.MasterConfiguration{
-				Etcd: kubeadmapi.Etcd{
-					DataDir: "/var/lib/etcd",
-					ExtraArgs: map[string]string{
-						"listen-client-urls":    "http://10.0.1.10:2379",
-						"advertise-client-urls": "http://10.0.1.10:2379",
+			cfg: &kubeadmapi.InitConfiguration{
+				NodeRegistration: kubeadmapi.NodeRegistrationOptions{
+					Name: "foo",
+				},
+				ClusterConfiguration: kubeadmapi.ClusterConfiguration{
+					Etcd: kubeadmapi.Etcd{
+						Local: &kubeadmapi.LocalEtcd{
+							DataDir: "/var/lib/etcd",
+						},
 					},
 				},
 			},
 			expected: []string{
 				"etcd",
-				"--listen-client-urls=http://10.0.1.10:2379",
-				"--advertise-client-urls=http://10.0.1.10:2379",
+				"--name=foo",
+				"--listen-client-urls=https://127.0.0.1:2379",
+				"--advertise-client-urls=https://127.0.0.1:2379",
+				"--listen-peer-urls=https://127.0.0.1:2380",
+				"--initial-advertise-peer-urls=https://127.0.0.1:2380",
 				"--data-dir=/var/lib/etcd",
+				"--cert-file=" + kubeadmconstants.EtcdServerCertName,
+				"--key-file=" + kubeadmconstants.EtcdServerKeyName,
+				"--trusted-ca-file=" + kubeadmconstants.EtcdCACertName,
+				"--client-cert-auth=true",
+				"--peer-cert-file=" + kubeadmconstants.EtcdPeerCertName,
+				"--peer-key-file=" + kubeadmconstants.EtcdPeerKeyName,
+				"--peer-trusted-ca-file=" + kubeadmconstants.EtcdCACertName,
+				"--snapshot-count=10000",
+				"--peer-client-cert-auth=true",
+				"--initial-cluster=foo=https://127.0.0.1:2380",
 			},
 		},
 		{
-			cfg: &kubeadmapi.MasterConfiguration{
-				Etcd: kubeadmapi.Etcd{DataDir: "/etc/foo"},
+			cfg: &kubeadmapi.InitConfiguration{
+				NodeRegistration: kubeadmapi.NodeRegistrationOptions{
+					Name: "bar",
+				},
+				ClusterConfiguration: kubeadmapi.ClusterConfiguration{
+					Etcd: kubeadmapi.Etcd{
+						Local: &kubeadmapi.LocalEtcd{
+							DataDir: "/var/lib/etcd",
+							ExtraArgs: map[string]string{
+								"listen-client-urls":    "https://10.0.1.10:2379",
+								"advertise-client-urls": "https://10.0.1.10:2379",
+							},
+						},
+					},
+				},
 			},
 			expected: []string{
 				"etcd",
-				"--listen-client-urls=http://127.0.0.1:2379",
-				"--advertise-client-urls=http://127.0.0.1:2379",
+				"--name=bar",
+				"--listen-client-urls=https://10.0.1.10:2379",
+				"--advertise-client-urls=https://10.0.1.10:2379",
+				"--listen-peer-urls=https://127.0.0.1:2380",
+				"--initial-advertise-peer-urls=https://127.0.0.1:2380",
+				"--data-dir=/var/lib/etcd",
+				"--cert-file=" + kubeadmconstants.EtcdServerCertName,
+				"--key-file=" + kubeadmconstants.EtcdServerKeyName,
+				"--trusted-ca-file=" + kubeadmconstants.EtcdCACertName,
+				"--client-cert-auth=true",
+				"--peer-cert-file=" + kubeadmconstants.EtcdPeerCertName,
+				"--peer-key-file=" + kubeadmconstants.EtcdPeerKeyName,
+				"--peer-trusted-ca-file=" + kubeadmconstants.EtcdCACertName,
+				"--snapshot-count=10000",
+				"--peer-client-cert-auth=true",
+				"--initial-cluster=bar=https://127.0.0.1:2380",
+			},
+		},
+		{
+			cfg: &kubeadmapi.InitConfiguration{
+				NodeRegistration: kubeadmapi.NodeRegistrationOptions{
+					Name: "wombat",
+				},
+				ClusterConfiguration: kubeadmapi.ClusterConfiguration{
+					Etcd: kubeadmapi.Etcd{
+						Local: &kubeadmapi.LocalEtcd{
+							DataDir: "/etc/foo",
+						},
+					},
+				},
+			},
+			expected: []string{
+				"etcd",
+				"--name=wombat",
+				"--listen-client-urls=https://127.0.0.1:2379",
+				"--advertise-client-urls=https://127.0.0.1:2379",
+				"--listen-peer-urls=https://127.0.0.1:2380",
+				"--initial-advertise-peer-urls=https://127.0.0.1:2380",
 				"--data-dir=/etc/foo",
+				"--cert-file=" + kubeadmconstants.EtcdServerCertName,
+				"--key-file=" + kubeadmconstants.EtcdServerKeyName,
+				"--trusted-ca-file=" + kubeadmconstants.EtcdCACertName,
+				"--client-cert-auth=true",
+				"--peer-cert-file=" + kubeadmconstants.EtcdPeerCertName,
+				"--peer-key-file=" + kubeadmconstants.EtcdPeerKeyName,
+				"--peer-trusted-ca-file=" + kubeadmconstants.EtcdCACertName,
+				"--snapshot-count=10000",
+				"--peer-client-cert-auth=true",
+				"--initial-cluster=wombat=https://127.0.0.1:2380",
 			},
 		},
 	}

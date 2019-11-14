@@ -25,14 +25,15 @@ import (
 	"testing"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/api/core/v1"
-	"k8s.io/api/extensions/v1beta1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	versionedfake "k8s.io/client-go/kubernetes/fake"
+	"k8s.io/kubernetes/pkg/apis/apps"
 	"k8s.io/kubernetes/pkg/apis/autoscaling"
 	api "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/apis/extensions"
@@ -42,7 +43,7 @@ import (
 	"k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 	"k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/fake"
 	"k8s.io/kubernetes/pkg/printers"
-	utilpointer "k8s.io/kubernetes/pkg/util/pointer"
+	utilpointer "k8s.io/utils/pointer"
 )
 
 type describeClient struct {
@@ -53,10 +54,14 @@ type describeClient struct {
 }
 
 func TestDescribePod(t *testing.T) {
+	deletionTimestamp := metav1.Time{Time: time.Now().UTC().AddDate(10, 0, 0)}
+	gracePeriod := int64(1234)
 	fake := fake.NewSimpleClientset(&api.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "bar",
-			Namespace: "foo",
+			Name:                       "bar",
+			Namespace:                  "foo",
+			DeletionTimestamp:          &deletionTimestamp,
+			DeletionGracePeriodSeconds: &gracePeriod,
 		},
 	})
 	c := &describeClient{T: t, Namespace: "foo", Interface: fake}
@@ -66,6 +71,9 @@ func TestDescribePod(t *testing.T) {
 		t.Errorf("unexpected error: %v", err)
 	}
 	if !strings.Contains(out, "bar") || !strings.Contains(out, "Status:") {
+		t.Errorf("unexpected out: %s", out)
+	}
+	if !strings.Contains(out, "Terminating (lasts 10y)") || !strings.Contains(out, "1234s") {
 		t.Errorf("unexpected out: %s", out)
 	}
 }
@@ -80,7 +88,8 @@ func TestDescribePodNode(t *testing.T) {
 			NodeName: "all-in-one",
 		},
 		Status: api.PodStatus{
-			HostIP: "127.0.0.1",
+			HostIP:            "127.0.0.1",
+			NominatedNodeName: "nodeA",
 		},
 	})
 	c := &describeClient{T: t, Namespace: "foo", Interface: fake}
@@ -90,6 +99,9 @@ func TestDescribePodNode(t *testing.T) {
 		t.Errorf("unexpected error: %v", err)
 	}
 	if !strings.Contains(out, "all-in-one/127.0.0.1") {
+		t.Errorf("unexpected out: %s", out)
+	}
+	if !strings.Contains(out, "nodeA") {
 		t.Errorf("unexpected out: %s", out)
 	}
 }
@@ -278,10 +290,12 @@ func getResourceList(cpu, memory string) api.ResourceList {
 
 func TestDescribeService(t *testing.T) {
 	testCases := []struct {
+		name    string
 		service *api.Service
 		expect  []string
 	}{
 		{
+			name: "test1",
 			service: &api.Service{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "bar",
@@ -319,6 +333,7 @@ func TestDescribeService(t *testing.T) {
 			},
 		},
 		{
+			name: "test2",
 			service: &api.Service{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "bar",
@@ -357,18 +372,20 @@ func TestDescribeService(t *testing.T) {
 		},
 	}
 	for _, testCase := range testCases {
-		fake := fake.NewSimpleClientset(testCase.service)
-		c := &describeClient{T: t, Namespace: "foo", Interface: fake}
-		d := ServiceDescriber{c}
-		out, err := d.Describe("foo", "bar", printers.DescriberSettings{ShowEvents: true})
-		if err != nil {
-			t.Errorf("unexpected error: %v", err)
-		}
-		for _, expected := range testCase.expect {
-			if !strings.Contains(out, expected) {
-				t.Errorf("expected to find %q in output: %q", expected, out)
+		t.Run(testCase.name, func(t *testing.T) {
+			fake := fake.NewSimpleClientset(testCase.service)
+			c := &describeClient{T: t, Namespace: "foo", Interface: fake}
+			d := ServiceDescriber{c}
+			out, err := d.Describe("foo", "bar", printers.DescriberSettings{ShowEvents: true})
+			if err != nil {
+				t.Errorf("unexpected error: %v", err)
 			}
-		}
+			for _, expected := range testCase.expect {
+				if !strings.Contains(out, expected) {
+					t.Errorf("expected to find %q in output: %q", expected, out)
+				}
+			}
+		})
 	}
 }
 
@@ -589,6 +606,16 @@ func TestDescribeContainers(t *testing.T) {
 			},
 			expectedElements: []string{"test", "State", "Waiting", "Ready", "True", "Restart Count", "7", "Image", "image", "sleep", "1000"},
 		},
+		// Command with newline
+		{
+			container: api.Container{Name: "test", Image: "image", Command: []string{"sleep", "1000\n2000"}},
+			status: api.ContainerStatus{
+				Name:         "test",
+				Ready:        true,
+				RestartCount: 7,
+			},
+			expectedElements: []string{"1000\n      2000"},
+		},
 		// Args
 		{
 			container: api.Container{Name: "test", Image: "image", Args: []string{"time", "1000"}},
@@ -598,6 +625,16 @@ func TestDescribeContainers(t *testing.T) {
 				RestartCount: 7,
 			},
 			expectedElements: []string{"test", "State", "Waiting", "Ready", "True", "Restart Count", "7", "Image", "image", "time", "1000"},
+		},
+		// Args with newline
+		{
+			container: api.Container{Name: "test", Image: "image", Args: []string{"time", "1000\n2000"}},
+			status: api.ContainerStatus{
+				Name:         "test",
+				Ready:        true,
+				RestartCount: 7,
+			},
+			expectedElements: []string{"1000\n      2000"},
 		},
 		// Using limits.
 		{
@@ -681,23 +718,25 @@ func TestDescribeContainers(t *testing.T) {
 	}
 
 	for i, testCase := range testCases {
-		out := new(bytes.Buffer)
-		pod := api.Pod{
-			Spec: api.PodSpec{
-				Containers: []api.Container{testCase.container},
-			},
-			Status: api.PodStatus{
-				ContainerStatuses: []api.ContainerStatus{testCase.status},
-			},
-		}
-		writer := NewPrefixWriter(out)
-		describeContainers("Containers", pod.Spec.Containers, pod.Status.ContainerStatuses, EnvValueRetriever(&pod), writer, "")
-		output := out.String()
-		for _, expected := range testCase.expectedElements {
-			if !strings.Contains(output, expected) {
-				t.Errorf("Test case %d: expected to find %q in output: %q", i, expected, output)
+		t.Run(fmt.Sprintf("%d", i), func(t *testing.T) {
+			out := new(bytes.Buffer)
+			pod := api.Pod{
+				Spec: api.PodSpec{
+					Containers: []api.Container{testCase.container},
+				},
+				Status: api.PodStatus{
+					ContainerStatuses: []api.ContainerStatus{testCase.status},
+				},
 			}
-		}
+			writer := NewPrefixWriter(out)
+			describeContainers("Containers", pod.Spec.Containers, pod.Status.ContainerStatuses, EnvValueRetriever(&pod), writer, "")
+			output := out.String()
+			for _, expected := range testCase.expectedElements {
+				if !strings.Contains(output, expected) {
+					t.Errorf("Test case %d: expected to find %q in output: %q", i, expected, output)
+				}
+			}
+		})
 	}
 }
 
@@ -783,10 +822,12 @@ func TestDefaultDescribers(t *testing.T) {
 
 func TestGetPodsTotalRequests(t *testing.T) {
 	testCases := []struct {
-		pods                         *api.PodList
-		expectedReqs, expectedLimits map[api.ResourceName]resource.Quantity
+		name         string
+		pods         *api.PodList
+		expectedReqs map[api.ResourceName]resource.Quantity
 	}{
 		{
+			name: "test1",
 			pods: &api.PodList{
 				Items: []api.Pod{
 					{
@@ -848,26 +889,28 @@ func TestGetPodsTotalRequests(t *testing.T) {
 	}
 
 	for _, testCase := range testCases {
-		reqs, _, err := getPodsTotalRequestsAndLimits(testCase.pods)
-		if err != nil {
-			t.Errorf("Unexpected error %v", err)
-		}
-		if !apiequality.Semantic.DeepEqual(reqs, testCase.expectedReqs) {
-			t.Errorf("Expected %v, got %v", testCase.expectedReqs, reqs)
-		}
+		t.Run(testCase.name, func(t *testing.T) {
+			reqs, _ := getPodsTotalRequestsAndLimits(testCase.pods)
+			if !apiequality.Semantic.DeepEqual(reqs, testCase.expectedReqs) {
+				t.Errorf("Expected %v, got %v", testCase.expectedReqs, reqs)
+			}
+		})
 	}
 }
 
 func TestPersistentVolumeDescriber(t *testing.T) {
 	block := api.PersistentVolumeBlock
 	file := api.PersistentVolumeFilesystem
+	deletionTimestamp := metav1.Time{Time: time.Now().UTC().AddDate(10, 0, 0)}
 	testCases := []struct {
+		name               string
 		plugin             string
 		pv                 *api.PersistentVolume
 		expectedElements   []string
 		unexpectedElements []string
 	}{
 		{
+			name:   "test0",
 			plugin: "hostpath",
 			pv: &api.PersistentVolume{
 				ObjectMeta: metav1.ObjectMeta{Name: "bar"},
@@ -880,6 +923,7 @@ func TestPersistentVolumeDescriber(t *testing.T) {
 			unexpectedElements: []string{"VolumeMode", "Filesystem"},
 		},
 		{
+			name:   "test1",
 			plugin: "gce",
 			pv: &api.PersistentVolume{
 				ObjectMeta: metav1.ObjectMeta{Name: "bar"},
@@ -893,6 +937,7 @@ func TestPersistentVolumeDescriber(t *testing.T) {
 			expectedElements: []string{"VolumeMode", "Filesystem"},
 		},
 		{
+			name:   "test2",
 			plugin: "ebs",
 			pv: &api.PersistentVolume{
 				ObjectMeta: metav1.ObjectMeta{Name: "bar"},
@@ -905,6 +950,7 @@ func TestPersistentVolumeDescriber(t *testing.T) {
 			unexpectedElements: []string{"VolumeMode", "Filesystem"},
 		},
 		{
+			name:   "test3",
 			plugin: "nfs",
 			pv: &api.PersistentVolume{
 				ObjectMeta: metav1.ObjectMeta{Name: "bar"},
@@ -917,6 +963,7 @@ func TestPersistentVolumeDescriber(t *testing.T) {
 			unexpectedElements: []string{"VolumeMode", "Filesystem"},
 		},
 		{
+			name:   "test4",
 			plugin: "iscsi",
 			pv: &api.PersistentVolume{
 				ObjectMeta: metav1.ObjectMeta{Name: "bar"},
@@ -930,6 +977,7 @@ func TestPersistentVolumeDescriber(t *testing.T) {
 			expectedElements: []string{"VolumeMode", "Block"},
 		},
 		{
+			name:   "test5",
 			plugin: "gluster",
 			pv: &api.PersistentVolume{
 				ObjectMeta: metav1.ObjectMeta{Name: "bar"},
@@ -942,6 +990,7 @@ func TestPersistentVolumeDescriber(t *testing.T) {
 			unexpectedElements: []string{"VolumeMode", "Filesystem"},
 		},
 		{
+			name:   "test6",
 			plugin: "rbd",
 			pv: &api.PersistentVolume{
 				ObjectMeta: metav1.ObjectMeta{Name: "bar"},
@@ -954,6 +1003,7 @@ func TestPersistentVolumeDescriber(t *testing.T) {
 			unexpectedElements: []string{"VolumeMode", "Filesystem"},
 		},
 		{
+			name:   "test7",
 			plugin: "quobyte",
 			pv: &api.PersistentVolume{
 				ObjectMeta: metav1.ObjectMeta{Name: "bar"},
@@ -966,18 +1016,20 @@ func TestPersistentVolumeDescriber(t *testing.T) {
 			unexpectedElements: []string{"VolumeMode", "Filesystem"},
 		},
 		{
+			name:   "test8",
 			plugin: "cinder",
 			pv: &api.PersistentVolume{
 				ObjectMeta: metav1.ObjectMeta{Name: "bar"},
 				Spec: api.PersistentVolumeSpec{
 					PersistentVolumeSource: api.PersistentVolumeSource{
-						Cinder: &api.CinderVolumeSource{},
+						Cinder: &api.CinderPersistentVolumeSource{},
 					},
 				},
 			},
 			unexpectedElements: []string{"VolumeMode", "Filesystem"},
 		},
 		{
+			name:   "test9",
 			plugin: "fc",
 			pv: &api.PersistentVolume{
 				ObjectMeta: metav1.ObjectMeta{Name: "bar"},
@@ -990,28 +1042,225 @@ func TestPersistentVolumeDescriber(t *testing.T) {
 			},
 			expectedElements: []string{"VolumeMode", "Block"},
 		},
+		{
+			name:   "test10",
+			plugin: "local",
+			pv: &api.PersistentVolume{
+				ObjectMeta: metav1.ObjectMeta{Name: "bar"},
+				Spec: api.PersistentVolumeSpec{
+					PersistentVolumeSource: api.PersistentVolumeSource{
+						Local: &api.LocalVolumeSource{},
+					},
+				},
+			},
+			expectedElements:   []string{"Node Affinity:   <none>"},
+			unexpectedElements: []string{"Required Terms", "Term "},
+		},
+		{
+			name:   "test11",
+			plugin: "local",
+			pv: &api.PersistentVolume{
+				ObjectMeta: metav1.ObjectMeta{Name: "bar"},
+				Spec: api.PersistentVolumeSpec{
+					PersistentVolumeSource: api.PersistentVolumeSource{
+						Local: &api.LocalVolumeSource{},
+					},
+					NodeAffinity: &api.VolumeNodeAffinity{},
+				},
+			},
+			expectedElements:   []string{"Node Affinity:   <none>"},
+			unexpectedElements: []string{"Required Terms", "Term "},
+		},
+		{
+			name:   "test12",
+			plugin: "local",
+			pv: &api.PersistentVolume{
+				ObjectMeta: metav1.ObjectMeta{Name: "bar"},
+				Spec: api.PersistentVolumeSpec{
+					PersistentVolumeSource: api.PersistentVolumeSource{
+						Local: &api.LocalVolumeSource{},
+					},
+					NodeAffinity: &api.VolumeNodeAffinity{
+						Required: &api.NodeSelector{},
+					},
+				},
+			},
+			expectedElements:   []string{"Node Affinity", "Required Terms:  <none>"},
+			unexpectedElements: []string{"Term "},
+		},
+		{
+			name:   "test13",
+			plugin: "local",
+			pv: &api.PersistentVolume{
+				ObjectMeta: metav1.ObjectMeta{Name: "bar"},
+				Spec: api.PersistentVolumeSpec{
+					PersistentVolumeSource: api.PersistentVolumeSource{
+						Local: &api.LocalVolumeSource{},
+					},
+					NodeAffinity: &api.VolumeNodeAffinity{
+						Required: &api.NodeSelector{
+							NodeSelectorTerms: []api.NodeSelectorTerm{
+								{
+									MatchExpressions: []api.NodeSelectorRequirement{},
+								},
+								{
+									MatchExpressions: []api.NodeSelectorRequirement{},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedElements: []string{"Node Affinity", "Required Terms", "Term 0", "Term 1"},
+		},
+		{
+			name:   "test14",
+			plugin: "local",
+			pv: &api.PersistentVolume{
+				ObjectMeta: metav1.ObjectMeta{Name: "bar"},
+				Spec: api.PersistentVolumeSpec{
+					PersistentVolumeSource: api.PersistentVolumeSource{
+						Local: &api.LocalVolumeSource{},
+					},
+					NodeAffinity: &api.VolumeNodeAffinity{
+						Required: &api.NodeSelector{
+							NodeSelectorTerms: []api.NodeSelectorTerm{
+								{
+									MatchExpressions: []api.NodeSelectorRequirement{
+										{
+											Key:      "foo",
+											Operator: "In",
+											Values:   []string{"val1", "val2"},
+										},
+										{
+											Key:      "foo",
+											Operator: "Exists",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedElements: []string{"Node Affinity", "Required Terms", "Term 0",
+				"foo in [val1, val2]",
+				"foo exists"},
+		},
+		{
+			name:   "test15",
+			plugin: "local",
+			pv: &api.PersistentVolume{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "bar",
+					DeletionTimestamp: &deletionTimestamp,
+				},
+				Spec: api.PersistentVolumeSpec{
+					PersistentVolumeSource: api.PersistentVolumeSource{
+						Local: &api.LocalVolumeSource{},
+					},
+				},
+			},
+			expectedElements: []string{"Terminating (lasts 10y)"},
+		},
+		{
+			name:   "test16",
+			plugin: "local",
+			pv: &api.PersistentVolume{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:                       "bar",
+					GenerateName:               "test-GenerateName",
+					UID:                        "test-UID",
+					CreationTimestamp:          metav1.Time{Time: time.Now()},
+					DeletionTimestamp:          &metav1.Time{Time: time.Now()},
+					DeletionGracePeriodSeconds: new(int64),
+					Labels:      map[string]string{"label1": "label1", "label2": "label2", "label3": "label3"},
+					Annotations: map[string]string{"annotation1": "annotation1", "annotation2": "annotation2", "annotation3": "annotation3"},
+				},
+				Spec: api.PersistentVolumeSpec{
+					PersistentVolumeSource: api.PersistentVolumeSource{
+						Local: &api.LocalVolumeSource{},
+					},
+					NodeAffinity: &api.VolumeNodeAffinity{
+						Required: &api.NodeSelector{
+							NodeSelectorTerms: []api.NodeSelectorTerm{
+								{
+									MatchExpressions: []api.NodeSelectorRequirement{
+										{
+											Key:      "foo",
+											Operator: "In",
+											Values:   []string{"val1", "val2"},
+										},
+										{
+											Key:      "foo",
+											Operator: "Exists",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedElements: []string{"Node Affinity", "Required Terms", "Term 0",
+				"foo in [val1, val2]",
+				"foo exists"},
+		},
+		{
+			name:   "test17",
+			plugin: "local",
+			pv: &api.PersistentVolume{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:                       "bar",
+					GenerateName:               "test-GenerateName",
+					UID:                        "test-UID",
+					CreationTimestamp:          metav1.Time{Time: time.Now()},
+					DeletionTimestamp:          &metav1.Time{Time: time.Now()},
+					DeletionGracePeriodSeconds: new(int64),
+					Labels:      map[string]string{"label1": "label1", "label2": "label2", "label3": "label3"},
+					Annotations: map[string]string{"annotation1": "annotation1", "annotation2": "annotation2", "annotation3": "annotation3"},
+				},
+				Spec: api.PersistentVolumeSpec{
+					PersistentVolumeSource: api.PersistentVolumeSource{
+						CSI: &api.CSIPersistentVolumeSource{
+							Driver:       "drive",
+							VolumeHandle: "handler",
+							ReadOnly:     true,
+							VolumeAttributes: map[string]string{
+								"Attribute1": "Value1",
+								"Attribute2": "Value2",
+								"Attribute3": "Value3",
+							},
+						},
+					},
+				},
+			},
+			expectedElements: []string{"Driver", "VolumeHandle", "ReadOnly", "VolumeAttributes"},
+		},
 	}
 
 	for _, test := range testCases {
-		fake := fake.NewSimpleClientset(test.pv)
-		c := PersistentVolumeDescriber{fake}
-		str, err := c.Describe("foo", "bar", printers.DescriberSettings{ShowEvents: true})
-		if err != nil {
-			t.Errorf("Unexpected error for test %s: %v", test.plugin, err)
-		}
-		if str == "" {
-			t.Errorf("Unexpected empty string for test %s.  Expected PV Describer output", test.plugin)
-		}
-		for _, expected := range test.expectedElements {
-			if !strings.Contains(str, expected) {
-				t.Errorf("expected to find %q in output: %q", expected, str)
+		t.Run(test.name, func(t *testing.T) {
+			fake := fake.NewSimpleClientset(test.pv)
+			c := PersistentVolumeDescriber{fake}
+			str, err := c.Describe("foo", "bar", printers.DescriberSettings{ShowEvents: true})
+			if err != nil {
+				t.Errorf("Unexpected error for test %s: %v", test.plugin, err)
 			}
-		}
-		for _, unexpected := range test.unexpectedElements {
-			if strings.Contains(str, unexpected) {
-				t.Errorf("unexpected to find %q in output: %q", unexpected, str)
+			if str == "" {
+				t.Errorf("Unexpected empty string for test %s.  Expected PV Describer output", test.plugin)
 			}
-		}
+			for _, expected := range test.expectedElements {
+				if !strings.Contains(str, expected) {
+					t.Errorf("expected to find %q in output: %q", expected, str)
+				}
+			}
+			for _, unexpected := range test.unexpectedElements {
+				if strings.Contains(str, unexpected) {
+					t.Errorf("unexpected to find %q in output: %q", unexpected, str)
+				}
+			}
+		})
 	}
 }
 
@@ -1019,6 +1268,8 @@ func TestPersistentVolumeClaimDescriber(t *testing.T) {
 	block := api.PersistentVolumeBlock
 	file := api.PersistentVolumeFilesystem
 	goldClassName := "gold"
+	now := time.Now()
+	deletionTimestamp := metav1.Time{Time: time.Now().UTC().AddDate(10, 0, 0)}
 	testCases := []struct {
 		name               string
 		pvc                *api.PersistentVolumeClaim
@@ -1069,39 +1320,154 @@ func TestPersistentVolumeClaimDescriber(t *testing.T) {
 			},
 			expectedElements: []string{"VolumeMode", "Block"},
 		},
+		// Tests for Status.Condition.
+		{
+			name: "condition-type",
+			pvc: &api.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "foo", Name: "bar"},
+				Spec: api.PersistentVolumeClaimSpec{
+					VolumeName:       "volume4",
+					StorageClassName: &goldClassName,
+				},
+				Status: api.PersistentVolumeClaimStatus{
+					Conditions: []api.PersistentVolumeClaimCondition{
+						{Type: api.PersistentVolumeClaimResizing},
+					},
+				},
+			},
+			expectedElements: []string{"Conditions", "Type", "Resizing"},
+		},
+		{
+			name: "condition-status",
+			pvc: &api.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "foo", Name: "bar"},
+				Spec: api.PersistentVolumeClaimSpec{
+					VolumeName:       "volume5",
+					StorageClassName: &goldClassName,
+				},
+				Status: api.PersistentVolumeClaimStatus{
+					Conditions: []api.PersistentVolumeClaimCondition{
+						{Status: api.ConditionTrue},
+					},
+				},
+			},
+			expectedElements: []string{"Conditions", "Status", "True"},
+		},
+		{
+			name: "condition-last-probe-time",
+			pvc: &api.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "foo", Name: "bar"},
+				Spec: api.PersistentVolumeClaimSpec{
+					VolumeName:       "volume6",
+					StorageClassName: &goldClassName,
+				},
+				Status: api.PersistentVolumeClaimStatus{
+					Conditions: []api.PersistentVolumeClaimCondition{
+						{LastProbeTime: metav1.Time{Time: now}},
+					},
+				},
+			},
+			expectedElements: []string{"Conditions", "LastProbeTime", now.Format(time.RFC1123Z)},
+		},
+		{
+			name: "condition-last-transition-time",
+			pvc: &api.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "foo", Name: "bar"},
+				Spec: api.PersistentVolumeClaimSpec{
+					VolumeName:       "volume7",
+					StorageClassName: &goldClassName,
+				},
+				Status: api.PersistentVolumeClaimStatus{
+					Conditions: []api.PersistentVolumeClaimCondition{
+						{LastTransitionTime: metav1.Time{Time: now}},
+					},
+				},
+			},
+			expectedElements: []string{"Conditions", "LastTransitionTime", now.Format(time.RFC1123Z)},
+		},
+		{
+			name: "condition-reason",
+			pvc: &api.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "foo", Name: "bar"},
+				Spec: api.PersistentVolumeClaimSpec{
+					VolumeName:       "volume8",
+					StorageClassName: &goldClassName,
+				},
+				Status: api.PersistentVolumeClaimStatus{
+					Conditions: []api.PersistentVolumeClaimCondition{
+						{Reason: "OfflineResize"},
+					},
+				},
+			},
+			expectedElements: []string{"Conditions", "Reason", "OfflineResize"},
+		},
+		{
+			name: "condition-message",
+			pvc: &api.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "foo", Name: "bar"},
+				Spec: api.PersistentVolumeClaimSpec{
+					VolumeName:       "volume9",
+					StorageClassName: &goldClassName,
+				},
+				Status: api.PersistentVolumeClaimStatus{
+					Conditions: []api.PersistentVolumeClaimCondition{
+						{Message: "User request resize"},
+					},
+				},
+			},
+			expectedElements: []string{"Conditions", "Message", "User request resize"},
+		},
+		{
+			name: "deletion-timestamp",
+			pvc: &api.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace:         "foo",
+					Name:              "bar",
+					DeletionTimestamp: &deletionTimestamp,
+				},
+				Spec: api.PersistentVolumeClaimSpec{
+					VolumeName:       "volume10",
+					StorageClassName: &goldClassName,
+				},
+				Status: api.PersistentVolumeClaimStatus{},
+			},
+			expectedElements: []string{"Terminating (lasts 10y)"},
+		},
 	}
 
 	for _, test := range testCases {
-		fake := fake.NewSimpleClientset(test.pvc)
-		c := PersistentVolumeClaimDescriber{fake}
-		str, err := c.Describe("foo", "bar", printers.DescriberSettings{ShowEvents: true})
-		if err != nil {
-			t.Errorf("Unexpected error for test %s: %v", test.name, err)
-		}
-		if str == "" {
-			t.Errorf("Unexpected empty string for test %s.  Expected PVC Describer output", test.name)
-		}
-		for _, expected := range test.expectedElements {
-			if !strings.Contains(str, expected) {
-				t.Errorf("expected to find %q in output: %q", expected, str)
+		t.Run(test.name, func(t *testing.T) {
+			fake := fake.NewSimpleClientset(test.pvc)
+			c := PersistentVolumeClaimDescriber{fake}
+			str, err := c.Describe("foo", "bar", printers.DescriberSettings{ShowEvents: true})
+			if err != nil {
+				t.Errorf("Unexpected error for test %s: %v", test.name, err)
 			}
-		}
-		for _, unexpected := range test.unexpectedElements {
-			if strings.Contains(str, unexpected) {
-				t.Errorf("unexpected to find %q in output: %q", unexpected, str)
+			if str == "" {
+				t.Errorf("Unexpected empty string for test %s.  Expected PVC Describer output", test.name)
 			}
-		}
+			for _, expected := range test.expectedElements {
+				if !strings.Contains(str, expected) {
+					t.Errorf("expected to find %q in output: %q", expected, str)
+				}
+			}
+			for _, unexpected := range test.unexpectedElements {
+				if strings.Contains(str, unexpected) {
+					t.Errorf("unexpected to find %q in output: %q", unexpected, str)
+				}
+			}
+		})
 	}
 }
 
 func TestDescribeDeployment(t *testing.T) {
 	fake := fake.NewSimpleClientset()
-	versionedFake := versionedfake.NewSimpleClientset(&v1beta1.Deployment{
+	versionedFake := versionedfake.NewSimpleClientset(&appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "bar",
 			Namespace: "foo",
 		},
-		Spec: v1beta1.DeploymentSpec{
+		Spec: appsv1.DeploymentSpec{
 			Replicas: utilpointer.Int32Ptr(1),
 			Selector: &metav1.LabelSelector{},
 			Template: v1.PodTemplateSpec{
@@ -1113,7 +1479,7 @@ func TestDescribeDeployment(t *testing.T) {
 			},
 		},
 	})
-	d := DeploymentDescriber{fake, versionedFake.ExtensionsV1beta1()}
+	d := DeploymentDescriber{fake, versionedFake}
 	out, err := d.Describe("foo", "bar", printers.DescriberSettings{ShowEvents: true})
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
@@ -1141,6 +1507,32 @@ func TestDescribeStorageClass(t *testing.T) {
 		},
 		ReclaimPolicy:     &reclaimPolicy,
 		VolumeBindingMode: &bindingMode,
+		AllowedTopologies: []api.TopologySelectorTerm{
+			{
+				MatchLabelExpressions: []api.TopologySelectorLabelRequirement{
+					{
+						Key:    "failure-domain.beta.kubernetes.io/zone",
+						Values: []string{"zone1"},
+					},
+					{
+						Key:    "kubernetes.io/hostname",
+						Values: []string{"node1"},
+					},
+				},
+			},
+			{
+				MatchLabelExpressions: []api.TopologySelectorLabelRequirement{
+					{
+						Key:    "failure-domain.beta.kubernetes.io/zone",
+						Values: []string{"zone2"},
+					},
+					{
+						Key:    "kubernetes.io/hostname",
+						Values: []string{"node2"},
+					},
+				},
+			},
+		},
 	})
 	s := StorageClassDescriber{f}
 	out, err := s.Describe("", "foo", printers.DescriberSettings{ShowEvents: true})
@@ -1154,7 +1546,13 @@ func TestDescribeStorageClass(t *testing.T) {
 		!strings.Contains(out, "value1") ||
 		!strings.Contains(out, "value2") ||
 		!strings.Contains(out, "Retain") ||
-		!strings.Contains(out, "bindingmode") {
+		!strings.Contains(out, "bindingmode") ||
+		!strings.Contains(out, "failure-domain.beta.kubernetes.io/zone") ||
+		!strings.Contains(out, "zone1") ||
+		!strings.Contains(out, "kubernetes.io/hostname") ||
+		!strings.Contains(out, "node1") ||
+		!strings.Contains(out, "zone2") ||
+		!strings.Contains(out, "node2") {
 		t.Errorf("unexpected out: %s", out)
 	}
 }
@@ -1191,6 +1589,10 @@ func TestDescribeHorizontalPodAutoscaler(t *testing.T) {
 	minReplicasVal := int32(2)
 	targetUtilizationVal := int32(80)
 	currentUtilizationVal := int32(50)
+	metricLabelSelector, err := metav1.ParseToLabelSelector("label=value")
+	if err != nil {
+		t.Errorf("unable to parse label selector: %v", err)
+	}
 	tests := []struct {
 		name string
 		hpa  autoscaling.HorizontalPodAutoscaler
@@ -1212,6 +1614,162 @@ func TestDescribeHorizontalPodAutoscaler(t *testing.T) {
 			},
 		},
 		{
+			"external source type, target average value (no current)",
+			autoscaling.HorizontalPodAutoscaler{
+				Spec: autoscaling.HorizontalPodAutoscalerSpec{
+					ScaleTargetRef: autoscaling.CrossVersionObjectReference{
+						Name: "some-rc",
+						Kind: "ReplicationController",
+					},
+					MinReplicas: &minReplicasVal,
+					MaxReplicas: 10,
+					Metrics: []autoscaling.MetricSpec{
+						{
+							Type: autoscaling.ExternalMetricSourceType,
+							External: &autoscaling.ExternalMetricSource{
+								Metric: autoscaling.MetricIdentifier{
+									Name:     "some-external-metric",
+									Selector: metricLabelSelector,
+								},
+								Target: autoscaling.MetricTarget{
+									Type:         autoscaling.AverageValueMetricType,
+									AverageValue: resource.NewMilliQuantity(100, resource.DecimalSI),
+								},
+							},
+						},
+					},
+				},
+				Status: autoscaling.HorizontalPodAutoscalerStatus{
+					CurrentReplicas: 4,
+					DesiredReplicas: 5,
+				},
+			},
+		},
+		{
+			"external source type, target average value (with current)",
+			autoscaling.HorizontalPodAutoscaler{
+				Spec: autoscaling.HorizontalPodAutoscalerSpec{
+					ScaleTargetRef: autoscaling.CrossVersionObjectReference{
+						Name: "some-rc",
+						Kind: "ReplicationController",
+					},
+					MinReplicas: &minReplicasVal,
+					MaxReplicas: 10,
+					Metrics: []autoscaling.MetricSpec{
+						{
+							Type: autoscaling.ExternalMetricSourceType,
+							External: &autoscaling.ExternalMetricSource{
+								Metric: autoscaling.MetricIdentifier{
+									Name:     "some-external-metric",
+									Selector: metricLabelSelector,
+								},
+								Target: autoscaling.MetricTarget{
+									Type:         autoscaling.AverageValueMetricType,
+									AverageValue: resource.NewMilliQuantity(100, resource.DecimalSI),
+								},
+							},
+						},
+					},
+				},
+				Status: autoscaling.HorizontalPodAutoscalerStatus{
+					CurrentReplicas: 4,
+					DesiredReplicas: 5,
+					CurrentMetrics: []autoscaling.MetricStatus{
+						{
+							Type: autoscaling.ExternalMetricSourceType,
+							External: &autoscaling.ExternalMetricStatus{
+								Metric: autoscaling.MetricIdentifier{
+									Name:     "some-external-metric",
+									Selector: metricLabelSelector,
+								},
+								Current: autoscaling.MetricValueStatus{
+									AverageValue: resource.NewMilliQuantity(50, resource.DecimalSI),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			"external source type, target value (no current)",
+			autoscaling.HorizontalPodAutoscaler{
+				Spec: autoscaling.HorizontalPodAutoscalerSpec{
+					ScaleTargetRef: autoscaling.CrossVersionObjectReference{
+						Name: "some-rc",
+						Kind: "ReplicationController",
+					},
+					MinReplicas: &minReplicasVal,
+					MaxReplicas: 10,
+					Metrics: []autoscaling.MetricSpec{
+						{
+							Type: autoscaling.ExternalMetricSourceType,
+							External: &autoscaling.ExternalMetricSource{
+								Metric: autoscaling.MetricIdentifier{
+									Name:     "some-external-metric",
+									Selector: metricLabelSelector,
+								},
+								Target: autoscaling.MetricTarget{
+									Type:  autoscaling.ValueMetricType,
+									Value: resource.NewMilliQuantity(100, resource.DecimalSI),
+								},
+							},
+						},
+					},
+				},
+				Status: autoscaling.HorizontalPodAutoscalerStatus{
+					CurrentReplicas: 4,
+					DesiredReplicas: 5,
+				},
+			},
+		},
+		{
+			"external source type, target value (with current)",
+			autoscaling.HorizontalPodAutoscaler{
+				Spec: autoscaling.HorizontalPodAutoscalerSpec{
+					ScaleTargetRef: autoscaling.CrossVersionObjectReference{
+						Name: "some-rc",
+						Kind: "ReplicationController",
+					},
+					MinReplicas: &minReplicasVal,
+					MaxReplicas: 10,
+					Metrics: []autoscaling.MetricSpec{
+						{
+							Type: autoscaling.ExternalMetricSourceType,
+							External: &autoscaling.ExternalMetricSource{
+								Metric: autoscaling.MetricIdentifier{
+									Name:     "some-external-metric",
+									Selector: metricLabelSelector,
+								},
+								Target: autoscaling.MetricTarget{
+									Type:  autoscaling.ValueMetricType,
+									Value: resource.NewMilliQuantity(100, resource.DecimalSI),
+								},
+							},
+						},
+					},
+				},
+				Status: autoscaling.HorizontalPodAutoscalerStatus{
+					CurrentReplicas: 4,
+					DesiredReplicas: 5,
+					CurrentMetrics: []autoscaling.MetricStatus{
+						{
+							Type: autoscaling.ExternalMetricSourceType,
+							External: &autoscaling.ExternalMetricStatus{
+								Metric: autoscaling.MetricIdentifier{
+									Name:     "some-external-metric",
+									Selector: metricLabelSelector,
+								},
+								Current: autoscaling.MetricValueStatus{
+									Value: resource.NewMilliQuantity(50, resource.DecimalSI),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
 			"pods source type (no current)",
 			autoscaling.HorizontalPodAutoscaler{
 				Spec: autoscaling.HorizontalPodAutoscalerSpec{
@@ -1225,8 +1783,13 @@ func TestDescribeHorizontalPodAutoscaler(t *testing.T) {
 						{
 							Type: autoscaling.PodsMetricSourceType,
 							Pods: &autoscaling.PodsMetricSource{
-								MetricName:         "some-pods-metric",
-								TargetAverageValue: *resource.NewMilliQuantity(100, resource.DecimalSI),
+								Metric: autoscaling.MetricIdentifier{
+									Name: "some-pods-metric",
+								},
+								Target: autoscaling.MetricTarget{
+									Type:         autoscaling.AverageValueMetricType,
+									AverageValue: resource.NewMilliQuantity(100, resource.DecimalSI),
+								},
 							},
 						},
 					},
@@ -1251,8 +1814,13 @@ func TestDescribeHorizontalPodAutoscaler(t *testing.T) {
 						{
 							Type: autoscaling.PodsMetricSourceType,
 							Pods: &autoscaling.PodsMetricSource{
-								MetricName:         "some-pods-metric",
-								TargetAverageValue: *resource.NewMilliQuantity(100, resource.DecimalSI),
+								Metric: autoscaling.MetricIdentifier{
+									Name: "some-pods-metric",
+								},
+								Target: autoscaling.MetricTarget{
+									Type:         autoscaling.AverageValueMetricType,
+									AverageValue: resource.NewMilliQuantity(100, resource.DecimalSI),
+								},
 							},
 						},
 					},
@@ -1264,8 +1832,12 @@ func TestDescribeHorizontalPodAutoscaler(t *testing.T) {
 						{
 							Type: autoscaling.PodsMetricSourceType,
 							Pods: &autoscaling.PodsMetricStatus{
-								MetricName:          "some-pods-metric",
-								CurrentAverageValue: *resource.NewMilliQuantity(50, resource.DecimalSI),
+								Metric: autoscaling.MetricIdentifier{
+									Name: "some-pods-metric",
+								},
+								Current: autoscaling.MetricValueStatus{
+									AverageValue: resource.NewMilliQuantity(50, resource.DecimalSI),
+								},
 							},
 						},
 					},
@@ -1286,12 +1858,17 @@ func TestDescribeHorizontalPodAutoscaler(t *testing.T) {
 						{
 							Type: autoscaling.ObjectMetricSourceType,
 							Object: &autoscaling.ObjectMetricSource{
-								Target: autoscaling.CrossVersionObjectReference{
+								DescribedObject: autoscaling.CrossVersionObjectReference{
 									Name: "some-service",
 									Kind: "Service",
 								},
-								MetricName:  "some-service-metric",
-								TargetValue: *resource.NewMilliQuantity(100, resource.DecimalSI),
+								Metric: autoscaling.MetricIdentifier{
+									Name: "some-service-metric",
+								},
+								Target: autoscaling.MetricTarget{
+									Type:  autoscaling.ValueMetricType,
+									Value: resource.NewMilliQuantity(100, resource.DecimalSI),
+								},
 							},
 						},
 					},
@@ -1316,12 +1893,17 @@ func TestDescribeHorizontalPodAutoscaler(t *testing.T) {
 						{
 							Type: autoscaling.ObjectMetricSourceType,
 							Object: &autoscaling.ObjectMetricSource{
-								Target: autoscaling.CrossVersionObjectReference{
+								DescribedObject: autoscaling.CrossVersionObjectReference{
 									Name: "some-service",
 									Kind: "Service",
 								},
-								MetricName:  "some-service-metric",
-								TargetValue: *resource.NewMilliQuantity(100, resource.DecimalSI),
+								Metric: autoscaling.MetricIdentifier{
+									Name: "some-service-metric",
+								},
+								Target: autoscaling.MetricTarget{
+									Type:  autoscaling.ValueMetricType,
+									Value: resource.NewMilliQuantity(100, resource.DecimalSI),
+								},
 							},
 						},
 					},
@@ -1333,12 +1915,16 @@ func TestDescribeHorizontalPodAutoscaler(t *testing.T) {
 						{
 							Type: autoscaling.ObjectMetricSourceType,
 							Object: &autoscaling.ObjectMetricStatus{
-								Target: autoscaling.CrossVersionObjectReference{
+								DescribedObject: autoscaling.CrossVersionObjectReference{
 									Name: "some-service",
 									Kind: "Service",
 								},
-								MetricName:   "some-service-metric",
-								CurrentValue: *resource.NewMilliQuantity(50, resource.DecimalSI),
+								Metric: autoscaling.MetricIdentifier{
+									Name: "some-service-metric",
+								},
+								Current: autoscaling.MetricValueStatus{
+									Value: resource.NewMilliQuantity(50, resource.DecimalSI),
+								},
 							},
 						},
 					},
@@ -1359,8 +1945,11 @@ func TestDescribeHorizontalPodAutoscaler(t *testing.T) {
 						{
 							Type: autoscaling.ResourceMetricSourceType,
 							Resource: &autoscaling.ResourceMetricSource{
-								Name:               api.ResourceCPU,
-								TargetAverageValue: resource.NewMilliQuantity(100, resource.DecimalSI),
+								Name: api.ResourceCPU,
+								Target: autoscaling.MetricTarget{
+									Type:         autoscaling.AverageValueMetricType,
+									AverageValue: resource.NewMilliQuantity(100, resource.DecimalSI),
+								},
 							},
 						},
 					},
@@ -1385,8 +1974,11 @@ func TestDescribeHorizontalPodAutoscaler(t *testing.T) {
 						{
 							Type: autoscaling.ResourceMetricSourceType,
 							Resource: &autoscaling.ResourceMetricSource{
-								Name:               api.ResourceCPU,
-								TargetAverageValue: resource.NewMilliQuantity(100, resource.DecimalSI),
+								Name: api.ResourceCPU,
+								Target: autoscaling.MetricTarget{
+									Type:         autoscaling.AverageValueMetricType,
+									AverageValue: resource.NewMilliQuantity(100, resource.DecimalSI),
+								},
 							},
 						},
 					},
@@ -1398,8 +1990,10 @@ func TestDescribeHorizontalPodAutoscaler(t *testing.T) {
 						{
 							Type: autoscaling.ResourceMetricSourceType,
 							Resource: &autoscaling.ResourceMetricStatus{
-								Name:                api.ResourceCPU,
-								CurrentAverageValue: *resource.NewMilliQuantity(50, resource.DecimalSI),
+								Name: api.ResourceCPU,
+								Current: autoscaling.MetricValueStatus{
+									AverageValue: resource.NewMilliQuantity(50, resource.DecimalSI),
+								},
 							},
 						},
 					},
@@ -1421,7 +2015,10 @@ func TestDescribeHorizontalPodAutoscaler(t *testing.T) {
 							Type: autoscaling.ResourceMetricSourceType,
 							Resource: &autoscaling.ResourceMetricSource{
 								Name: api.ResourceCPU,
-								TargetAverageUtilization: &targetUtilizationVal,
+								Target: autoscaling.MetricTarget{
+									Type:               autoscaling.UtilizationMetricType,
+									AverageUtilization: &targetUtilizationVal,
+								},
 							},
 						},
 					},
@@ -1447,7 +2044,10 @@ func TestDescribeHorizontalPodAutoscaler(t *testing.T) {
 							Type: autoscaling.ResourceMetricSourceType,
 							Resource: &autoscaling.ResourceMetricSource{
 								Name: api.ResourceCPU,
-								TargetAverageUtilization: &targetUtilizationVal,
+								Target: autoscaling.MetricTarget{
+									Type:               autoscaling.UtilizationMetricType,
+									AverageUtilization: &targetUtilizationVal,
+								},
 							},
 						},
 					},
@@ -1460,8 +2060,10 @@ func TestDescribeHorizontalPodAutoscaler(t *testing.T) {
 							Type: autoscaling.ResourceMetricSourceType,
 							Resource: &autoscaling.ResourceMetricStatus{
 								Name: api.ResourceCPU,
-								CurrentAverageUtilization: &currentUtilizationVal,
-								CurrentAverageValue:       *resource.NewMilliQuantity(40, resource.DecimalSI),
+								Current: autoscaling.MetricValueStatus{
+									AverageUtilization: &currentUtilizationVal,
+									AverageValue:       resource.NewMilliQuantity(40, resource.DecimalSI),
+								},
 							},
 						},
 					},
@@ -1482,22 +2084,35 @@ func TestDescribeHorizontalPodAutoscaler(t *testing.T) {
 						{
 							Type: autoscaling.PodsMetricSourceType,
 							Pods: &autoscaling.PodsMetricSource{
-								MetricName:         "some-pods-metric",
-								TargetAverageValue: *resource.NewMilliQuantity(100, resource.DecimalSI),
+								Metric: autoscaling.MetricIdentifier{
+									Name: "some-pods-metric",
+								},
+								Target: autoscaling.MetricTarget{
+									Type:         autoscaling.AverageValueMetricType,
+									AverageValue: resource.NewMilliQuantity(100, resource.DecimalSI),
+								},
 							},
 						},
 						{
 							Type: autoscaling.ResourceMetricSourceType,
 							Resource: &autoscaling.ResourceMetricSource{
 								Name: api.ResourceCPU,
-								TargetAverageUtilization: &targetUtilizationVal,
+								Target: autoscaling.MetricTarget{
+									Type:               autoscaling.UtilizationMetricType,
+									AverageUtilization: &targetUtilizationVal,
+								},
 							},
 						},
 						{
 							Type: autoscaling.PodsMetricSourceType,
 							Pods: &autoscaling.PodsMetricSource{
-								MetricName:         "other-pods-metric",
-								TargetAverageValue: *resource.NewMilliQuantity(400, resource.DecimalSI),
+								Metric: autoscaling.MetricIdentifier{
+									Name: "other-pods-metric",
+								},
+								Target: autoscaling.MetricTarget{
+									Type:         autoscaling.AverageValueMetricType,
+									AverageValue: resource.NewMilliQuantity(400, resource.DecimalSI),
+								},
 							},
 						},
 					},
@@ -1509,16 +2124,22 @@ func TestDescribeHorizontalPodAutoscaler(t *testing.T) {
 						{
 							Type: autoscaling.PodsMetricSourceType,
 							Pods: &autoscaling.PodsMetricStatus{
-								MetricName:          "some-pods-metric",
-								CurrentAverageValue: *resource.NewMilliQuantity(50, resource.DecimalSI),
+								Metric: autoscaling.MetricIdentifier{
+									Name: "some-pods-metric",
+								},
+								Current: autoscaling.MetricValueStatus{
+									AverageValue: resource.NewMilliQuantity(50, resource.DecimalSI),
+								},
 							},
 						},
 						{
 							Type: autoscaling.ResourceMetricSourceType,
 							Resource: &autoscaling.ResourceMetricStatus{
 								Name: api.ResourceCPU,
-								CurrentAverageUtilization: &currentUtilizationVal,
-								CurrentAverageValue:       *resource.NewMilliQuantity(40, resource.DecimalSI),
+								Current: autoscaling.MetricValueStatus{
+									AverageUtilization: &currentUtilizationVal,
+									AverageValue:       resource.NewMilliQuantity(40, resource.DecimalSI),
+								},
 							},
 						},
 					},
@@ -1528,20 +2149,22 @@ func TestDescribeHorizontalPodAutoscaler(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		test.hpa.ObjectMeta = metav1.ObjectMeta{
-			Name:      "bar",
-			Namespace: "foo",
-		}
-		fake := fake.NewSimpleClientset(&test.hpa)
-		desc := HorizontalPodAutoscalerDescriber{fake}
-		str, err := desc.Describe("foo", "bar", printers.DescriberSettings{ShowEvents: true})
-		if err != nil {
-			t.Errorf("Unexpected error for test %s: %v", test.name, err)
-		}
-		if str == "" {
-			t.Errorf("Unexpected empty string for test %s.  Expected HPA Describer output", test.name)
-		}
-		t.Logf("Description for %q:\n%s", test.name, str)
+		t.Run(test.name, func(t *testing.T) {
+			test.hpa.ObjectMeta = metav1.ObjectMeta{
+				Name:      "bar",
+				Namespace: "foo",
+			}
+			fake := fake.NewSimpleClientset(&test.hpa)
+			desc := HorizontalPodAutoscalerDescriber{fake}
+			str, err := desc.Describe("foo", "bar", printers.DescriberSettings{ShowEvents: true})
+			if err != nil {
+				t.Errorf("Unexpected error for test %s: %v", test.name, err)
+			}
+			if str == "" {
+				t.Errorf("Unexpected empty string for test %s.  Expected HPA Describer output", test.name)
+			}
+			t.Logf("Description for %q:\n%s", test.name, str)
+		})
 	}
 }
 
@@ -1574,16 +2197,16 @@ func TestDescribeEvents(t *testing.T) {
 		},
 		"DeploymentDescriber": &DeploymentDescriber{
 			fake.NewSimpleClientset(events),
-			versionedfake.NewSimpleClientset(&v1beta1.Deployment{
+			versionedfake.NewSimpleClientset(&appsv1.Deployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "bar",
 					Namespace: "foo",
 				},
-				Spec: v1beta1.DeploymentSpec{
+				Spec: appsv1.DeploymentSpec{
 					Replicas: utilpointer.Int32Ptr(1),
 					Selector: &metav1.LabelSelector{},
 				},
-			}).ExtensionsV1beta1(),
+			}),
 		},
 		"EndpointsDescriber": &EndpointsDescriber{
 			fake.NewSimpleClientset(&api.Endpoints{
@@ -1671,47 +2294,58 @@ func TestDescribeEvents(t *testing.T) {
 	}
 
 	for name, d := range m {
-		out, err := d.Describe("foo", "bar", printers.DescriberSettings{ShowEvents: true})
-		if err != nil {
-			t.Errorf("unexpected error for %q: %v", name, err)
-		}
-		if !strings.Contains(out, "bar") {
-			t.Errorf("unexpected out for %q: %s", name, out)
-		}
-		if !strings.Contains(out, "Events:") {
-			t.Errorf("events not found for %q when ShowEvents=true: %s", name, out)
-		}
+		t.Run(name, func(t *testing.T) {
+			out, err := d.Describe("foo", "bar", printers.DescriberSettings{ShowEvents: true})
+			if err != nil {
+				t.Errorf("unexpected error for %q: %v", name, err)
+			}
+			if !strings.Contains(out, "bar") {
+				t.Errorf("unexpected out for %q: %s", name, out)
+			}
+			if !strings.Contains(out, "Events:") {
+				t.Errorf("events not found for %q when ShowEvents=true: %s", name, out)
+			}
 
-		out, err = d.Describe("foo", "bar", printers.DescriberSettings{ShowEvents: false})
-		if err != nil {
-			t.Errorf("unexpected error for %q: %s", name, err)
-		}
-		if !strings.Contains(out, "bar") {
-			t.Errorf("unexpected out for %q: %s", name, out)
-		}
-		if strings.Contains(out, "Events:") {
-			t.Errorf("events found for %q when ShowEvents=false: %s", name, out)
-		}
+			out, err = d.Describe("foo", "bar", printers.DescriberSettings{ShowEvents: false})
+			if err != nil {
+				t.Errorf("unexpected error for %q: %s", name, err)
+			}
+			if !strings.Contains(out, "bar") {
+				t.Errorf("unexpected out for %q: %s", name, out)
+			}
+			if strings.Contains(out, "Events:") {
+				t.Errorf("events found for %q when ShowEvents=false: %s", name, out)
+			}
+		})
 	}
 }
 
 func TestPrintLabelsMultiline(t *testing.T) {
-	var maxLenAnnotationStr string = "MaxLenAnnotation=Multicast addressing can be used in the link layer (Layer 2 in the OSI model), such as Ethernet multicast, and at the internet layer (Layer 3 for OSI) for Internet Protocol Version 4 "
+	key := "MaxLenAnnotation"
+	value := strings.Repeat("a", maxAnnotationLen-len(key)-2)
 	testCases := []struct {
 		annotations map[string]string
 		expectPrint string
 	}{
 		{
 			annotations: map[string]string{"col1": "asd", "COL2": "zxc"},
-			expectPrint: "Annotations:\tCOL2=zxc\n\tcol1=asd\n",
+			expectPrint: "Annotations:\tCOL2: zxc\n\tcol1: asd\n",
 		},
 		{
-			annotations: map[string]string{"MaxLenAnnotation": maxLenAnnotationStr[17:]},
-			expectPrint: "Annotations:\t" + maxLenAnnotationStr + "\n",
+			annotations: map[string]string{"MaxLenAnnotation": value},
+			expectPrint: fmt.Sprintf("Annotations:\t%s: %s\n", key, value),
 		},
 		{
-			annotations: map[string]string{"MaxLenAnnotation": maxLenAnnotationStr[17:] + "1"},
-			expectPrint: "Annotations:\t" + maxLenAnnotationStr + "...\n",
+			annotations: map[string]string{"MaxLenAnnotation": value + "1"},
+			expectPrint: fmt.Sprintf("Annotations:\t%s:\n\t  %s\n", key, value+"1"),
+		},
+		{
+			annotations: map[string]string{"MaxLenAnnotation": value + value},
+			expectPrint: fmt.Sprintf("Annotations:\t%s:\n\t  %s\n", key, strings.Repeat("a", maxAnnotationLen-2)+"..."),
+		},
+		{
+			annotations: map[string]string{"key": "value\nwith\nnewlines\n"},
+			expectPrint: "Annotations:\tkey:\n\t  value\n\t  with\n\t  newlines\n",
 		},
 		{
 			annotations: map[string]string{},
@@ -1719,13 +2353,15 @@ func TestPrintLabelsMultiline(t *testing.T) {
 		},
 	}
 	for i, testCase := range testCases {
-		out := new(bytes.Buffer)
-		writer := NewPrefixWriter(out)
-		printAnnotationsMultiline(writer, "Annotations", testCase.annotations)
-		output := out.String()
-		if output != testCase.expectPrint {
-			t.Errorf("Test case %d: expected to find %q in output: %q", i, testCase.expectPrint, output)
-		}
+		t.Run(fmt.Sprintf("%d", i), func(t *testing.T) {
+			out := new(bytes.Buffer)
+			writer := NewPrefixWriter(out)
+			printAnnotationsMultiline(writer, "Annotations", testCase.annotations)
+			output := out.String()
+			if output != testCase.expectPrint {
+				t.Errorf("Test case %d: expected to match:\n%q\nin output:\n%q", i, testCase.expectPrint, output)
+			}
+		})
 	}
 }
 
@@ -1821,6 +2457,8 @@ func TestDescribePodSecurityPolicy(t *testing.T) {
 		"Required Drop Capabilities:\\s*<none>",
 		"Allowed Capabilities:\\s*<none>",
 		"Allowed Volume Types:\\s*<none>",
+		"Allowed Unsafe Sysctls:\\s*kernel\\.\\*,net\\.ipv4.ip_local_port_range",
+		"Forbidden Sysctls:\\s*net\\.ipv4\\.ip_default_ttl",
 		"Allow Host Network:\\s*false",
 		"Allow Host Ports:\\s*<none>",
 		"Allow Host PID:\\s*false",
@@ -1836,22 +2474,24 @@ func TestDescribePodSecurityPolicy(t *testing.T) {
 		"Supplemental Groups Strategy: RunAsAny",
 	}
 
-	fake := fake.NewSimpleClientset(&extensions.PodSecurityPolicy{
+	fake := fake.NewSimpleClientset(&policy.PodSecurityPolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "mypsp",
 		},
-		Spec: extensions.PodSecurityPolicySpec{
-			SELinux: extensions.SELinuxStrategyOptions{
-				Rule: extensions.SELinuxStrategyRunAsAny,
+		Spec: policy.PodSecurityPolicySpec{
+			AllowedUnsafeSysctls: []string{"kernel.*", "net.ipv4.ip_local_port_range"},
+			ForbiddenSysctls:     []string{"net.ipv4.ip_default_ttl"},
+			SELinux: policy.SELinuxStrategyOptions{
+				Rule: policy.SELinuxStrategyRunAsAny,
 			},
-			RunAsUser: extensions.RunAsUserStrategyOptions{
-				Rule: extensions.RunAsUserStrategyRunAsAny,
+			RunAsUser: policy.RunAsUserStrategyOptions{
+				Rule: policy.RunAsUserStrategyRunAsAny,
 			},
-			FSGroup: extensions.FSGroupStrategyOptions{
-				Rule: extensions.FSGroupStrategyRunAsAny,
+			FSGroup: policy.FSGroupStrategyOptions{
+				Rule: policy.FSGroupStrategyRunAsAny,
 			},
-			SupplementalGroups: extensions.SupplementalGroupsStrategyOptions{
-				Rule: extensions.SupplementalGroupsStrategyRunAsAny,
+			SupplementalGroups: policy.SupplementalGroupsStrategyOptions{
+				Rule: policy.SupplementalGroupsStrategyRunAsAny,
 			},
 		},
 	})
@@ -1924,10 +2564,17 @@ Spec:
   Allowing ingress traffic:
     To Port: 80/TCP
     To Port: 82/TCP
-    From PodSelector: id=app2,id2=app3
-    From NamespaceSelector: id=app2,id2=app3
-    From NamespaceSelector: foo in (bar1,bar2),id=app2,id2=app3
-    From IPBlock:
+    From:
+      NamespaceSelector: id=ns1,id2=ns2
+      PodSelector: id=pod1,id2=pod2
+    From:
+      PodSelector: id=app2,id2=app3
+    From:
+      NamespaceSelector: id=app2,id2=app3
+    From:
+      NamespaceSelector: foo in (bar1,bar2),id=app2,id2=app3
+    From:
+      IPBlock:
         CIDR: 192.168.0.0/16
         Except: 192.168.3.0/24, 192.168.4.0/24
     ----------
@@ -1936,10 +2583,17 @@ Spec:
   Allowing egress traffic:
     To Port: 80/TCP
     To Port: 82/TCP
-    To PodSelector: id=app2,id2=app3
-    To NamespaceSelector: id=app2,id2=app3
-    To NamespaceSelector: foo in (bar1,bar2),id=app2,id2=app3
-    To IPBlock:
+    To:
+      NamespaceSelector: id=ns1,id2=ns2
+      PodSelector: id=pod1,id2=pod2
+    To:
+      PodSelector: id=app2,id2=app3
+    To:
+      NamespaceSelector: id=app2,id2=app3
+    To:
+      NamespaceSelector: foo in (bar1,bar2),id=app2,id2=app3
+    To:
+      IPBlock:
         CIDR: 192.168.0.0/16
         Except: 192.168.3.0/24, 192.168.4.0/24
     ----------
@@ -1976,6 +2630,20 @@ Spec:
 						{Port: &port82, Protocol: &protoTCP},
 					},
 					From: []networking.NetworkPolicyPeer{
+						{
+							PodSelector: &metav1.LabelSelector{
+								MatchLabels: map[string]string{
+									"id":  "pod1",
+									"id2": "pod2",
+								},
+							},
+							NamespaceSelector: &metav1.LabelSelector{
+								MatchLabels: map[string]string{
+									"id":  "ns1",
+									"id2": "ns2",
+								},
+							},
+						},
 						{
 							PodSelector: &metav1.LabelSelector{
 								MatchLabels: map[string]string{
@@ -2020,6 +2688,20 @@ Spec:
 						{Port: &port82, Protocol: &protoTCP},
 					},
 					To: []networking.NetworkPolicyPeer{
+						{
+							PodSelector: &metav1.LabelSelector{
+								MatchLabels: map[string]string{
+									"id":  "pod1",
+									"id2": "pod2",
+								},
+							},
+							NamespaceSelector: &metav1.LabelSelector{
+								MatchLabels: map[string]string{
+									"id":  "ns1",
+									"id2": "ns2",
+								},
+							},
+						},
 						{
 							PodSelector: &metav1.LabelSelector{
 								MatchLabels: map[string]string{
@@ -2105,6 +2787,72 @@ Events:              <none>` + "\n"
 		t.Errorf("expected : %q\n but got output:\n %q", expectedOut, out)
 	}
 
+}
+
+func TestDescribeNode(t *testing.T) {
+	fake := fake.NewSimpleClientset(&api.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "bar",
+			Namespace: "foo",
+		},
+		Spec: api.NodeSpec{
+			Unschedulable: true,
+		},
+	})
+	c := &describeClient{T: t, Namespace: "foo", Interface: fake}
+	d := NodeDescriber{c}
+	out, err := d.Describe("foo", "bar", printers.DescriberSettings{ShowEvents: true})
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	expectedOut := []string{"Unschedulable", "true"}
+	for _, expected := range expectedOut {
+		if !strings.Contains(out, expected) {
+			t.Errorf("expected to find %q in output: %q", expected, out)
+		}
+	}
+
+}
+
+func TestDescribeStatefulSet(t *testing.T) {
+	fake := fake.NewSimpleClientset(&apps.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "bar",
+			Namespace: "foo",
+		},
+		Spec: apps.StatefulSetSpec{
+			Replicas: 1,
+			Selector: &metav1.LabelSelector{},
+			Template: api.PodTemplateSpec{
+				Spec: api.PodSpec{
+					Containers: []api.Container{
+						{Image: "mytest-image:latest"},
+					},
+				},
+			},
+			UpdateStrategy: apps.StatefulSetUpdateStrategy{
+				Type: apps.RollingUpdateStatefulSetStrategyType,
+				RollingUpdate: &apps.RollingUpdateStatefulSetStrategy{
+					Partition: 2,
+				},
+			},
+		},
+	})
+	d := StatefulSetDescriber{fake}
+	out, err := d.Describe("foo", "bar", printers.DescriberSettings{ShowEvents: true})
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	expectedOutputs := []string{
+		"bar", "foo", "Containers:", "mytest-image:latest", "Update Strategy", "RollingUpdate", "Partition",
+	}
+	for _, o := range expectedOutputs {
+		if !strings.Contains(out, o) {
+			t.Errorf("unexpected out: %s", out)
+			break
+		}
+	}
 }
 
 // boolPtr returns a pointer to a bool

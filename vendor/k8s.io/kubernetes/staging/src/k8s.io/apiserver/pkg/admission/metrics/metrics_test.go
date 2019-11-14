@@ -28,7 +28,7 @@ import (
 var (
 	kind     = schema.GroupVersionKind{Group: "kgroup", Version: "kversion", Kind: "kind"}
 	resource = schema.GroupVersionResource{Group: "rgroup", Version: "rversion", Resource: "resource"}
-	attr     = admission.NewAttributesRecord(nil, nil, kind, "ns", "name", resource, "subresource", admission.Create, nil)
+	attr     = admission.NewAttributesRecord(nil, nil, kind, "ns", "name", resource, "subresource", admission.Create, false, nil)
 )
 
 func TestObserveAdmissionStep(t *testing.T) {
@@ -37,13 +37,9 @@ func TestObserveAdmissionStep(t *testing.T) {
 	handler.(admission.MutationInterface).Admit(attr)
 	handler.(admission.ValidationInterface).Validate(attr)
 	wantLabels := map[string]string{
-		"operation":   string(admission.Create),
-		"group":       resource.Group,
-		"version":     resource.Version,
-		"resource":    resource.Resource,
-		"subresource": "subresource",
-		"type":        "admit",
-		"rejected":    "false",
+		"operation": string(admission.Create),
+		"type":      "admit",
+		"rejected":  "false",
 	}
 	expectHistogramCountTotal(t, "apiserver_admission_step_admission_latencies_seconds", wantLabels, 1)
 	expectFindMetric(t, "apiserver_admission_step_admission_latencies_seconds_summary", wantLabels)
@@ -59,14 +55,10 @@ func TestObserveAdmissionController(t *testing.T) {
 	handler.(admission.MutationInterface).Admit(attr)
 	handler.(admission.ValidationInterface).Validate(attr)
 	wantLabels := map[string]string{
-		"name":        "a",
-		"operation":   string(admission.Create),
-		"group":       resource.Group,
-		"version":     resource.Version,
-		"resource":    resource.Resource,
-		"subresource": "subresource",
-		"type":        "validate",
-		"rejected":    "false",
+		"name":      "a",
+		"operation": string(admission.Create),
+		"type":      "admit",
+		"rejected":  "false",
 	}
 	expectHistogramCountTotal(t, "apiserver_admission_controller_admission_latencies_seconds", wantLabels, 1)
 
@@ -78,14 +70,10 @@ func TestObserveWebhook(t *testing.T) {
 	Metrics.reset()
 	Metrics.ObserveWebhook(2*time.Second, false, attr, stepAdmit, "x")
 	wantLabels := map[string]string{
-		"name":        "x",
-		"operation":   string(admission.Create),
-		"group":       resource.Group,
-		"version":     resource.Version,
-		"resource":    resource.Resource,
-		"subresource": "subresource",
-		"type":        "admit",
-		"rejected":    "false",
+		"name":      "x",
+		"operation": string(admission.Create),
+		"type":      "admit",
+		"rejected":  "false",
 	}
 	expectHistogramCountTotal(t, "apiserver_admission_webhook_admission_latencies_seconds", wantLabels, 1)
 }
@@ -133,7 +121,7 @@ func TestWithMetrics(t *testing.T) {
 			"validate-interfaces-dont-validate",
 			"some-ns",
 			admission.Create,
-			&validatingFakeHandler{admission.NewHandler(admission.Create, admission.Update), true},
+			&validatingFakeHandler{admission.NewHandler(admission.Create, admission.Update), false},
 			true, false,
 		},
 		{
@@ -148,7 +136,7 @@ func TestWithMetrics(t *testing.T) {
 			"some-ns",
 			admission.Create,
 			&mutatingFakeHandler{admission.NewHandler(admission.Create, admission.Update), false},
-			true, false,
+			false, true,
 		},
 	} {
 		Metrics.reset()
@@ -156,7 +144,7 @@ func TestWithMetrics(t *testing.T) {
 		h := WithMetrics(test.handler, Metrics.ObserveAdmissionController, test.name)
 
 		// test mutation
-		err := h.(admission.MutationInterface).Admit(admission.NewAttributesRecord(nil, nil, schema.GroupVersionKind{}, test.ns, "", schema.GroupVersionResource{}, "", test.operation, nil))
+		err := h.(admission.MutationInterface).Admit(admission.NewAttributesRecord(nil, nil, schema.GroupVersionKind{}, test.ns, "", schema.GroupVersionResource{}, "", test.operation, false, nil))
 		if test.admit && err != nil {
 			t.Errorf("expected admit to succeed, but failed: %v", err)
 			continue
@@ -165,7 +153,7 @@ func TestWithMetrics(t *testing.T) {
 			continue
 		}
 
-		filter := map[string]string{"rejected": "false"}
+		filter := map[string]string{"type": "admit", "rejected": "false"}
 		if !test.admit {
 			filter["rejected"] = "true"
 		}
@@ -175,13 +163,13 @@ func TestWithMetrics(t *testing.T) {
 			expectHistogramCountTotal(t, "apiserver_admission_controller_admission_latencies_seconds", filter, 0)
 		}
 
-		if err == nil {
+		if err != nil {
 			// skip validation step if mutation failed
 			continue
 		}
 
 		// test validation
-		err = h.(admission.ValidationInterface).Validate(admission.NewAttributesRecord(nil, nil, schema.GroupVersionKind{}, test.ns, "", schema.GroupVersionResource{}, "", test.operation, nil))
+		err = h.(admission.ValidationInterface).Validate(admission.NewAttributesRecord(nil, nil, schema.GroupVersionKind{}, test.ns, "", schema.GroupVersionResource{}, "", test.operation, false, nil))
 		if test.validate && err != nil {
 			t.Errorf("expected admit to succeed, but failed: %v", err)
 			continue
@@ -190,8 +178,8 @@ func TestWithMetrics(t *testing.T) {
 			continue
 		}
 
-		filter = map[string]string{"rejected": "false"}
-		if !test.admit {
+		filter = map[string]string{"type": "validate", "rejected": "false"}
+		if !test.validate {
 			filter["rejected"] = "true"
 		}
 		if _, validating := test.handler.(admission.ValidationInterface); validating {
@@ -239,7 +227,7 @@ type mutatingFakeHandler struct {
 	admit bool
 }
 
-func (h *mutatingFakeHandler) Amit(a admission.Attributes) (err error) {
+func (h *mutatingFakeHandler) Admit(a admission.Attributes) (err error) {
 	if h.admit {
 		return nil
 	}

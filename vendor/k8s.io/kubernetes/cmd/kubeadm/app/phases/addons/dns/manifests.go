@@ -17,9 +17,9 @@ limitations under the License.
 package dns
 
 const (
-	// v180AndAboveKubeDNSDeployment is the kube-dns Deployment manifest for the kube-dns manifest for v1.7+
-	v180AndAboveKubeDNSDeployment = `
-apiVersion: apps/v1beta2
+	// KubeDNSDeployment is the kube-dns Deployment manifest for the kube-dns manifest for v1.7+
+	KubeDNSDeployment = `
+apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: kube-dns
@@ -50,7 +50,7 @@ spec:
           optional: true
       containers:
       - name: kubedns
-        image: {{ .ImageRepository }}/k8s-dns-kube-dns-{{ .Arch }}:{{ .Version }}
+        image: {{ .ImageRepository }}/k8s-dns-kube-dns:{{ .Version }}
         imagePullPolicy: IfNotPresent
         resources:
           # TODO: Set memory limits when we've profiled the container for large
@@ -102,7 +102,7 @@ spec:
         - name: kube-dns-config
           mountPath: /kube-dns-config
       - name: dnsmasq
-        image: {{ .ImageRepository }}/k8s-dns-dnsmasq-nanny-{{ .Arch }}:{{ .Version }}
+        image: {{ .ImageRepository }}/k8s-dns-dnsmasq-nanny:{{ .Version }}
         imagePullPolicy: IfNotPresent
         livenessProbe:
           httpGet:
@@ -122,6 +122,7 @@ spec:
         - -k
         - --cache-size=1000
         - --no-negcache
+        - --dns-loop-detect
         - --log-facility=-
         - --server=/{{ .DNSDomain }}/{{ .DNSBindAddr }}#10053
         - --server=/in-addr.arpa/{{ .DNSBindAddr }}#10053
@@ -142,7 +143,7 @@ spec:
         - name: kube-dns-config
           mountPath: /etc/k8s/dns/dnsmasq-nanny
       - name: sidecar
-        image: {{ .ImageRepository }}/k8s-dns-sidecar-{{ .Arch }}:{{ .Version }}
+        image: {{ .ImageRepository }}/k8s-dns-sidecar:{{ .Version }}
         imagePullPolicy: IfNotPresent
         livenessProbe:
           httpGet:
@@ -156,8 +157,8 @@ spec:
         args:
         - --v=2
         - --logtostderr
-        - --probe=kubedns,{{ .DNSProbeAddr }}:10053,kubernetes.default.svc.{{ .DNSDomain }},5,{{ .DNSProbeType }}
-        - --probe=dnsmasq,{{ .DNSProbeAddr }}:53,kubernetes.default.svc.{{ .DNSDomain }},5,{{ .DNSProbeType }}
+        - --probe=kubedns,{{ .DNSProbeAddr }}:10053,kubernetes.default.svc.{{ .DNSDomain }},5,SRV
+        - --probe=dnsmasq,{{ .DNSProbeAddr }}:53,kubernetes.default.svc.{{ .DNSDomain }},5,SRV
         ports:
         - containerPort: 10054
           name: metrics
@@ -173,16 +174,6 @@ spec:
         operator: Exists
       - key: {{ .MasterTaintKey }}
         effect: NoSchedule
-      # TODO: Remove this affinity field as soon as we are using manifest lists
-      affinity:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-            - matchExpressions:
-              - key: beta.kubernetes.io/arch
-                operator: In
-                values:
-                - {{ .Arch }}
 `
 
 	// KubeDNSService is the kube-dns Service manifest
@@ -196,6 +187,9 @@ metadata:
     kubernetes.io/name: "KubeDNS"
   name: kube-dns
   namespace: kube-system
+  annotations:
+    prometheus.io/port: "9153"
+    prometheus.io/scrape: "true"
   # Without this resourceVersion value, an update of the Service between versions will yield:
   #   Service "kube-dns" is invalid: metadata.resourceVersion: Invalid value: "": must be specified for an update
   resourceVersion: "0"
@@ -216,7 +210,7 @@ spec:
 
 	// CoreDNSDeployment is the CoreDNS Deployment manifest
 	CoreDNSDeployment = `
-apiVersion: apps/v1beta2
+apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: coredns
@@ -224,7 +218,11 @@ metadata:
   labels:
     k8s-app: kube-dns
 spec:
-  replicas: 1
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
   selector:
     matchLabels:
       k8s-app: kube-dns
@@ -241,7 +239,7 @@ spec:
         effect: NoSchedule
       containers:
       - name: coredns
-        image: coredns/coredns:{{ .Version }}
+        image: {{ .ImageRepository }}/coredns:{{ .Version }}
         imagePullPolicy: IfNotPresent
         resources:
           limits:
@@ -253,6 +251,7 @@ spec:
         volumeMounts:
         - name: config-volume
           mountPath: /etc/coredns
+          readOnly: true
         ports:
         - containerPort: 53
           name: dns
@@ -272,6 +271,14 @@ spec:
           timeoutSeconds: 5
           successThreshold: 1
           failureThreshold: 5
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            add:
+            - NET_BIND_SERVICE
+            drop:
+            - all
+          readOnlyRootFilesystem: true
       dnsPolicy: Default
       volumes:
         - name: config-volume
@@ -293,15 +300,19 @@ data:
   Corefile: |
     .:53 {
         errors
-        log
         health
-        kubernetes {{ .DNSDomain }} {{ .ServiceCIDR }} {
+        kubernetes {{ .DNSDomain }} in-addr.arpa ip6.arpa {
            pods insecure
-        }
-        prometheus
-        proxy . /etc/resolv.conf
+           upstream
+           fallthrough in-addr.arpa ip6.arpa
+        }{{ .Federation }}
+        prometheus :9153
+        proxy . {{ .UpstreamNameserver }}
         cache 30
-    }
+        loop
+        reload
+        loadbalance
+    }{{ .StubDomain }}
 `
 	// CoreDNSClusterRole is the CoreDNS ClusterRole manifest
 	CoreDNSClusterRole = `

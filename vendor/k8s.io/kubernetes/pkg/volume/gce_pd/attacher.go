@@ -29,10 +29,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/kubernetes/pkg/cloudprovider/providers/gce"
-	"k8s.io/kubernetes/pkg/util/mount"
 	"k8s.io/kubernetes/pkg/volume"
 	volumeutil "k8s.io/kubernetes/pkg/volume/util"
-	"k8s.io/kubernetes/pkg/volume/util/volumehelper"
 )
 
 type gcePersistentDiskAttacher struct {
@@ -42,7 +40,11 @@ type gcePersistentDiskAttacher struct {
 
 var _ volume.Attacher = &gcePersistentDiskAttacher{}
 
+var _ volume.DeviceMounter = &gcePersistentDiskAttacher{}
+
 var _ volume.AttachableVolumePlugin = &gcePersistentDiskPlugin{}
+
+var _ volume.DeviceMountableVolumePlugin = &gcePersistentDiskPlugin{}
 
 func (plugin *gcePersistentDiskPlugin) NewAttacher() (volume.Attacher, error) {
 	gceCloud, err := getCloudProvider(plugin.host.GetCloudProvider())
@@ -56,9 +58,13 @@ func (plugin *gcePersistentDiskPlugin) NewAttacher() (volume.Attacher, error) {
 	}, nil
 }
 
+func (plugin *gcePersistentDiskPlugin) NewDeviceMounter() (volume.DeviceMounter, error) {
+	return plugin.NewAttacher()
+}
+
 func (plugin *gcePersistentDiskPlugin) GetDeviceMountRefs(deviceMountPath string) ([]string, error) {
 	mounter := plugin.host.GetMounter(plugin.GetPluginName())
-	return mount.GetMountRefs(mounter, deviceMountPath)
+	return mounter.GetMountRefs(deviceMountPath)
 }
 
 // Attach checks with the GCE cloud provider if the specified volume is already
@@ -103,7 +109,7 @@ func (attacher *gcePersistentDiskAttacher) VolumesAreAttached(specs []*volume.Sp
 	pdNameList := []string{}
 	for _, spec := range specs {
 		volumeSource, _, err := getVolumeSource(spec)
-		// If error is occured, skip this volume and move to the next one
+		// If error is occurred, skip this volume and move to the next one
 		if err != nil {
 			glog.Errorf("Error getting volume (%q) source : %v", spec.Name(), err)
 			continue
@@ -159,7 +165,7 @@ func (attacher *gcePersistentDiskAttacher) WaitForAttach(spec *volume.Spec, devi
 		select {
 		case <-ticker.C:
 			glog.V(5).Infof("Checking GCE PD %q is attached.", pdName)
-			path, err := verifyDevicePath(devicePaths, sdBeforeSet)
+			path, err := verifyDevicePath(devicePaths, sdBeforeSet, pdName)
 			if err != nil {
 				// Log error, if any, and continue checking periodically. See issue #11321
 				glog.Errorf("Error verifying GCE PD (%q) is attached: %v", pdName, err)
@@ -209,8 +215,8 @@ func (attacher *gcePersistentDiskAttacher) MountDevice(spec *volume.Spec, device
 		options = append(options, "ro")
 	}
 	if notMnt {
-		diskMounter := volumehelper.NewSafeFormatAndMountFromHost(gcePersistentDiskPluginName, attacher.host)
-		mountOptions := volume.MountOptionFromSpec(spec, options...)
+		diskMounter := volumeutil.NewSafeFormatAndMountFromHost(gcePersistentDiskPluginName, attacher.host)
+		mountOptions := volumeutil.MountOptionFromSpec(spec, options...)
 		err = diskMounter.FormatAndMount(devicePath, deviceMountPath, volumeSource.FSType, mountOptions)
 		if err != nil {
 			os.Remove(deviceMountPath)
@@ -228,6 +234,8 @@ type gcePersistentDiskDetacher struct {
 
 var _ volume.Detacher = &gcePersistentDiskDetacher{}
 
+var _ volume.DeviceUnmounter = &gcePersistentDiskDetacher{}
+
 func (plugin *gcePersistentDiskPlugin) NewDetacher() (volume.Detacher, error) {
 	gceCloud, err := getCloudProvider(plugin.host.GetCloudProvider())
 	if err != nil {
@@ -238,6 +246,10 @@ func (plugin *gcePersistentDiskPlugin) NewDetacher() (volume.Detacher, error) {
 		host:     plugin.host,
 		gceDisks: gceCloud,
 	}, nil
+}
+
+func (plugin *gcePersistentDiskPlugin) NewDeviceUnmounter() (volume.DeviceUnmounter, error) {
+	return plugin.NewDetacher()
 }
 
 // Detach checks with the GCE cloud provider if the specified volume is already

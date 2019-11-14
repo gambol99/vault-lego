@@ -17,6 +17,7 @@ limitations under the License.
 package gce
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -27,7 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	v1_service "k8s.io/kubernetes/pkg/api/v1/service"
-	"k8s.io/kubernetes/pkg/cloudprovider"
+	"k8s.io/kubernetes/pkg/cloudprovider/providers/gce/cloud"
 )
 
 const (
@@ -37,8 +38,11 @@ const (
 func (gce *GCECloud) ensureInternalLoadBalancer(clusterName, clusterID string, svc *v1.Service, existingFwdRule *compute.ForwardingRule, nodes []*v1.Node) (*v1.LoadBalancerStatus, error) {
 	nm := types.NamespacedName{Name: svc.Name, Namespace: svc.Namespace}
 	ports, protocol := getPortsAndProtocol(svc.Spec.Ports)
-	scheme := schemeInternal
-	loadBalancerName := cloudprovider.GetLoadBalancerName(svc)
+	if protocol != v1.ProtocolTCP && protocol != v1.ProtocolUDP {
+		return nil, fmt.Errorf("Invalid protocol %s, only TCP and UDP are supported", string(protocol))
+	}
+	scheme := cloud.SchemeInternal
+	loadBalancerName := gce.GetLoadBalancerName(context.TODO(), clusterName, svc)
 	sharedBackend := shareBackendService(svc)
 	backendServiceName := makeBackendServiceName(loadBalancerName, clusterID, sharedBackend, scheme, protocol, svc.Spec.SessionAffinity)
 	backendServiceLink := gce.getBackendServiceLink(backendServiceName)
@@ -93,7 +97,7 @@ func (gce *GCECloud) ensureInternalLoadBalancer(clusterName, clusterID string, s
 	var addrMgr *addressManager
 	// If the network is not a legacy network, use the address manager
 	if !gce.IsLegacyNetwork() {
-		addrMgr = newAddressManager(gce, nm.String(), gce.Region(), subnetworkURL, loadBalancerName, requestedIP, schemeInternal)
+		addrMgr = newAddressManager(gce, nm.String(), gce.Region(), subnetworkURL, loadBalancerName, requestedIP, cloud.SchemeInternal)
 		ipToUse, err = addrMgr.HoldAddress()
 		if err != nil {
 			return nil, err
@@ -208,17 +212,17 @@ func (gce *GCECloud) updateInternalLoadBalancer(clusterName, clusterID string, s
 
 	// Generate the backend service name
 	_, protocol := getPortsAndProtocol(svc.Spec.Ports)
-	scheme := schemeInternal
-	loadBalancerName := cloudprovider.GetLoadBalancerName(svc)
+	scheme := cloud.SchemeInternal
+	loadBalancerName := gce.GetLoadBalancerName(context.TODO(), clusterName, svc)
 	backendServiceName := makeBackendServiceName(loadBalancerName, clusterID, shareBackendService(svc), scheme, protocol, svc.Spec.SessionAffinity)
 	// Ensure the backend service has the proper backend/instance-group links
 	return gce.ensureInternalBackendServiceGroups(backendServiceName, igLinks)
 }
 
 func (gce *GCECloud) ensureInternalLoadBalancerDeleted(clusterName, clusterID string, svc *v1.Service) error {
-	loadBalancerName := cloudprovider.GetLoadBalancerName(svc)
+	loadBalancerName := gce.GetLoadBalancerName(context.TODO(), clusterName, svc)
 	_, protocol := getPortsAndProtocol(svc.Spec.Ports)
-	scheme := schemeInternal
+	scheme := cloud.SchemeInternal
 	sharedBackend := shareBackendService(svc)
 	sharedHealthCheck := !v1_service.RequestsOnlyLocalTraffic(svc)
 
@@ -401,16 +405,19 @@ func (gce *GCECloud) ensureInternalHealthCheck(name string, svcName types.Namesp
 		return hc, nil
 	}
 
-	if healthChecksEqual(expectedHC, hc) {
-		return hc, nil
+	if needToUpdateHealthChecks(hc, expectedHC) {
+		glog.V(2).Infof("ensureInternalHealthCheck: health check %v exists but parameters have drifted - updating...", name)
+		expectedHC = mergeHealthChecks(hc, expectedHC)
+		if err := gce.UpdateHealthCheck(expectedHC); err != nil {
+			glog.Warningf("Failed to reconcile http health check %v parameters", name)
+			return nil, err
+		}
+		glog.V(2).Infof("ensureInternalHealthCheck: corrected health check %v parameters successful", name)
+		hc, err = gce.GetHealthCheck(name)
+		if err != nil {
+			return nil, err
+		}
 	}
-
-	glog.V(2).Infof("ensureInternalHealthCheck: health check %v exists but parameters have drifted - updating...", name)
-	if err := gce.UpdateHealthCheck(expectedHC); err != nil {
-		glog.Warningf("Failed to reconcile http health check %v parameters", name)
-		return nil, err
-	}
-	glog.V(2).Infof("ensureInternalHealthCheck: corrected health check %v parameters successful", name)
 	return hc, nil
 }
 
@@ -444,7 +451,7 @@ func (gce *GCECloud) ensureInternalInstanceGroup(name, zone string, nodes []*v1.
 			return "", err
 		}
 
-		for _, ins := range instances.Items {
+		for _, ins := range instances {
 			parts := strings.Split(ins.Instance, "/")
 			gceNodes.Insert(parts[len(parts)-1])
 		}
@@ -506,7 +513,7 @@ func (gce *GCECloud) ensureInternalInstanceGroupsDeleted(name string) error {
 	return nil
 }
 
-func (gce *GCECloud) ensureInternalBackendService(name, description string, affinityType v1.ServiceAffinity, scheme lbScheme, protocol v1.Protocol, igLinks []string, hcLink string) error {
+func (gce *GCECloud) ensureInternalBackendService(name, description string, affinityType v1.ServiceAffinity, scheme cloud.LbScheme, protocol v1.Protocol, igLinks []string, hcLink string) error {
 	glog.V(2).Infof("ensureInternalBackendService(%v, %v, %v): checking existing backend service with %d groups", name, scheme, protocol, len(igLinks))
 	bs, err := gce.GetRegionBackendService(name, gce.region)
 	if err != nil && !isNotFound(err) {
@@ -533,11 +540,6 @@ func (gce *GCECloud) ensureInternalBackendService(name, description string, affi
 		}
 		glog.V(2).Infof("ensureInternalBackendService: created backend service %v successfully", name)
 		return nil
-	}
-	// Check existing backend service
-	existingIGLinks := sets.NewString()
-	for _, be := range bs.Backends {
-		existingIGLinks.Insert(be.Group)
 	}
 
 	if backendSvcEqual(expectedBS, bs) {
@@ -567,6 +569,9 @@ func (gce *GCECloud) ensureInternalBackendServiceGroups(name string, igLinks []s
 		return nil
 	}
 
+	// Set the backend service's backends to the updated list.
+	bs.Backends = backends
+
 	glog.V(2).Infof("ensureInternalBackendServiceGroups: updating backend service %v", name)
 	if err := gce.UpdateRegionBackendService(bs, gce.region); err != nil {
 		return err
@@ -579,8 +584,7 @@ func shareBackendService(svc *v1.Service) bool {
 	return GetLoadBalancerAnnotationBackendShare(svc) && !v1_service.RequestsOnlyLocalTraffic(svc)
 }
 
-func backendsFromGroupLinks(igLinks []string) []*compute.Backend {
-	var backends []*compute.Backend
+func backendsFromGroupLinks(igLinks []string) (backends []*compute.Backend) {
 	for _, igLink := range igLinks {
 		backends = append(backends, &compute.Backend{
 			Group: igLink,
@@ -619,15 +623,37 @@ func firewallRuleEqual(a, b *compute.Firewall) bool {
 		equalStringSets(a.TargetTags, b.TargetTags)
 }
 
-func healthChecksEqual(a, b *compute.HealthCheck) bool {
-	return a.HttpHealthCheck != nil && b.HttpHealthCheck != nil &&
-		a.HttpHealthCheck.Port == b.HttpHealthCheck.Port &&
-		a.HttpHealthCheck.RequestPath == b.HttpHealthCheck.RequestPath &&
-		a.Description == b.Description &&
-		a.CheckIntervalSec == b.CheckIntervalSec &&
-		a.TimeoutSec == b.TimeoutSec &&
-		a.UnhealthyThreshold == b.UnhealthyThreshold &&
-		a.HealthyThreshold == b.HealthyThreshold
+// mergeHealthChecks reconciles HealthCheck configures to be no smaller than
+// the default values.
+// E.g. old health check interval is 2s, new default is 8.
+// The HC interval will be reconciled to 8 seconds.
+// If the existing health check is larger than the default interval,
+// the configuration will be kept.
+func mergeHealthChecks(hc, newHC *compute.HealthCheck) *compute.HealthCheck {
+	if hc.CheckIntervalSec > newHC.CheckIntervalSec {
+		newHC.CheckIntervalSec = hc.CheckIntervalSec
+	}
+	if hc.TimeoutSec > newHC.TimeoutSec {
+		newHC.TimeoutSec = hc.TimeoutSec
+	}
+	if hc.UnhealthyThreshold > newHC.UnhealthyThreshold {
+		newHC.UnhealthyThreshold = hc.UnhealthyThreshold
+	}
+	if hc.HealthyThreshold > newHC.HealthyThreshold {
+		newHC.HealthyThreshold = hc.HealthyThreshold
+	}
+	return newHC
+}
+
+// needToUpdateHealthChecks checks whether the healthcheck needs to be updated.
+func needToUpdateHealthChecks(hc, newHC *compute.HealthCheck) bool {
+	if hc.HttpHealthCheck == nil || newHC.HttpHealthCheck == nil {
+		return true
+	}
+	changed := hc.HttpHealthCheck.Port != newHC.HttpHealthCheck.Port || hc.HttpHealthCheck.RequestPath != newHC.HttpHealthCheck.RequestPath || hc.Description != newHC.Description
+	changed = changed || hc.CheckIntervalSec < newHC.CheckIntervalSec || hc.TimeoutSec < newHC.TimeoutSec
+	changed = changed || hc.UnhealthyThreshold < newHC.UnhealthyThreshold || hc.HealthyThreshold < newHC.HealthyThreshold
+	return changed
 }
 
 // backendsListEqual asserts that backend lists are equal by instance group link only

@@ -70,7 +70,7 @@ var _ = SIGDescribe("Firewall rule", func() {
 
 		By("Creating a LoadBalancer type service with ExternalTrafficPolicy=Global")
 		svc := jig.CreateLoadBalancerService(ns, serviceName, framework.LoadBalancerCreateTimeoutDefault, func(svc *v1.Service) {
-			svc.Spec.Ports = []v1.ServicePort{{Protocol: "TCP", Port: framework.FirewallTestHttpPort}}
+			svc.Spec.Ports = []v1.ServicePort{{Protocol: v1.ProtocolTCP, Port: framework.FirewallTestHttpPort}}
 			svc.Spec.LoadBalancerSourceRanges = firewallTestSourceRanges
 		})
 		defer func() {
@@ -80,7 +80,7 @@ var _ = SIGDescribe("Firewall rule", func() {
 			})
 			Expect(cs.CoreV1().Services(svc.Namespace).Delete(svc.Name, nil)).NotTo(HaveOccurred())
 			By("Waiting for the local traffic health check firewall rule to be deleted")
-			localHCFwName := framework.MakeHealthCheckFirewallNameForLBService(clusterID, cloudprovider.GetLoadBalancerName(svc), false)
+			localHCFwName := framework.MakeHealthCheckFirewallNameForLBService(clusterID, cloudprovider.DefaultLoadBalancerName(svc), false)
 			_, err := framework.WaitForFirewallRule(gceCloud, localHCFwName, false, framework.LoadBalancerCleanupTimeout)
 			Expect(err).NotTo(HaveOccurred())
 		}()
@@ -170,7 +170,7 @@ var _ = SIGDescribe("Firewall rule", func() {
 		nodeAddrs := framework.NodeAddresses(nodes, v1.NodeExternalIP)
 		Expect(len(nodeAddrs)).NotTo(BeZero())
 		masterAddr := framework.GetMasterAddress(cs)
-		flag, _ := framework.TestNotReachableHTTPTimeout(masterAddr, ports.ControllerManagerPort, framework.FirewallTestTcpTimeout)
+		flag, _ := framework.TestNotReachableHTTPTimeout(masterAddr, ports.InsecureKubeControllerManagerPort, framework.FirewallTestTcpTimeout)
 		Expect(flag).To(BeTrue())
 		flag, _ = framework.TestNotReachableHTTPTimeout(masterAddr, ports.SchedulerPort, framework.FirewallTestTcpTimeout)
 		Expect(flag).To(BeTrue())

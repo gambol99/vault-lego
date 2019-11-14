@@ -19,6 +19,7 @@ package winuserspace
 import (
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,11 +27,11 @@ import (
 
 	"github.com/golang/glog"
 
+	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	utilnet "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/apimachinery/pkg/util/runtime"
-	api "k8s.io/kubernetes/pkg/apis/core"
-	"k8s.io/kubernetes/pkg/apis/core/helper"
+	"k8s.io/kubernetes/pkg/apis/core/v1/helper"
 	"k8s.io/kubernetes/pkg/proxy"
 	"k8s.io/kubernetes/pkg/util/netsh"
 )
@@ -46,12 +47,12 @@ type portal struct {
 type serviceInfo struct {
 	isAliveAtomic       int32 // Only access this with atomic ops
 	portal              portal
-	protocol            api.Protocol
+	protocol            v1.Protocol
 	socket              proxySocket
 	timeout             time.Duration
 	activeClients       *clientCache
 	dnsClients          *dnsClientCache
-	sessionAffinityType api.ServiceAffinity
+	sessionAffinityType v1.ServiceAffinity
 }
 
 func (info *serviceInfo) setAlive(b bool) {
@@ -99,11 +100,11 @@ var _ proxy.ProxyProvider = &Proxier{}
 type portMapKey struct {
 	ip       string
 	port     int
-	protocol api.Protocol
+	protocol v1.Protocol
 }
 
 func (k *portMapKey) String() string {
-	return fmt.Sprintf("%s:%d/%s", k.ip, k.port, k.protocol)
+	return fmt.Sprintf("%s/%s", net.JoinHostPort(k.ip, strconv.Itoa(k.port)), k.protocol)
 }
 
 // A value for the portMap
@@ -222,7 +223,7 @@ func (proxier *Proxier) setServiceInfo(service ServicePortPortalName, info *serv
 
 // addServicePortPortal starts listening for a new service, returning the serviceInfo.
 // The timeout only applies to UDP connections, for now.
-func (proxier *Proxier) addServicePortPortal(servicePortPortalName ServicePortPortalName, protocol api.Protocol, listenIP string, port int, timeout time.Duration) (*serviceInfo, error) {
+func (proxier *Proxier) addServicePortPortal(servicePortPortalName ServicePortPortalName, protocol v1.Protocol, listenIP string, port int, timeout time.Duration) (*serviceInfo, error) {
 	var serviceIP net.IP
 	if listenIP != allAvailableInterfaces {
 		if serviceIP = net.ParseIP(listenIP); serviceIP == nil {
@@ -233,7 +234,7 @@ func (proxier *Proxier) addServicePortPortal(servicePortPortalName ServicePortPo
 		if existed, err := proxier.netsh.EnsureIPAddress(args, serviceIP); err != nil {
 			return nil, err
 		} else if !existed {
-			glog.V(3).Infof("Added ip address to fowarder interface for service %q at %s:%d/%s", servicePortPortalName, listenIP, port, protocol)
+			glog.V(3).Infof("Added ip address to fowarder interface for service %q at %s/%s", servicePortPortalName, net.JoinHostPort(listenIP, strconv.Itoa(port)), protocol)
 		}
 	}
 
@@ -254,11 +255,11 @@ func (proxier *Proxier) addServicePortPortal(servicePortPortalName ServicePortPo
 		timeout:             timeout,
 		activeClients:       newClientCache(),
 		dnsClients:          newDNSClientCache(),
-		sessionAffinityType: api.ServiceAffinityNone, // default
+		sessionAffinityType: v1.ServiceAffinityNone, // default
 	}
 	proxier.setServiceInfo(servicePortPortalName, si)
 
-	glog.V(2).Infof("Proxying for service %q at %s:%d/%s", servicePortPortalName, listenIP, port, protocol)
+	glog.V(2).Infof("Proxying for service %q at %s/%s", servicePortPortalName, net.JoinHostPort(listenIP, strconv.Itoa(port)), protocol)
 	go func(service ServicePortPortalName, proxier *Proxier) {
 		defer runtime.HandleCrash()
 		atomic.AddInt32(&proxier.numProxyLoops, 1)
@@ -287,7 +288,7 @@ func (proxier *Proxier) closeServicePortPortal(servicePortPortalName ServicePort
 }
 
 // getListenIPPortMap returns a slice of all listen IPs for a service.
-func getListenIPPortMap(service *api.Service, listenPort int, nodePort int) map[string]int {
+func getListenIPPortMap(service *v1.Service, listenPort int, nodePort int) map[string]int {
 	listenIPPortMap := make(map[string]int)
 	listenIPPortMap[service.Spec.ClusterIP] = listenPort
 
@@ -306,7 +307,7 @@ func getListenIPPortMap(service *api.Service, listenPort int, nodePort int) map[
 	return listenIPPortMap
 }
 
-func (proxier *Proxier) mergeService(service *api.Service) map[ServicePortPortalName]bool {
+func (proxier *Proxier) mergeService(service *v1.Service) map[ServicePortPortalName]bool {
 	if service == nil {
 		return nil
 	}
@@ -341,7 +342,7 @@ func (proxier *Proxier) mergeService(service *api.Service) map[ServicePortPortal
 					glog.Errorf("Failed to close service port portal %q: %v", servicePortPortalName, err)
 				}
 			}
-			glog.V(1).Infof("Adding new service %q at %s:%d/%s", servicePortPortalName, listenIP, listenPort, protocol)
+			glog.V(1).Infof("Adding new service %q at %s/%s", servicePortPortalName, net.JoinHostPort(listenIP, strconv.Itoa(listenPort)), protocol)
 			info, err := proxier.addServicePortPortal(servicePortPortalName, protocol, listenIP, listenPort, proxier.udpIdleTimeout)
 			if err != nil {
 				glog.Errorf("Failed to start proxy for %q: %v", servicePortPortalName, err)
@@ -360,7 +361,7 @@ func (proxier *Proxier) mergeService(service *api.Service) map[ServicePortPortal
 				Port: servicePort.Name,
 			}
 			timeoutSeconds := 0
-			if service.Spec.SessionAffinity == api.ServiceAffinityClientIP {
+			if service.Spec.SessionAffinity == v1.ServiceAffinityClientIP {
 				timeoutSeconds = int(*service.Spec.SessionAffinityConfig.ClientIP.TimeoutSeconds)
 			}
 			proxier.loadBalancer.NewService(servicePortName, service.Spec.SessionAffinity, timeoutSeconds)
@@ -370,7 +371,7 @@ func (proxier *Proxier) mergeService(service *api.Service) map[ServicePortPortal
 	return existingPortPortals
 }
 
-func (proxier *Proxier) unmergeService(service *api.Service, existingPortPortals map[ServicePortPortalName]bool) {
+func (proxier *Proxier) unmergeService(service *v1.Service, existingPortPortals map[ServicePortPortalName]bool) {
 	if service == nil {
 		return
 	}
@@ -427,23 +428,23 @@ func (proxier *Proxier) unmergeService(service *api.Service, existingPortPortals
 	}
 }
 
-func (proxier *Proxier) OnServiceAdd(service *api.Service) {
+func (proxier *Proxier) OnServiceAdd(service *v1.Service) {
 	_ = proxier.mergeService(service)
 }
 
-func (proxier *Proxier) OnServiceUpdate(oldService, service *api.Service) {
+func (proxier *Proxier) OnServiceUpdate(oldService, service *v1.Service) {
 	existingPortPortals := proxier.mergeService(service)
 	proxier.unmergeService(oldService, existingPortPortals)
 }
 
-func (proxier *Proxier) OnServiceDelete(service *api.Service) {
+func (proxier *Proxier) OnServiceDelete(service *v1.Service) {
 	proxier.unmergeService(service, map[ServicePortPortalName]bool{})
 }
 
 func (proxier *Proxier) OnServiceSynced() {
 }
 
-func sameConfig(info *serviceInfo, service *api.Service, protocol api.Protocol, listenPort int) bool {
+func sameConfig(info *serviceInfo, service *v1.Service, protocol v1.Protocol, listenPort int) bool {
 	return info.protocol == protocol && info.portal.port == listenPort && info.sessionAffinityType == service.Spec.SessionAffinity
 }
 

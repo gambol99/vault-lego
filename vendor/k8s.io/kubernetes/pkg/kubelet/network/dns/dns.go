@@ -30,7 +30,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/kubernetes/pkg/apis/core/validation"
 	"k8s.io/kubernetes/pkg/features"
-	runtimeapi "k8s.io/kubernetes/pkg/kubelet/apis/cri/v1alpha1/runtime"
+	runtimeapi "k8s.io/kubernetes/pkg/kubelet/apis/cri/runtime/v1alpha2"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	"k8s.io/kubernetes/pkg/kubelet/util/format"
 
@@ -156,7 +156,7 @@ func (c *Configurer) CheckLimitsForResolvConf() {
 	f, err := os.Open(c.ResolverConfig)
 	if err != nil {
 		c.recorder.Event(c.nodeRef, v1.EventTypeWarning, "CheckLimitsForResolvConf", err.Error())
-		glog.Error("CheckLimitsForResolvConf: " + err.Error())
+		glog.V(4).Infof("CheckLimitsForResolvConf: " + err.Error())
 		return
 	}
 	defer f.Close()
@@ -164,7 +164,7 @@ func (c *Configurer) CheckLimitsForResolvConf() {
 	_, hostSearch, _, err := parseResolvConf(f)
 	if err != nil {
 		c.recorder.Event(c.nodeRef, v1.EventTypeWarning, "CheckLimitsForResolvConf", err.Error())
-		glog.Error("CheckLimitsForResolvConf: " + err.Error())
+		glog.V(4).Infof("CheckLimitsForResolvConf: " + err.Error())
 		return
 	}
 
@@ -177,14 +177,14 @@ func (c *Configurer) CheckLimitsForResolvConf() {
 	if len(hostSearch) > domainCountLimit {
 		log := fmt.Sprintf("Resolv.conf file '%s' contains search line consisting of more than %d domains!", c.ResolverConfig, domainCountLimit)
 		c.recorder.Event(c.nodeRef, v1.EventTypeWarning, "CheckLimitsForResolvConf", log)
-		glog.Error("CheckLimitsForResolvConf: " + log)
+		glog.V(4).Infof("CheckLimitsForResolvConf: " + log)
 		return
 	}
 
 	if len(strings.Join(hostSearch, " ")) > validation.MaxDNSSearchListChars {
 		log := fmt.Sprintf("Resolv.conf file '%s' contains search line which length is more than allowed %d chars!", c.ResolverConfig, validation.MaxDNSSearchListChars)
 		c.recorder.Event(c.nodeRef, v1.EventTypeWarning, "CheckLimitsForResolvConf", log)
-		glog.Error("CheckLimitsForResolvConf: " + log)
+		glog.V(4).Infof("CheckLimitsForResolvConf: " + log)
 		return
 	}
 
@@ -321,7 +321,7 @@ func appendDNSConfig(existingDNSConfig *runtimeapi.DNSConfig, dnsConfig *v1.PodD
 	return existingDNSConfig
 }
 
-// GetPodDNS returns DNS setttings for the pod.
+// GetPodDNS returns DNS settings for the pod.
 func (c *Configurer) GetPodDNS(pod *v1.Pod) (*runtimeapi.DNSConfig, error) {
 	dnsConfig, err := c.getHostDNSConfig(pod)
 	if err != nil {

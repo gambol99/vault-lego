@@ -17,6 +17,7 @@ limitations under the License.
 package gce
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -27,7 +28,7 @@ import (
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
 	apiservice "k8s.io/kubernetes/pkg/api/v1/service"
-	"k8s.io/kubernetes/pkg/cloudprovider"
+	"k8s.io/kubernetes/pkg/cloudprovider/providers/gce/cloud"
 	netsets "k8s.io/kubernetes/pkg/util/net/sets"
 
 	"github.com/golang/glog"
@@ -43,7 +44,7 @@ import (
 // Due to an interesting series of design decisions, this handles both creating
 // new load balancers and updating existing load balancers, recognizing when
 // each is needed.
-func (gce *GCECloud) ensureExternalLoadBalancer(clusterName, clusterID string, apiService *v1.Service, existingFwdRule *compute.ForwardingRule, nodes []*v1.Node) (*v1.LoadBalancerStatus, error) {
+func (gce *GCECloud) ensureExternalLoadBalancer(clusterName string, clusterID string, apiService *v1.Service, existingFwdRule *compute.ForwardingRule, nodes []*v1.Node) (*v1.LoadBalancerStatus, error) {
 	if len(nodes) == 0 {
 		return nil, fmt.Errorf("Cannot EnsureLoadBalancer() with no hosts")
 	}
@@ -55,7 +56,7 @@ func (gce *GCECloud) ensureExternalLoadBalancer(clusterName, clusterID string, a
 		return nil, err
 	}
 
-	loadBalancerName := cloudprovider.GetLoadBalancerName(apiService)
+	loadBalancerName := gce.GetLoadBalancerName(context.TODO(), clusterName, apiService)
 	requestedIP := apiService.Spec.LoadBalancerIP
 	ports := apiService.Spec.Ports
 	portStr := []string{}
@@ -280,13 +281,13 @@ func (gce *GCECloud) updateExternalLoadBalancer(clusterName string, service *v1.
 		return err
 	}
 
-	loadBalancerName := cloudprovider.GetLoadBalancerName(service)
+	loadBalancerName := gce.GetLoadBalancerName(context.TODO(), clusterName, service)
 	return gce.updateTargetPool(loadBalancerName, hosts)
 }
 
 // ensureExternalLoadBalancerDeleted is the external implementation of LoadBalancer.EnsureLoadBalancerDeleted
 func (gce *GCECloud) ensureExternalLoadBalancerDeleted(clusterName, clusterID string, service *v1.Service) error {
-	loadBalancerName := cloudprovider.GetLoadBalancerName(service)
+	loadBalancerName := gce.GetLoadBalancerName(context.TODO(), clusterName, service)
 	serviceName := types.NamespacedName{Namespace: service.Namespace, Name: service.Name}
 	lbRefStr := fmt.Sprintf("%v(%v)", loadBalancerName, serviceName)
 
@@ -416,7 +417,7 @@ func (gce *GCECloud) DeleteExternalTargetPoolAndChecks(service *v1.Service, name
 // the verification failed. It also returns a boolean to indicate whether the
 // IP address is considered owned by the user (i.e., not managed by the
 // controller.
-func verifyUserRequestedIP(s CloudAddressService, region, requestedIP, fwdRuleIP, lbRef string, desiredNetTier NetworkTier) (isUserOwnedIP bool, err error) {
+func verifyUserRequestedIP(s CloudAddressService, region, requestedIP, fwdRuleIP, lbRef string, desiredNetTier cloud.NetworkTier) (isUserOwnedIP bool, err error) {
 	if requestedIP == "" {
 		return false, nil
 	}
@@ -439,7 +440,7 @@ func verifyUserRequestedIP(s CloudAddressService, region, requestedIP, fwdRuleIP
 		if err != nil {
 			return false, fmt.Errorf("failed to check the network tier of the IP %q: %v", requestedIP, err)
 		}
-		netTier := NetworkTierGCEValueToType(netTierStr)
+		netTier := cloud.NetworkTierGCEValueToType(netTierStr)
 		if netTier != desiredNetTier {
 			glog.Errorf("verifyUserRequestedIP: requested static IP %q (name: %s) for LB %s has network tier %s, need %s.", requestedIP, existingAddress.Name, lbRef, netTier, desiredNetTier)
 			return false, fmt.Errorf("requrested IP %q belongs to the %s network tier; expected %s", requestedIP, netTier, desiredNetTier)
@@ -504,6 +505,14 @@ func (gce *GCECloud) ensureTargetPoolAndHealthCheck(tpExists, tpNeedsRecreation 
 			return fmt.Errorf("failed to update target pool for load balancer (%s): %v", lbRefStr, err)
 		}
 		glog.Infof("ensureTargetPoolAndHealthCheck(%s): Updated target pool (with %d hosts).", lbRefStr, len(hosts))
+		if hcToCreate != nil {
+			if hc, err := gce.ensureHttpHealthCheck(hcToCreate.Name, hcToCreate.RequestPath, int32(hcToCreate.Port)); err != nil || hc == nil {
+				return fmt.Errorf("Failed to ensure health check for %v port %d path %v: %v", loadBalancerName, hcToCreate.Port, hcToCreate.RequestPath, err)
+			}
+		}
+	} else {
+		// Panic worthy.
+		glog.Errorf("ensureTargetPoolAndHealthCheck(%s): target pool not exists and doesn't need to be created.", lbRefStr)
 	}
 	return nil
 }
@@ -535,7 +544,7 @@ func (gce *GCECloud) createTargetPoolAndHealthCheck(svc *v1.Service, name, servi
 
 	var instances []string
 	for _, host := range hosts {
-		instances = append(instances, makeHostURL(gce.service.BasePath, gce.projectID, host.Zone, host.Name))
+		instances = append(instances, host.makeComparableHostPath())
 	}
 	glog.Infof("Creating targetpool %v with %d healthchecks", name, len(hcLinks))
 	pool := &compute.TargetPool{
@@ -620,6 +629,37 @@ func makeHttpHealthCheck(name, path string, port int32) *compute.HttpHealthCheck
 	}
 }
 
+// mergeHttpHealthChecks reconciles HttpHealthCheck configures to be no smaller
+// than the default values.
+// E.g. old health check interval is 2s, new default is 8.
+// The HC interval will be reconciled to 8 seconds.
+// If the existing health check is larger than the default interval,
+// the configuration will be kept.
+func mergeHttpHealthChecks(hc, newHC *compute.HttpHealthCheck) *compute.HttpHealthCheck {
+	if hc.CheckIntervalSec > newHC.CheckIntervalSec {
+		newHC.CheckIntervalSec = hc.CheckIntervalSec
+	}
+	if hc.TimeoutSec > newHC.TimeoutSec {
+		newHC.TimeoutSec = hc.TimeoutSec
+	}
+	if hc.UnhealthyThreshold > newHC.UnhealthyThreshold {
+		newHC.UnhealthyThreshold = hc.UnhealthyThreshold
+	}
+	if hc.HealthyThreshold > newHC.HealthyThreshold {
+		newHC.HealthyThreshold = hc.HealthyThreshold
+	}
+	return newHC
+}
+
+// needToUpdateHttpHealthChecks checks whether the http healthcheck needs to be
+// updated.
+func needToUpdateHttpHealthChecks(hc, newHC *compute.HttpHealthCheck) bool {
+	changed := hc.Port != newHC.Port || hc.RequestPath != newHC.RequestPath || hc.Description != newHC.Description
+	changed = changed || hc.CheckIntervalSec < newHC.CheckIntervalSec || hc.TimeoutSec < newHC.TimeoutSec
+	changed = changed || hc.UnhealthyThreshold < newHC.UnhealthyThreshold || hc.HealthyThreshold < newHC.HealthyThreshold
+	return changed
+}
+
 func (gce *GCECloud) ensureHttpHealthCheck(name, path string, port int32) (hc *compute.HttpHealthCheck, err error) {
 	newHC := makeHttpHealthCheck(name, path, port)
 	hc, err = gce.GetHttpHealthCheck(name)
@@ -638,16 +678,18 @@ func (gce *GCECloud) ensureHttpHealthCheck(name, path string, port int32) (hc *c
 	}
 	// Validate health check fields
 	glog.V(4).Infof("Checking http health check params %s", name)
-	drift := hc.Port != int64(port) || hc.RequestPath != path || hc.Description != makeHealthCheckDescription(name)
-	drift = drift || hc.CheckIntervalSec != gceHcCheckIntervalSeconds || hc.TimeoutSec != gceHcTimeoutSeconds
-	drift = drift || hc.UnhealthyThreshold != gceHcUnhealthyThreshold || hc.HealthyThreshold != gceHcHealthyThreshold
-	if drift {
+	if needToUpdateHttpHealthChecks(hc, newHC) {
 		glog.Warningf("Health check %v exists but parameters have drifted - updating...", name)
+		newHC = mergeHttpHealthChecks(hc, newHC)
 		if err := gce.UpdateHttpHealthCheck(newHC); err != nil {
 			glog.Warningf("Failed to reconcile http health check %v parameters", name)
 			return nil, err
 		}
 		glog.V(4).Infof("Corrected health check %v parameters successful", name)
+		hc, err = gce.GetHttpHealthCheck(name)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return hc, nil
 }
@@ -657,7 +699,7 @@ func (gce *GCECloud) ensureHttpHealthCheck(name, path string, port int32) (hc *c
 // Returns whether the forwarding rule exists, whether it needs to be updated,
 // what its IP address is (if it exists), and any error we encountered.
 func (gce *GCECloud) forwardingRuleNeedsUpdate(name, region string, loadBalancerIP string, ports []v1.ServicePort) (exists bool, needsUpdate bool, ipAddress string, err error) {
-	fwd, err := gce.service.ForwardingRules.Get(gce.projectID, region, name).Do()
+	fwd, err := gce.GetRegionForwardingRule(name, region)
 	if err != nil {
 		if isHTTPErrorCode(err, http.StatusNotFound) {
 			return false, true, "", nil
@@ -732,11 +774,6 @@ func nodeNames(nodes []*v1.Node) []string {
 	return ret
 }
 
-func makeHostURL(projectsApiEndpoint, projectID, zone, host string) string {
-	host = canonicalizeInstanceName(host)
-	return projectsApiEndpoint + strings.Join([]string{projectID, "zones", zone, "instances", host}, "/")
-}
-
 func hostURLToComparablePath(hostURL string) string {
 	idx := strings.Index(hostURL, "/zones/")
 	if idx < 0 {
@@ -782,7 +819,7 @@ func translateAffinityType(affinityType v1.ServiceAffinity) string {
 }
 
 func (gce *GCECloud) firewallNeedsUpdate(name, serviceName, region, ipAddress string, ports []v1.ServicePort, sourceRanges netsets.IPNet) (exists bool, needsUpdate bool, err error) {
-	fw, err := gce.service.Firewalls.Get(gce.NetworkProjectID(), MakeFirewallName(name)).Do()
+	fw, err := gce.GetFirewall(MakeFirewallName(name))
 	if err != nil {
 		if isHTTPErrorCode(err, http.StatusNotFound) {
 			return false, true, nil
@@ -829,7 +866,7 @@ func (gce *GCECloud) ensureHttpHealthCheckFirewall(svc *v1.Service, serviceName,
 	ports := []v1.ServicePort{{Protocol: "tcp", Port: hcPort}}
 
 	fwName := MakeHealthCheckFirewallName(clusterID, hcName, isNodesHealthCheck)
-	fw, err := gce.service.Firewalls.Get(gce.NetworkProjectID(), fwName).Do()
+	fw, err := gce.GetFirewall(fwName)
 	if err != nil {
 		if !isHTTPErrorCode(err, http.StatusNotFound) {
 			return fmt.Errorf("error getting firewall for health checks: %v", err)
@@ -857,7 +894,7 @@ func (gce *GCECloud) ensureHttpHealthCheckFirewall(svc *v1.Service, serviceName,
 	return nil
 }
 
-func createForwardingRule(s CloudForwardingRuleService, name, serviceName, region, ipAddress, target string, ports []v1.ServicePort, netTier NetworkTier) error {
+func createForwardingRule(s CloudForwardingRuleService, name, serviceName, region, ipAddress, target string, ports []v1.ServicePort, netTier cloud.NetworkTier) error {
 	portRange, err := loadBalancerPortRange(ports)
 	if err != nil {
 		return err
@@ -866,7 +903,7 @@ func createForwardingRule(s CloudForwardingRuleService, name, serviceName, regio
 	ipProtocol := string(ports[0].Protocol)
 
 	switch netTier {
-	case NetworkTierPremium:
+	case cloud.NetworkTierPremium:
 		rule := &compute.ForwardingRule{
 			Name:        name,
 			Description: desc,
@@ -969,7 +1006,7 @@ func (gce *GCECloud) firewallObject(name, region, desc string, sourceRanges nets
 	return firewall, nil
 }
 
-func ensureStaticIP(s CloudAddressService, name, serviceName, region, existingIP string, netTier NetworkTier) (ipAddress string, existing bool, err error) {
+func ensureStaticIP(s CloudAddressService, name, serviceName, region, existingIP string, netTier cloud.NetworkTier) (ipAddress string, existing bool, err error) {
 	// If the address doesn't exist, this will create it.
 	// If the existingIP exists but is ephemeral, this will promote it to static.
 	// If the address already exists, this will harmlessly return a StatusConflict
@@ -979,7 +1016,7 @@ func ensureStaticIP(s CloudAddressService, name, serviceName, region, existingIP
 
 	var creationErr error
 	switch netTier {
-	case NetworkTierPremium:
+	case cloud.NetworkTierPremium:
 		addressObj := &compute.Address{
 			Name:        name,
 			Description: desc,
@@ -1017,19 +1054,19 @@ func ensureStaticIP(s CloudAddressService, name, serviceName, region, existingIP
 	return addr.Address, existed, nil
 }
 
-func (gce *GCECloud) getServiceNetworkTier(svc *v1.Service) (NetworkTier, error) {
+func (gce *GCECloud) getServiceNetworkTier(svc *v1.Service) (cloud.NetworkTier, error) {
 	if !gce.AlphaFeatureGate.Enabled(AlphaFeatureNetworkTiers) {
-		return NetworkTierDefault, nil
+		return cloud.NetworkTierDefault, nil
 	}
 	tier, err := GetServiceNetworkTier(svc)
 	if err != nil {
 		// Returns an error if the annotation is invalid.
-		return NetworkTier(""), err
+		return cloud.NetworkTier(""), err
 	}
 	return tier, nil
 }
 
-func (gce *GCECloud) deleteWrongNetworkTieredResources(lbName, lbRef string, desiredNetTier NetworkTier) error {
+func (gce *GCECloud) deleteWrongNetworkTieredResources(lbName, lbRef string, desiredNetTier cloud.NetworkTier) error {
 	logPrefix := fmt.Sprintf("deleteWrongNetworkTieredResources:(%s)", lbRef)
 	if err := deleteFWDRuleWithWrongTier(gce, gce.region, lbName, logPrefix, desiredNetTier); err != nil {
 		return err
@@ -1042,14 +1079,14 @@ func (gce *GCECloud) deleteWrongNetworkTieredResources(lbName, lbRef string, des
 
 // deleteFWDRuleWithWrongTier checks the network tier of existing forwarding
 // rule and delete the rule if the tier does not matched the desired tier.
-func deleteFWDRuleWithWrongTier(s CloudForwardingRuleService, region, name, logPrefix string, desiredNetTier NetworkTier) error {
+func deleteFWDRuleWithWrongTier(s CloudForwardingRuleService, region, name, logPrefix string, desiredNetTier cloud.NetworkTier) error {
 	tierStr, err := s.getNetworkTierFromForwardingRule(name, region)
 	if isNotFound(err) {
 		return nil
 	} else if err != nil {
 		return err
 	}
-	existingTier := NetworkTierGCEValueToType(tierStr)
+	existingTier := cloud.NetworkTierGCEValueToType(tierStr)
 	if existingTier == desiredNetTier {
 		return nil
 	}
@@ -1061,7 +1098,7 @@ func deleteFWDRuleWithWrongTier(s CloudForwardingRuleService, region, name, logP
 
 // deleteAddressWithWrongTier checks the network tier of existing address
 // and delete the address if the tier does not matched the desired tier.
-func deleteAddressWithWrongTier(s CloudAddressService, region, name, logPrefix string, desiredNetTier NetworkTier) error {
+func deleteAddressWithWrongTier(s CloudAddressService, region, name, logPrefix string, desiredNetTier cloud.NetworkTier) error {
 	// We only check the IP address matching the reserved name that the
 	// controller assigned to the LB. We make the assumption that an address of
 	// such name is owned by the controller and is safe to release. Whether an
@@ -1077,7 +1114,7 @@ func deleteAddressWithWrongTier(s CloudAddressService, region, name, logPrefix s
 	} else if err != nil {
 		return err
 	}
-	existingTier := NetworkTierGCEValueToType(tierStr)
+	existingTier := cloud.NetworkTierGCEValueToType(tierStr)
 	if existingTier == desiredNetTier {
 		return nil
 	}

@@ -20,16 +20,20 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	"k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	"k8s.io/kubernetes/pkg/api/testapi"
-	api "k8s.io/kubernetes/pkg/apis/core"
+	"k8s.io/kubernetes/pkg/apis/core"
+	"k8s.io/kubernetes/pkg/apis/core/validation"
 	"k8s.io/kubernetes/pkg/securitycontext"
 )
 
-func noDefault(*api.Pod) error { return nil }
+func noDefault(*core.Pod) error { return nil }
 
 func TestDecodeSinglePod(t *testing.T) {
 	grace := int64(30)
@@ -55,7 +59,7 @@ func TestDecodeSinglePod(t *testing.T) {
 				SecurityContext:          securitycontext.ValidSecurityContextWithContainerDefaults(),
 			}},
 			SecurityContext: &v1.PodSecurityContext{},
-			SchedulerName:   api.DefaultSchedulerName,
+			SchedulerName:   core.DefaultSchedulerName,
 		},
 	}
 	json, err := runtime.Encode(testapi.Default.Codec(), pod)
@@ -73,7 +77,7 @@ func TestDecodeSinglePod(t *testing.T) {
 		t.Errorf("expected:\n%#v\ngot:\n%#v\n%s", pod, podOut, string(json))
 	}
 
-	for _, gv := range legacyscheme.Registry.EnabledVersionsForGroup(v1.GroupName) {
+	for _, gv := range legacyscheme.Scheme.PrioritizedVersionsForGroup(v1.GroupName) {
 		info, _ := runtime.SerializerInfoForMediaType(legacyscheme.Codecs.SupportedMediaTypes(), "application/yaml")
 		encoder := legacyscheme.Codecs.EncoderForVersion(info.Serializer, gv)
 		yaml, err := runtime.Encode(encoder, pod)
@@ -118,7 +122,7 @@ func TestDecodePodList(t *testing.T) {
 				SecurityContext: securitycontext.ValidSecurityContextWithContainerDefaults(),
 			}},
 			SecurityContext: &v1.PodSecurityContext{},
-			SchedulerName:   api.DefaultSchedulerName,
+			SchedulerName:   core.DefaultSchedulerName,
 		},
 	}
 	podList := &v1.PodList{
@@ -139,7 +143,7 @@ func TestDecodePodList(t *testing.T) {
 		t.Errorf("expected:\n%#v\ngot:\n%#v\n%s", podList, &podListOut, string(json))
 	}
 
-	for _, gv := range legacyscheme.Registry.EnabledVersionsForGroup(v1.GroupName) {
+	for _, gv := range legacyscheme.Scheme.PrioritizedVersionsForGroup(v1.GroupName) {
 		info, _ := runtime.SerializerInfoForMediaType(legacyscheme.Codecs.SupportedMediaTypes(), "application/yaml")
 		encoder := legacyscheme.Codecs.EncoderForVersion(info.Serializer, gv)
 		yaml, err := runtime.Encode(encoder, podList)
@@ -186,6 +190,62 @@ func TestGetSelfLink(t *testing.T) {
 		selfLink := getSelfLink(testCase.name, testCase.namespace)
 		if testCase.expectedSelfLink != selfLink {
 			t.Errorf("%s: getSelfLink error, expected: %s, got: %s", testCase.desc, testCase.expectedSelfLink, selfLink)
+		}
+	}
+}
+
+func TestStaticPodNameGenerate(t *testing.T) {
+	testCases := []struct {
+		nodeName  types.NodeName
+		podName   string
+		expected  string
+		overwrite string
+		shouldErr bool
+	}{
+		{
+			"node1",
+			"static-pod1",
+			"static-pod1-node1",
+			"",
+			false,
+		},
+		{
+			"Node1",
+			"static-pod1",
+			"static-pod1-node1",
+			"",
+			false,
+		},
+		{
+			"NODE1",
+			"static-pod1",
+			"static-pod1-node1",
+			"static-pod1-NODE1",
+			true,
+		},
+	}
+	for _, c := range testCases {
+		assert.Equal(t, c.expected, generatePodName(c.podName, c.nodeName), "wrong pod name generated")
+		pod := &core.Pod{}
+		pod.Name = c.podName
+		if c.overwrite != "" {
+			pod.Name = c.overwrite
+		}
+		errs := validation.ValidatePod(pod)
+		if c.shouldErr {
+			specNameErrored := false
+			for _, err := range errs {
+				if err.Field == "metadata.name" {
+					specNameErrored = true
+				}
+			}
+			assert.NotEmpty(t, specNameErrored, "expecting error")
+		} else {
+			for _, err := range errs {
+				if err.Field == "metadata.name" {
+					t.Fail()
+				}
+			}
 		}
 	}
 }

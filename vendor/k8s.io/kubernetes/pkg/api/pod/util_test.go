@@ -18,9 +18,8 @@ package pod
 
 import (
 	"reflect"
-	"testing"
-
 	"strings"
+	"testing"
 
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -64,6 +63,10 @@ func TestPodSecrets(t *testing.T) {
 					CephFS: &api.CephFSVolumeSource{
 						SecretRef: &api.LocalObjectReference{
 							Name: "Spec.Volumes[*].VolumeSource.CephFS.SecretRef"}}}}, {
+				VolumeSource: api.VolumeSource{
+					Cinder: &api.CinderVolumeSource{
+						SecretRef: &api.LocalObjectReference{
+							Name: "Spec.Volumes[*].VolumeSource.Cinder.SecretRef"}}}}, {
 				VolumeSource: api.VolumeSource{
 					FlexVolume: &api.FlexVolumeSource{
 						SecretRef: &api.LocalObjectReference{
@@ -118,6 +121,7 @@ func TestPodSecrets(t *testing.T) {
 		"Spec.InitContainers[*].Env[*].ValueFrom.SecretKeyRef",
 		"Spec.Volumes[*].VolumeSource.AzureFile.SecretName",
 		"Spec.Volumes[*].VolumeSource.CephFS.SecretRef",
+		"Spec.Volumes[*].VolumeSource.Cinder.SecretRef",
 		"Spec.Volumes[*].VolumeSource.FlexVolume.SecretRef",
 		"Spec.Volumes[*].VolumeSource.Projected.Sources[*].Secret",
 		"Spec.Volumes[*].VolumeSource.RBD.SecretRef",
@@ -314,7 +318,7 @@ func TestDropAlphaVolumeDevices(t *testing.T) {
 			t.Error("VolumeDevices in Container should not have been dropped based on feature-gate")
 		}
 		if testPod.Spec.InitContainers[0].VolumeDevices == nil {
-			t.Error("VolumeDevices in Container should not have been dropped based on feature-gate")
+			t.Error("VolumeDevices in InitContainers should not have been dropped based on feature-gate")
 		}
 	}
 

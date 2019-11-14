@@ -22,10 +22,11 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/json"
 	"k8s.io/apiserver/pkg/apis/apiserver"
-	apiserverapi "k8s.io/apiserver/pkg/apis/apiserver"
 	apiserverapiv1alpha1 "k8s.io/apiserver/pkg/apis/apiserver/v1alpha1"
 )
 
@@ -138,8 +139,8 @@ func TestReadAdmissionConfiguration(t *testing.T) {
 	}
 
 	scheme := runtime.NewScheme()
-	apiserverapi.AddToScheme(scheme)
-	apiserverapiv1alpha1.AddToScheme(scheme)
+	require.NoError(t, apiserver.AddToScheme(scheme))
+	require.NoError(t, apiserverapiv1alpha1.AddToScheme(scheme))
 
 	for testName, testCase := range testCases {
 		if err = ioutil.WriteFile(configFileName, []byte(testCase.ConfigBody), 0644); err != nil {
@@ -210,8 +211,8 @@ func TestEmbeddedConfiguration(t *testing.T) {
 
 	for desc, test := range testCases {
 		scheme := runtime.NewScheme()
-		apiserverapi.AddToScheme(scheme)
-		apiserverapiv1alpha1.AddToScheme(scheme)
+		require.NoError(t, apiserver.AddToScheme(scheme))
+		require.NoError(t, apiserverapiv1alpha1.AddToScheme(scheme))
 
 		if err = ioutil.WriteFile(configFileName, []byte(test.ConfigBody), 0644); err != nil {
 			t.Errorf("[%s] unexpected err writing temp file: %v", desc, err)

@@ -41,11 +41,13 @@ import (
 
 const (
 	limitRangerAnnotation = "kubernetes.io/limit-ranger"
+	// PluginName indicates name of admission plugin.
+	PluginName = "LimitRanger"
 )
 
 // Register registers a plugin
 func Register(plugins *admission.Plugins) {
-	plugins.Register("LimitRanger", func(config io.Reader) (admission.Interface, error) {
+	plugins.Register(PluginName, func(config io.Reader) (admission.Interface, error) {
 		return NewLimitRanger(&DefaultLimitRangerActions{})
 	})
 }
@@ -110,6 +112,18 @@ func (l *LimitRanger) runLimitFunc(a admission.Attributes, limitFn func(limitRan
 		name, _ = meta.NewAccessor().Name(obj)
 		if len(name) == 0 {
 			name, _ = meta.NewAccessor().GenerateName(obj)
+		}
+	}
+
+	// ignore all objects marked for deletion
+	oldObj := a.GetOldObject()
+	if oldObj != nil {
+		oldAccessor, err := meta.Accessor(oldObj)
+		if err != nil {
+			return admission.NewForbidden(a, err)
+		}
+		if oldAccessor.GetDeletionTimestamp() != nil {
+			return nil
 		}
 	}
 
@@ -446,6 +460,13 @@ func (d *DefaultLimitRangerActions) ValidateLimit(limitRange *api.LimitRange, re
 // Also ignores any call that has a subresource defined.
 func (d *DefaultLimitRangerActions) SupportsAttributes(a admission.Attributes) bool {
 	if a.GetSubresource() != "" {
+		return false
+	}
+
+	// Since containers and initContainers cannot currently be added, removed, or updated, it is unnecessary
+	// to mutate and validate limitrange on pod updates. Trying to mutate containers or initContainers on a pod
+	// update request will always fail pod validation because those fields are immutable once the object is created.
+	if a.GetKind().GroupKind() == api.Kind("Pod") && a.GetOperation() == admission.Update {
 		return false
 	}
 

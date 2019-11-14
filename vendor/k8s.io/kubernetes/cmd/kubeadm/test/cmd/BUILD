@@ -22,15 +22,17 @@ go_test(
         "token_test.go",
         "version_test.go",
     ],
-    args = ["--kubeadm-path=../../kubeadm"],
-    data = ["//cmd/kubeadm"],
-    importpath = "k8s.io/kubernetes/cmd/kubeadm/test/cmd",
-    library = ":go_default_library",
+    args = ["--kubeadm-path=$(location //cmd/kubeadm:kubeadm)"],
+    data = ["//cmd/kubeadm"] + glob(["testdata/**"]),
+    embed = [":go_default_library"],
     tags = [
         "integration",
         "skip",
     ],
-    deps = ["//vendor/github.com/ghodss/yaml:go_default_library"],
+    deps = [
+        "//vendor/github.com/ghodss/yaml:go_default_library",
+        "//vendor/github.com/renstrom/dedent:go_default_library",
+    ],
 )
 
 filegroup(

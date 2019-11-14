@@ -20,15 +20,19 @@ import (
 	"fmt"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/golang/glog"
 	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/kubernetes/pkg/cloudprovider"
 	gcecloud "k8s.io/kubernetes/pkg/cloudprovider/providers/gce"
+	"k8s.io/kubernetes/pkg/features"
 	kubeletapis "k8s.io/kubernetes/pkg/kubelet/apis"
+	utilfile "k8s.io/kubernetes/pkg/util/file"
 	"k8s.io/kubernetes/pkg/volume"
 	volumeutil "k8s.io/kubernetes/pkg/volume/util"
 	"k8s.io/utils/exec"
@@ -41,17 +45,26 @@ const (
 	diskPartitionSuffix  = "-part"
 	diskSDPath           = "/dev/sd"
 	diskSDPattern        = "/dev/sd*"
-	regionalPDZonesAuto  = "auto" // "replica-zones: auto" means Kubernetes will select zones for RePD
-	maxChecks            = 60
 	maxRetries           = 10
 	checkSleepDuration   = time.Second
 	maxRegionalPDZones   = 2
+
+	// Replication type constants must be lower case.
+	replicationTypeNone       = "none"
+	replicationTypeRegionalPD = "regional-pd"
+
+	// scsi_id output should be in the form of:
+	// 0Google PersistentDisk <disk name>
+	scsiPattern = `^0Google\s+PersistentDisk\s+([\S]+)\s*$`
 )
 
-// These variables are modified only in unit tests and should be constant
-// otherwise.
 var (
+	// errorSleepDuration is modified only in unit tests and should be constant
+	// otherwise.
 	errorSleepDuration time.Duration = 5 * time.Second
+
+	// regex to parse scsi_id output and extract the serial
+	scsiRegex = regexp.MustCompile(scsiPattern)
 )
 
 type GCEDiskUtil struct{}
@@ -74,27 +87,27 @@ func (util *GCEDiskUtil) DeleteVolume(d *gcePersistentDiskDeleter) error {
 
 // CreateVolume creates a GCE PD.
 // Returns: gcePDName, volumeSizeGB, labels, fsType, error
-func (gceutil *GCEDiskUtil) CreateVolume(c *gcePersistentDiskProvisioner) (string, int, map[string]string, string, error) {
+func (gceutil *GCEDiskUtil) CreateVolume(c *gcePersistentDiskProvisioner, node *v1.Node, allowedTopologies []v1.TopologySelectorTerm) (string, int, map[string]string, string, error) {
 	cloud, err := getCloudProvider(c.gcePersistentDisk.plugin.host.GetCloudProvider())
 	if err != nil {
 		return "", 0, nil, "", err
 	}
 
-	name := volume.GenerateVolumeName(c.options.ClusterName, c.options.PVName, 63) // GCE PD name can have up to 63 characters
+	name := volumeutil.GenerateVolumeName(c.options.ClusterName, c.options.PVName, 63) // GCE PD name can have up to 63 characters
 	capacity := c.options.PVC.Spec.Resources.Requests[v1.ResourceName(v1.ResourceStorage)]
-	requestBytes := capacity.Value()
-	// GCE works with gigabytes, convert to GiB with rounding up
-	requestGB := volume.RoundUpSize(requestBytes, 1024*1024*1024)
+	// GCE PDs are allocated in chunks of GiBs
+	requestGB := volumeutil.RoundUpToGiB(capacity)
 
-	// Apply Parameters (case-insensitive). We leave validation of
-	// the values to the cloud provider.
+	// Apply Parameters.
+	// Values for parameter "replication-type" are canonicalized to lower case.
+	// Values for other parameters are case-insensitive, and we leave validation of these values
+	// to the cloud provider.
 	diskType := ""
 	configuredZone := ""
-	configuredZones := ""
-	configuredReplicaZones := ""
+	var configuredZones sets.String
 	zonePresent := false
 	zonesPresent := false
-	replicaZonesPresent := false
+	replicationType := replicationTypeNone
 	fstype := ""
 	for k, v := range c.options.Parameters {
 		switch strings.ToLower(k) {
@@ -105,10 +118,17 @@ func (gceutil *GCEDiskUtil) CreateVolume(c *gcePersistentDiskProvisioner) (strin
 			configuredZone = v
 		case "zones":
 			zonesPresent = true
-			configuredZones = v
-		case "replica-zones":
-			replicaZonesPresent = true
-			configuredReplicaZones = v
+			configuredZones, err = volumeutil.ZonesToSet(v)
+			if err != nil {
+				return "", 0, nil, "", err
+			}
+		case "replication-type":
+			if !utilfeature.DefaultFeatureGate.Enabled(features.GCERegionalPersistentDisk) {
+				return "", 0, nil, "",
+					fmt.Errorf("the %q option for volume plugin %v is only supported with the %q Kubernetes feature gate enabled",
+						k, c.plugin.GetPluginName(), features.GCERegionalPersistentDisk)
+			}
+			replicationType = strings.ToLower(v)
 		case volume.VolumeParameterFSType:
 			fstype = v
 		default:
@@ -116,77 +136,53 @@ func (gceutil *GCEDiskUtil) CreateVolume(c *gcePersistentDiskProvisioner) (strin
 		}
 	}
 
-	if ((zonePresent || zonesPresent) && replicaZonesPresent) ||
-		(zonePresent && zonesPresent) {
-		// 011, 101, 111, 110
-		return "", 0, nil, "", fmt.Errorf("a combination of zone, zones, and replica-zones StorageClass parameters must not be used at the same time")
-	}
-
 	// TODO: implement PVC.Selector parsing
 	if c.options.PVC.Spec.Selector != nil {
 		return "", 0, nil, "", fmt.Errorf("claim.Spec.Selector is not supported for dynamic provisioning on GCE")
 	}
 
-	if !zonePresent && !zonesPresent && replicaZonesPresent {
-		// 001 - "replica-zones" specified
-		replicaZones, err := volumeutil.ZonesToSet(configuredReplicaZones)
+	var activezones sets.String
+	activezones, err = cloud.GetAllCurrentZones()
+	if err != nil {
+		return "", 0, nil, "", err
+	}
+
+	switch replicationType {
+	case replicationTypeRegionalPD:
+		selectedZones, err := volumeutil.SelectZonesForVolume(zonePresent, zonesPresent, configuredZone, configuredZones, activezones, node, allowedTopologies, c.options.PVC.Name, maxRegionalPDZones)
 		if err != nil {
+			glog.V(2).Infof("Error selecting zones for regional GCE PD volume: %v", err)
 			return "", 0, nil, "", err
 		}
-
-		err = createRegionalPD(
+		if err = cloud.CreateRegionalDisk(
 			name,
-			c.options.PVC.Name,
 			diskType,
-			replicaZones,
-			requestGB,
-			c.options.CloudTags,
-			cloud)
-		if err != nil {
+			selectedZones,
+			int64(requestGB),
+			*c.options.CloudTags); err != nil {
 			glog.V(2).Infof("Error creating regional GCE PD volume: %v", err)
 			return "", 0, nil, "", err
 		}
-
 		glog.V(2).Infof("Successfully created Regional GCE PD volume %s", name)
-	} else {
-		var zones sets.String
-		if !zonePresent && !zonesPresent {
-			// 000 - neither "zone", "zones", or "replica-zones" specified
-			// Pick a zone randomly selected from all active zones where
-			// Kubernetes cluster has a node.
-			zones, err = cloud.GetAllCurrentZones()
-			if err != nil {
-				glog.V(2).Infof("error getting zone information from GCE: %v", err)
-				return "", 0, nil, "", err
-			}
-		} else if !zonePresent && zonesPresent {
-			// 010 - "zones" specified
-			// Pick a zone randomly selected from specified set.
-			if zones, err = volumeutil.ZonesToSet(configuredZones); err != nil {
-				return "", 0, nil, "", err
-			}
-		} else if zonePresent && !zonesPresent {
-			// 100 - "zone" specified
-			// Use specified zone
-			if err := volume.ValidateZone(configuredZone); err != nil {
-				return "", 0, nil, "", err
-			}
-			zones = make(sets.String)
-			zones.Insert(configuredZone)
-		}
-		zone := volume.ChooseZoneForVolume(zones, c.options.PVC.Name)
 
+	case replicationTypeNone:
+		selectedZone, err := volumeutil.SelectZoneForVolume(zonePresent, zonesPresent, configuredZone, configuredZones, activezones, node, allowedTopologies, c.options.PVC.Name)
+		if err != nil {
+			return "", 0, nil, "", err
+		}
 		if err := cloud.CreateDisk(
 			name,
 			diskType,
-			zone,
+			selectedZone,
 			int64(requestGB),
 			*c.options.CloudTags); err != nil {
 			glog.V(2).Infof("Error creating single-zone GCE PD volume: %v", err)
 			return "", 0, nil, "", err
 		}
-
 		glog.V(2).Infof("Successfully created single-zone GCE PD volume %s", name)
+
+	default:
+		return "", 0, nil, "", fmt.Errorf("replication-type of '%s' is not supported", replicationType)
 	}
 
 	labels, err := cloud.GetAutoLabelsForPD(name, "" /* zone */)
@@ -198,52 +194,12 @@ func (gceutil *GCEDiskUtil) CreateVolume(c *gcePersistentDiskProvisioner) (strin
 	return name, int(requestGB), labels, fstype, nil
 }
 
-// Creates a Regional PD
-func createRegionalPD(
-	diskName string,
-	pvcName string,
-	diskType string,
-	replicaZones sets.String,
-	requestGB int64,
-	cloudTags *map[string]string,
-	cloud *gcecloud.GCECloud) error {
-
-	autoZoneSelection := false
-	if replicaZones.Len() != maxRegionalPDZones {
-		replicaZonesList := replicaZones.UnsortedList()
-		if replicaZones.Len() == 1 && replicaZonesList[0] == regionalPDZonesAuto {
-			// User requested automatic zone selection.
-			autoZoneSelection = true
-		} else {
-			return fmt.Errorf(
-				"replica-zones specifies %d zones. It must specify %d zones or the keyword \"auto\" to let Kubernetes select zones.",
-				replicaZones.Len(),
-				maxRegionalPDZones)
-		}
-	}
-
-	selectedReplicaZones := replicaZones
-	if autoZoneSelection {
-		selectedReplicaZones = volume.ChooseZonesForVolume(
-			replicaZones, pvcName, maxRegionalPDZones)
-	}
-
-	if err := cloud.CreateRegionalDisk(
-		diskName,
-		diskType,
-		selectedReplicaZones,
-		int64(requestGB),
-		*cloudTags); err != nil {
-		return err
-	}
-
-	return nil
-}
-
 // Returns the first path that exists, or empty string if none exist.
-func verifyDevicePath(devicePaths []string, sdBeforeSet sets.String) (string, error) {
+func verifyDevicePath(devicePaths []string, sdBeforeSet sets.String, diskName string) (string, error) {
 	if err := udevadmChangeToNewDrives(sdBeforeSet); err != nil {
-		// udevadm errors should not block disk detachment, log and continue
+		// It's possible udevadm was called on other disks so it should not block this
+		// call. If it did fail on this disk, then the devicePath will either
+		// not exist or be wrong. If it's wrong, then the scsi_id check below will fail.
 		glog.Errorf("udevadmChangeToNewDrives failed with: %v", err)
 	}
 
@@ -251,6 +207,22 @@ func verifyDevicePath(devicePaths []string, sdBeforeSet sets.String) (string, er
 		if pathExists, err := volumeutil.PathExists(path); err != nil {
 			return "", fmt.Errorf("Error checking if path exists: %v", err)
 		} else if pathExists {
+			// validate that the path actually resolves to the correct disk
+			serial, err := getScsiSerial(path, diskName)
+			if err != nil {
+				return "", fmt.Errorf("failed to get scsi serial %v", err)
+			}
+			if serial != diskName {
+				// The device link is not pointing to the correct device
+				// Trigger udev on this device to try to fix the link
+				if udevErr := udevadmChangeToDrive(path); udevErr != nil {
+					glog.Errorf("udevadmChangeToDrive %q failed with: %v", path, err)
+				}
+
+				// Return error to retry WaitForAttach and verifyDevicePath
+				return "", fmt.Errorf("scsi_id serial %q for device %q doesn't match disk %q", serial, path, diskName)
+			}
+			// The device link is correct
 			return path, nil
 		}
 	}
@@ -258,22 +230,38 @@ func verifyDevicePath(devicePaths []string, sdBeforeSet sets.String) (string, er
 	return "", nil
 }
 
-// Returns the first path that exists, or empty string if none exist.
-func verifyAllPathsRemoved(devicePaths []string) (bool, error) {
-	allPathsRemoved := true
-	for _, path := range devicePaths {
-		if err := udevadmChangeToDrive(path); err != nil {
-			// udevadm errors should not block disk detachment, log and continue
-			glog.Errorf("%v", err)
-		}
-		if exists, err := volumeutil.PathExists(path); err != nil {
-			return false, fmt.Errorf("Error checking if path exists: %v", err)
-		} else {
-			allPathsRemoved = allPathsRemoved && !exists
-		}
+// Calls scsi_id on the given devicePath to get the serial number reported by that device.
+func getScsiSerial(devicePath, diskName string) (string, error) {
+	exists, err := utilfile.FileExists("/lib/udev/scsi_id")
+	if err != nil {
+		return "", fmt.Errorf("failed to check scsi_id existence: %v", err)
 	}
 
-	return allPathsRemoved, nil
+	if !exists {
+		glog.V(6).Infof("scsi_id doesn't exist; skipping check for %v", devicePath)
+		return diskName, nil
+	}
+
+	out, err := exec.New().Command(
+		"/lib/udev/scsi_id",
+		"--page=0x83",
+		"--whitelisted",
+		fmt.Sprintf("--device=%v", devicePath)).CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("scsi_id failed for device %q with %v.", devicePath, err)
+	}
+
+	return parseScsiSerial(string(out))
+}
+
+// Parse the output returned by scsi_id and extract the serial number
+func parseScsiSerial(output string) (string, error) {
+	substrings := scsiRegex.FindStringSubmatch(output)
+	if substrings == nil {
+		return "", fmt.Errorf("scsi_id output cannot be parsed: %q", output)
+	}
+
+	return substrings[1], nil
 }
 
 // Returns list of all /dev/disk/by-id/* paths for given PD.

@@ -22,12 +22,11 @@ import (
 	fuzz "github.com/google/gofuzz"
 
 	"k8s.io/api/core/v1"
-	apitesting "k8s.io/apimachinery/pkg/api/testing"
-	"k8s.io/apimachinery/pkg/api/testing/fuzzer"
+	apitesting "k8s.io/apimachinery/pkg/api/apitesting"
+	"k8s.io/apimachinery/pkg/api/apitesting/fuzzer"
 	genericfuzzer "k8s.io/apimachinery/pkg/apis/meta/fuzzer"
 	"k8s.io/apimachinery/pkg/runtime"
 	runtimeserializer "k8s.io/apimachinery/pkg/runtime/serializer"
-	kubeadmfuzzer "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/fuzzer"
 	admissionregistrationfuzzer "k8s.io/kubernetes/pkg/apis/admissionregistration/fuzzer"
 	appsfuzzer "k8s.io/kubernetes/pkg/apis/apps/fuzzer"
 	autoscalingfuzzer "k8s.io/kubernetes/pkg/apis/autoscaling/fuzzer"
@@ -98,7 +97,6 @@ var FuzzerFuncs = fuzzer.MergeFuzzerFuncs(
 	batchfuzzer.Funcs,
 	autoscalingfuzzer.Funcs,
 	rbacfuzzer.Funcs,
-	kubeadmfuzzer.Funcs,
 	policyfuzzer.Funcs,
 	certificatesfuzzer.Funcs,
 	admissionregistrationfuzzer.Funcs,

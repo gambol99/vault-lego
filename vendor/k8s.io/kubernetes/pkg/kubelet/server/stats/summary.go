@@ -21,15 +21,24 @@ import (
 
 	"github.com/golang/glog"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	statsapi "k8s.io/kubernetes/pkg/kubelet/apis/stats/v1alpha1"
+	"k8s.io/kubernetes/pkg/kubelet/util"
 )
 
 type SummaryProvider interface {
-	Get() (*statsapi.Summary, error)
+	// Get provides a new Summary with the stats from Kubelet,
+	// and will update some stats if updateStats is true
+	Get(updateStats bool) (*statsapi.Summary, error)
 }
 
 // summaryProviderImpl implements the SummaryProvider interface.
 type summaryProviderImpl struct {
+	// kubeletCreationTime is the time at which the summaryProvider was created.
+	kubeletCreationTime metav1.Time
+	// systemBootTime is the time at which the system was started
+	systemBootTime metav1.Time
+
 	provider StatsProvider
 }
 
@@ -38,11 +47,21 @@ var _ SummaryProvider = &summaryProviderImpl{}
 // NewSummaryProvider returns a SummaryProvider using the stats provided by the
 // specified statsProvider.
 func NewSummaryProvider(statsProvider StatsProvider) SummaryProvider {
-	return &summaryProviderImpl{statsProvider}
+	kubeletCreationTime := metav1.Now()
+	bootTime, err := util.GetBootTime()
+	if err != nil {
+		// bootTime will be zero if we encounter an error getting the boot time.
+		glog.Warningf("Error getting system boot time.  Node metrics will have an incorrect start time: %v", err)
+	}
+
+	return &summaryProviderImpl{
+		kubeletCreationTime: kubeletCreationTime,
+		systemBootTime:      metav1.NewTime(bootTime),
+		provider:            statsProvider,
+	}
 }
 
-// Get provides a new Summary with the stats from Kubelet.
-func (sp *summaryProviderImpl) Get() (*statsapi.Summary, error) {
+func (sp *summaryProviderImpl) Get(updateStats bool) (*statsapi.Summary, error) {
 	// TODO(timstclair): Consider returning a best-effort response if any of
 	// the following errors occur.
 	node, err := sp.provider.GetNode()
@@ -50,7 +69,7 @@ func (sp *summaryProviderImpl) Get() (*statsapi.Summary, error) {
 		return nil, fmt.Errorf("failed to get node info: %v", err)
 	}
 	nodeConfig := sp.provider.GetNodeConfig()
-	rootStats, networkStats, err := sp.provider.GetCgroupStats("/")
+	rootStats, networkStats, err := sp.provider.GetCgroupStats("/", updateStats)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get root cgroup stats: %v", err)
 	}
@@ -66,38 +85,22 @@ func (sp *summaryProviderImpl) Get() (*statsapi.Summary, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to list pod stats: %v", err)
 	}
+	rlimit, err := sp.provider.RlimitStats()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get rlimit stats: %v", err)
+	}
 
 	nodeStats := statsapi.NodeStats{
-		NodeName:  node.Name,
-		CPU:       rootStats.CPU,
-		Memory:    rootStats.Memory,
-		Network:   networkStats,
-		StartTime: rootStats.StartTime,
-		Fs:        rootFsStats,
-		Runtime:   &statsapi.RuntimeStats{ImageFs: imageFsStats},
+		NodeName:         node.Name,
+		CPU:              rootStats.CPU,
+		Memory:           rootStats.Memory,
+		Network:          networkStats,
+		StartTime:        sp.systemBootTime,
+		Fs:               rootFsStats,
+		Runtime:          &statsapi.RuntimeStats{ImageFs: imageFsStats},
+		Rlimit:           rlimit,
+		SystemContainers: sp.GetSystemContainersStats(nodeConfig, podStats, updateStats),
 	}
-
-	systemContainers := map[string]string{
-		statsapi.SystemContainerKubelet: nodeConfig.KubeletCgroupsName,
-		statsapi.SystemContainerRuntime: nodeConfig.RuntimeCgroupsName,
-		statsapi.SystemContainerMisc:    nodeConfig.SystemCgroupsName,
-	}
-	for sys, name := range systemContainers {
-		// skip if cgroup name is undefined (not all system containers are required)
-		if name == "" {
-			continue
-		}
-		s, _, err := sp.provider.GetCgroupStats(name)
-		if err != nil {
-			glog.Errorf("Failed to get system container stats for %q: %v", name, err)
-			continue
-		}
-		// System containers don't have a filesystem associated with them.
-		s.Logs, s.Rootfs = nil, nil
-		s.Name = sys
-		nodeStats.SystemContainers = append(nodeStats.SystemContainers, *s)
-	}
-
 	summary := statsapi.Summary{
 		Node: nodeStats,
 		Pods: podStats,
