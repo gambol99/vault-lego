@@ -112,7 +112,7 @@ func (c *controller) reconcile() error {
 		// a ingress resource updated or created
 		case <-watcherCh:
 			logrus.Debugf("ingress watcher has fired")
-			go c.reconcileIngress()
+			c.reconcileIngress()
 		}
 	}
 }
