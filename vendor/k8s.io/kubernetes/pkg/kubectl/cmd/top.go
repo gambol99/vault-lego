@@ -17,44 +17,55 @@ limitations under the License.
 package cmd
 
 import (
-	"io"
-
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
+	"k8s.io/kubernetes/pkg/kubectl/util/i18n"
+	metricsapi "k8s.io/metrics/pkg/apis/metrics"
 
-	"github.com/renstrom/dedent"
 	"github.com/spf13/cobra"
+	"k8s.io/cli-runtime/pkg/genericclioptions"
+	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 )
-
-// TopOptions contains all the options for running the top cli command.
-type TopOptions struct{}
 
 var (
-	topLong = dedent.Dedent(`
+	supportedMetricsAPIVersions = []string{
+		"v1beta1",
+	}
+	topLong = templates.LongDesc(i18n.T(`
 		Display Resource (CPU/Memory/Storage) usage.
 
-		The top command allows you to see the resource consumption for nodes or pods.`)
+		The top command allows you to see the resource consumption for nodes or pods.
+
+		This command requires Heapster to be correctly configured and working on the server. `))
 )
 
-func NewCmdTop(f *cmdutil.Factory, out io.Writer) *cobra.Command {
-	options := &TopOptions{}
-
+func NewCmdTop(f cmdutil.Factory, streams genericclioptions.IOStreams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "top",
-		Short: "Display Resource (CPU/Memory/Storage) usage",
+		Short: i18n.T("Display Resource (CPU/Memory/Storage) usage."),
 		Long:  topLong,
-		Run: func(cmd *cobra.Command, args []string) {
-			if err := options.RunTop(f, cmd, args, out); err != nil {
-				cmdutil.CheckErr(err)
-			}
-		},
+		Run:   cmdutil.DefaultSubCommandRun(streams.ErrOut),
 	}
 
 	// create subcommands
-	cmd.AddCommand(NewCmdTopNode(f, out))
-	cmd.AddCommand(NewCmdTopPod(f, out))
+	cmd.AddCommand(NewCmdTopNode(f, nil, streams))
+	cmd.AddCommand(NewCmdTopPod(f, nil, streams))
+
 	return cmd
 }
 
-func (o TopOptions) RunTop(f *cmdutil.Factory, cmd *cobra.Command, args []string, out io.Writer) error {
-	return cmd.Help()
+func SupportedMetricsAPIVersionAvailable(discoveredAPIGroups *metav1.APIGroupList) bool {
+	for _, discoveredAPIGroup := range discoveredAPIGroups.Groups {
+		if discoveredAPIGroup.Name != metricsapi.GroupName {
+			continue
+		}
+		for _, version := range discoveredAPIGroup.Versions {
+			for _, supportedVersion := range supportedMetricsAPIVersions {
+				if version.Version == supportedVersion {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }

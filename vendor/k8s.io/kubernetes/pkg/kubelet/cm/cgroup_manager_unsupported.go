@@ -34,7 +34,11 @@ func NewCgroupManager(_ interface{}) CgroupManager {
 	return &unsupportedCgroupManager{}
 }
 
-func (m *unsupportedCgroupManager) Exists(_ string) bool {
+func (m *unsupportedCgroupManager) Name(_ CgroupName) string {
+	return ""
+}
+
+func (m *unsupportedCgroupManager) Exists(_ CgroupName) bool {
 	return false
 }
 
@@ -48,4 +52,46 @@ func (m *unsupportedCgroupManager) Update(_ *CgroupConfig) error {
 
 func (m *unsupportedCgroupManager) Create(_ *CgroupConfig) error {
 	return fmt.Errorf("Cgroup Manager is not supported in this build")
+}
+
+func (m *unsupportedCgroupManager) GetResourceStats(name CgroupName) (*ResourceStats, error) {
+	return nil, fmt.Errorf("Cgroup Manager is not supported in this build")
+}
+
+func (m *unsupportedCgroupManager) Pids(_ CgroupName) []int {
+	return nil
+}
+
+func (m *unsupportedCgroupManager) CgroupName(name string) CgroupName {
+	return CgroupName([]string{})
+}
+
+func (m *unsupportedCgroupManager) ReduceCPULimits(cgroupName CgroupName) error {
+	return nil
+}
+
+var RootCgroupName = CgroupName([]string{})
+
+func NewCgroupName(base CgroupName, components ...string) CgroupName {
+	return CgroupName(append(base, components...))
+}
+
+func (cgroupName CgroupName) ToSystemd() string {
+	return ""
+}
+
+func ParseSystemdToCgroupName(name string) CgroupName {
+	return nil
+}
+
+func (cgroupName CgroupName) ToCgroupfs() string {
+	return ""
+}
+
+func ParseCgroupfsToCgroupName(name string) CgroupName {
+	return nil
+}
+
+func IsSystemdStyleName(name string) bool {
+	return false
 }

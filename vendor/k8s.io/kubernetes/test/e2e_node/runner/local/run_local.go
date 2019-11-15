@@ -18,12 +18,15 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
-	"k8s.io/kubernetes/test/e2e_node/build"
+	"k8s.io/kubernetes/test/e2e_node/builder"
+	"k8s.io/kubernetes/test/e2e_node/system"
+	"k8s.io/kubernetes/test/utils"
 
 	"github.com/golang/glog"
 )
@@ -31,32 +34,46 @@ import (
 var buildDependencies = flag.Bool("build-dependencies", true, "If true, build all dependencies.")
 var ginkgoFlags = flag.String("ginkgo-flags", "", "Space-separated list of arguments to pass to Ginkgo test runner.")
 var testFlags = flag.String("test-flags", "", "Space-separated list of arguments to pass to node e2e test.")
+var systemSpecName = flag.String("system-spec-name", "", fmt.Sprintf("The name of the system spec used for validating the image in the node conformance test. The specs are at %s. If unspecified, the default built-in spec (system.DefaultSpec) will be used.", system.SystemSpecPath))
+var extraEnvs = flag.String("extra-envs", "", "The extra environment variables needed for node e2e tests. Format: a list of key=value pairs, e.g., env1=val1,env2=val2")
 
 func main() {
 	flag.Parse()
 
 	// Build dependencies - ginkgo, kubelet and apiserver.
 	if *buildDependencies {
-		if err := build.BuildGo(); err != nil {
+		if err := builder.BuildGo(); err != nil {
 			glog.Fatalf("Failed to build the dependencies: %v", err)
 		}
 	}
 
 	// Run node e2e test
-	outputDir, err := build.GetK8sBuildOutputDir()
+	outputDir, err := utils.GetK8sBuildOutputDir()
 	if err != nil {
 		glog.Fatalf("Failed to get build output directory: %v", err)
 	}
 	glog.Infof("Got build output dir: %v", outputDir)
 	ginkgo := filepath.Join(outputDir, "ginkgo")
 	test := filepath.Join(outputDir, "e2e_node.test")
-	runCommand(ginkgo, *ginkgoFlags, test, "--", *testFlags)
+
+	args := []string{*ginkgoFlags, test, "--", *testFlags}
+	if *systemSpecName != "" {
+		rootDir, err := utils.GetK8sRootDir()
+		if err != nil {
+			glog.Fatalf("Failed to get k8s root directory: %v", err)
+		}
+		systemSpecFile := filepath.Join(rootDir, system.SystemSpecPath, *systemSpecName+".yaml")
+		args = append(args, fmt.Sprintf("--system-spec-name=%s --system-spec-file=%s --extra-envs=%s", *systemSpecName, systemSpecFile, *extraEnvs))
+	}
+	if err := runCommand(ginkgo, args...); err != nil {
+		glog.Exitf("Test failed: %v", err)
+	}
 	return
 }
 
 func runCommand(name string, args ...string) error {
 	glog.Infof("Running command: %v %v", name, strings.Join(args, " "))
-	cmd := exec.Command("sh", "-c", strings.Join(append([]string{name}, args...), " "))
+	cmd := exec.Command("sudo", "sh", "-c", strings.Join(append([]string{name}, args...), " "))
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()

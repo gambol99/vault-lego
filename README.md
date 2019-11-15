@@ -1,7 +1,5 @@
-[![Build Status](https://travis-ci.org/gambol99/vault-lego.svg?branch=master)](https://travis-ci.org/gambol99/vault-lego)
-[![GoDoc](http://godoc.org/github.com/gambol99/vault-lego?status.png)](http://godoc.org/github.com/gambol99/vault-lego)
-[![Docker Repository on Quay](https://quay.io/repository/gambol99/vault-lego/status "Docker Repository on Quay")](https://quay.io/repository/gambol99/vault-lego)
-[![GitHub version](https://badge.fury.io/gh/gambol99%2Fvault-lego.svg)](https://badge.fury.io/gh/gambol99%2Fvault-lego)
+[![Build Status](https://travis-ci.org/catac/vault-lego.svg?branch=master)](https://travis-ci.org/catac/vault-lego)
+[![GitHub version](https://badge.fury.io/gh/catac%2Fvault-lego.svg)](https://badge.fury.io/gh/catac%2Fvault-lego)
 
 ## **Vault Lego**
 ----
@@ -11,7 +9,7 @@ from a [Vault](https://github.com/hashicorp/vault) PKI backend. The service gath
 
 #### **Usage**
 ```shell
-[jest@starfury vault-lego]$ bin/vault-lego help
+$ ./vault-lego help
 NAME:
    vault-lego - Requests certificates from vault on behalf of ingress resources
 
@@ -19,9 +17,9 @@ USAGE:
    vault-lego [global options] command [command options] [arguments...]
 
 VERSION:
-   v0.0.1 (git+sha: d7f8409-dirty)
+   v0.0.10 (git+sha: no gitsha provided)
 
-AUTHOR(S):
+AUTHOR:
    Rohith Jayawardene
 
 COMMANDS:
@@ -31,11 +29,12 @@ GLOBAL OPTIONS:
    --host HOST, -H HOST                 the url for the vault service i.e. https://vault.vault.svc.cluster.local HOST [$VAULT_ADDR]
    --token TOKEN, -t TOKEN              the vault token to use when requesting a certificate TOKEN [$VAULT_TOKEN]
    --default-path PATH, -p PATH         the default vault path the pki exists on, e.g. pki/default/issue PATH (default: "pki/issue/default") [$VAULT_PKI_PATH]
-   --kubeconfig PATH                    the path to a kubectl configuration file PATH (default: "/home/jest/.kube/config") [$KUBE_CONFIG]
+   --kubeconfig PATH                    the path to a kubectl configuration file PATH (default: "/Users/catac/.kube/config") [$KUBE_CONFIG]
    --kube-context CONTEXT               the kubernetes context inside the kubeconfig file CONTEXT [$KUBE_CONTEXT]
    --namespace NAMESPACE, -n NAMESPACE  the namespace the service should be looking, by default all NAMESPACE [$KUBE_NAMESPACE]
    --default-ttl TTL                    the default time-to-live of the certificate (can override by annontation) TTL (default: 48h0m0s) [$VAULT_PKI_TTL]
-   --minimum-ttl value                  the minimum time-to-live on the certificate, ingress cannot request less then this (default: 24h0m0s) [$VAUILT_PKI_MIN_TTL]
+   --minimum-ttl value                  the minimum time-to-live on the certificate, ingress cannot request less then this (default: 24h0m0s) [$VAULT_PKI_MIN_TTL]
+   --refresh-ttl value                  refresh certificates when time-to-live goes below this threshold (default: 6h0m0s) [$VAULT_PKI_REFRESH_TTL]
    --json-logging                       whether to enable default json logging format, defaults to true
    --reconcilation-interval TTL         the interval between forced reconciliation events TTL (default: 5m0s) [$RECONCILCATION_INTERVAL]
    --verbose                            switch on verbose logging
@@ -93,7 +92,8 @@ spec:
     spec:
       containers:
       - name: vault-lego
-        image: quay.io/gambol99/vault-lego:latest
+        image: catac/vault-lego:latest
+        imagePullPolicy: Always
         resources:
           limits:
             cpu: 100m
@@ -133,4 +133,14 @@ spec:
   - hosts:
     - site.example.com
     secretName: tls
+```
+
+#### **Example Vault setup**
+
+```bash
+vault mount pki
+vault mount-tune -max-lease-ttl=8760h pki
+vault write pki/root/generate/internal common_name="My Vault ROOT" ttl=8760h
+vault write pki/roles/default allow_any_name=true max_ttl="720h"
+
 ```

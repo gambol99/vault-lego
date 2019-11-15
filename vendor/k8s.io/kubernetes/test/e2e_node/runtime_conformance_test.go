@@ -18,157 +18,25 @@ package e2e_node
 
 import (
 	"fmt"
-	"path"
+	"io/ioutil"
+	"os"
+	"path/filepath"
 	"time"
 
-	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/api/core/v1"
 	"k8s.io/kubernetes/pkg/kubelet/images"
-	"k8s.io/kubernetes/pkg/util/uuid"
+	"k8s.io/kubernetes/test/e2e/common"
 	"k8s.io/kubernetes/test/e2e/framework"
+	"k8s.io/kubernetes/test/e2e_node/services"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
-)
-
-const (
-	consistentCheckTimeout = time.Second * 5
-	retryTimeout           = time.Minute * 5
-	pollInterval           = time.Second * 1
 )
 
 var _ = framework.KubeDescribe("Container Runtime Conformance Test", func() {
 	f := framework.NewDefaultFramework("runtime-conformance")
 
 	Describe("container runtime conformance blackbox test", func() {
-		Context("when starting a container that exits", func() {
-			It("it should run with the expected status [Conformance]", func() {
-				restartCountVolumeName := "restart-count"
-				restartCountVolumePath := "/restart-count"
-				testContainer := api.Container{
-					Image: "gcr.io/google_containers/busybox:1.24",
-					VolumeMounts: []api.VolumeMount{
-						{
-							MountPath: restartCountVolumePath,
-							Name:      restartCountVolumeName,
-						},
-					},
-				}
-				testVolumes := []api.Volume{
-					{
-						Name: restartCountVolumeName,
-						VolumeSource: api.VolumeSource{
-							EmptyDir: &api.EmptyDirVolumeSource{Medium: api.StorageMediumMemory},
-						},
-					},
-				}
-				testCases := []struct {
-					Name          string
-					RestartPolicy api.RestartPolicy
-					Phase         api.PodPhase
-					State         ContainerState
-					RestartCount  int32
-					Ready         bool
-				}{
-					{"terminate-cmd-rpa", api.RestartPolicyAlways, api.PodRunning, ContainerStateRunning, 2, true},
-					{"terminate-cmd-rpof", api.RestartPolicyOnFailure, api.PodSucceeded, ContainerStateTerminated, 1, false},
-					{"terminate-cmd-rpn", api.RestartPolicyNever, api.PodFailed, ContainerStateTerminated, 0, false},
-				}
-				for _, testCase := range testCases {
-
-					// It failed at the 1st run, then succeeded at 2nd run, then run forever
-					cmdScripts := `
-f=%s
-count=$(echo 'hello' >> $f ; wc -l $f | awk {'print $1'})
-if [ $count -eq 1 ]; then
-	exit 1
-fi
-if [ $count -eq 2 ]; then
-	exit 0
-fi
-while true; do sleep 1; done
-`
-					tmpCmd := fmt.Sprintf(cmdScripts, path.Join(restartCountVolumePath, "restartCount"))
-					testContainer.Name = testCase.Name
-					testContainer.Command = []string{"sh", "-c", tmpCmd}
-					terminateContainer := ConformanceContainer{
-						PodClient:     f.PodClient(),
-						Container:     testContainer,
-						RestartPolicy: testCase.RestartPolicy,
-						Volumes:       testVolumes,
-						PodSecurityContext: &api.PodSecurityContext{
-							SELinuxOptions: &api.SELinuxOptions{
-								Level: "s0",
-							},
-						},
-					}
-					terminateContainer.Create()
-					defer terminateContainer.Delete()
-
-					By("it should get the expected 'RestartCount'")
-					Eventually(func() (int32, error) {
-						status, err := terminateContainer.GetStatus()
-						return status.RestartCount, err
-					}, retryTimeout, pollInterval).Should(Equal(testCase.RestartCount))
-
-					By("it should get the expected 'Phase'")
-					Eventually(terminateContainer.GetPhase, retryTimeout, pollInterval).Should(Equal(testCase.Phase))
-
-					By("it should get the expected 'Ready' condition")
-					Expect(terminateContainer.IsReady()).Should(Equal(testCase.Ready))
-
-					status, err := terminateContainer.GetStatus()
-					Expect(err).ShouldNot(HaveOccurred())
-
-					By("it should get the expected 'State'")
-					Expect(GetContainerState(status.State)).To(Equal(testCase.State))
-
-					By("it should be possible to delete [Conformance]")
-					Expect(terminateContainer.Delete()).To(Succeed())
-					Eventually(terminateContainer.Present, retryTimeout, pollInterval).Should(BeFalse())
-				}
-			})
-
-			It("should report termination message if TerminationMessagePath is set [Conformance]", func() {
-				name := "termination-message-container"
-				terminationMessage := "DONE"
-				terminationMessagePath := "/dev/termination-log"
-				priv := true
-				c := ConformanceContainer{
-					PodClient: f.PodClient(),
-					Container: api.Container{
-						Image:   "gcr.io/google_containers/busybox:1.24",
-						Name:    name,
-						Command: []string{"/bin/sh", "-c"},
-						Args:    []string{fmt.Sprintf("/bin/echo -n %s > %s", terminationMessage, terminationMessagePath)},
-						TerminationMessagePath: terminationMessagePath,
-						SecurityContext: &api.SecurityContext{
-							Privileged: &priv,
-						},
-					},
-					RestartPolicy: api.RestartPolicyNever,
-				}
-
-				By("create the container")
-				c.Create()
-				defer c.Delete()
-
-				By("wait for the container to succeed")
-				Eventually(c.GetPhase, retryTimeout, pollInterval).Should(Equal(api.PodSucceeded))
-
-				By("get the container status")
-				status, err := c.GetStatus()
-				Expect(err).NotTo(HaveOccurred())
-
-				By("the container should be terminated")
-				Expect(GetContainerState(status.State)).To(Equal(ContainerStateTerminated))
-
-				By("the termination message should be set")
-				Expect(status.State.Terminated.Message).Should(Equal(terminationMessage))
-
-				By("delete the container")
-				Expect(c.Delete()).To(Succeed())
-			})
-		})
 
 		Context("when running a container with a new image", func() {
 			// The service account only has pull permission
@@ -181,81 +49,43 @@ while true; do sleep 1; done
 		}
 	}
 }`
-			secret := &api.Secret{
-				Data: map[string][]byte{api.DockerConfigJsonKey: []byte(auth)},
-				Type: api.SecretTypeDockerConfigJson,
-			}
 			// The following images are not added into NodeImageWhiteList, because this test is
 			// testing image pulling, these images don't need to be prepulled. The ImagePullPolicy
-			// is api.PullAlways, so it won't be blocked by framework image white list check.
+			// is v1.PullAlways, so it won't be blocked by framework image white list check.
 			for _, testCase := range []struct {
 				description string
 				image       string
-				secret      bool
-				phase       api.PodPhase
+				phase       v1.PodPhase
 				waiting     bool
 			}{
 				{
-					description: "should not be able to pull image from invalid registry",
-					image:       "invalid.com/invalid/alpine:3.1",
-					phase:       api.PodPending,
-					waiting:     true,
-				},
-				{
-					description: "should not be able to pull non-existing image from gcr.io",
-					image:       "gcr.io/google_containers/invalid-image:invalid-tag",
-					phase:       api.PodPending,
-					waiting:     true,
-				},
-				{
-					description: "should be able to pull image from gcr.io",
-					image:       "gcr.io/google_containers/alpine-with-bash:1.0",
-					phase:       api.PodRunning,
-					waiting:     false,
-				},
-				{
-					description: "should be able to pull image from docker hub",
-					image:       "alpine:3.1",
-					phase:       api.PodRunning,
-					waiting:     false,
-				},
-				{
-					description: "should not be able to pull from private registry without secret",
+					description: "should be able to pull from private registry with credential provider",
 					image:       "gcr.io/authenticated-image-pulling/alpine:3.1",
-					phase:       api.PodPending,
-					waiting:     true,
-				},
-				{
-					description: "should be able to pull from private registry with secret",
-					image:       "gcr.io/authenticated-image-pulling/alpine:3.1",
-					secret:      true,
-					phase:       api.PodRunning,
+					phase:       v1.PodRunning,
 					waiting:     false,
 				},
 			} {
 				testCase := testCase
-				It(testCase.description, func() {
+				It(testCase.description+" [NodeConformance]", func() {
 					name := "image-pull-test"
 					command := []string{"/bin/sh", "-c", "while true; do sleep 1; done"}
-					container := ConformanceContainer{
+					container := common.ConformanceContainer{
 						PodClient: f.PodClient(),
-						Container: api.Container{
+						Container: v1.Container{
 							Name:    name,
 							Image:   testCase.image,
 							Command: command,
 							// PullAlways makes sure that the image will always be pulled even if it is present before the test.
-							ImagePullPolicy: api.PullAlways,
+							ImagePullPolicy: v1.PullAlways,
 						},
-						RestartPolicy: api.RestartPolicyNever,
+						RestartPolicy: v1.RestartPolicyNever,
 					}
-					if testCase.secret {
-						secret.Name = "image-pull-secret-" + string(uuid.NewUUID())
-						By("create image pull secret")
-						_, err := f.Client.Secrets(f.Namespace.Name).Create(secret)
-						Expect(err).NotTo(HaveOccurred())
-						defer f.Client.Secrets(f.Namespace.Name).Delete(secret.Name)
-						container.ImagePullSecrets = []string{secret.Name}
-					}
+
+					configFile := filepath.Join(services.KubeletRootDirectory, "config.json")
+					err := ioutil.WriteFile(configFile, []byte(auth), 0644)
+					Expect(err).NotTo(HaveOccurred())
+					defer os.Remove(configFile)
+
 					// checkContainerStatus checks whether the container status matches expectation.
 					checkContainerStatus := func() error {
 						status, err := container.GetStatus()
@@ -269,13 +99,13 @@ while true; do sleep 1; done
 						if !testCase.waiting {
 							if status.State.Running == nil {
 								return fmt.Errorf("expected container state: Running, got: %q",
-									GetContainerState(status.State))
+									common.GetContainerState(status.State))
 							}
 						}
 						if testCase.waiting {
 							if status.State.Waiting == nil {
 								return fmt.Errorf("expected container state: Waiting, got: %q",
-									GetContainerState(status.State))
+									common.GetContainerState(status.State))
 							}
 							reason := status.State.Waiting.Reason
 							if reason != images.ErrImagePull.Error() &&
@@ -301,7 +131,7 @@ while true; do sleep 1; done
 						By("create the container")
 						container.Create()
 						By("check the container status")
-						for start := time.Now(); time.Since(start) < retryTimeout; time.Sleep(pollInterval) {
+						for start := time.Now(); time.Since(start) < common.ContainerStatusRetryTimeout; time.Sleep(common.ContainerStatusPollInterval) {
 							if err = checkContainerStatus(); err == nil {
 								break
 							}

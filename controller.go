@@ -24,8 +24,8 @@ import (
 
 	"github.com/Sirupsen/logrus"
 	"github.com/hashicorp/vault/api"
-	client "k8s.io/kubernetes/pkg/client/unversioned"
-	"k8s.io/kubernetes/pkg/util/flowcontrol"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/util/flowcontrol"
 )
 
 // controller is the handler for requests and renewals
@@ -35,7 +35,7 @@ type controller struct {
 	// the vault client
 	vc *api.Client
 	// kubernetes client
-	kc *client.Client
+	kc *kubernetes.Clientset
 	// the current list of ingress resources
 	resources atomic.Value
 	// the reconcile rate limiter
@@ -87,7 +87,13 @@ func isValidConfig(config *Config) error {
 		return errors.New("no vault token")
 	}
 	if config.minCertTTL > config.defaultCertTTL {
-		return errors.New("minimum certificate ttl cannot be greater then default")
+		return errors.New("minimum certificate ttl cannot be greater than default")
+	}
+	if config.refreshCertTTL < 6*time.Hour {
+		return errors.New("refresh certificate ttl cannot be lower than 6h")
+	}
+	if config.refreshCertTTL > config.minCertTTL-6*time.Hour {
+		return errors.New("refresh certificate ttl cannot be greater than the minimum-ttl - 6h")
 	}
 
 	return nil
@@ -95,25 +101,18 @@ func isValidConfig(config *Config) error {
 
 // reconcile is the main reconcilation method
 func (c *controller) reconcile() error {
-	// step: create a ticker for reconcilation
-	ticker := time.NewTicker(c.config.reconcileTTL)
-
 	// step: create a watch of the ingress resources
-	watcherCh, _ := c.createIngressWatcher()
+	watcherCh, _ := c.createIngressWatcher(c.config.reconcileTTL)
 
 	// step: setup the ratelimiter for ingress
 	c.rate = flowcontrol.NewTokenBucketRateLimiter(0.1, 1)
 
 	for {
 		select {
-		// a time interval for checking config
-		case <-ticker.C:
-			logrus.Debugf("reconcilation ticker has fired")
-			go c.reconcileIngress()
 		// a ingress resource updated or created
 		case <-watcherCh:
-			logrus.Debugf("a change to ingress has occured")
-			go c.reconcileIngress()
+			logrus.Debugf("ingress watcher has fired")
+			c.reconcileIngress()
 		}
 	}
 }

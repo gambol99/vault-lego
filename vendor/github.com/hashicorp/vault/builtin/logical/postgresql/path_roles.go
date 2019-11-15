@@ -1,6 +1,7 @@
 package postgresql
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -37,8 +38,11 @@ func pathRoles(b *backend) *framework.Path {
 			},
 
 			"revocation_sql": {
-				Type:        framework.TypeString,
-				Description: "SQL string to revoke a user. This is in beta; use with caution.",
+				Type: framework.TypeString,
+				Description: `SQL statements to be executed to revoke a user. Must be a semicolon-separated
+string, a base64-encoded semicolon-separated string, a serialized JSON string
+array, or a base64-encoded serialized JSON string array. The '{{name}}' value
+will be substituted.`,
 			},
 		},
 
@@ -53,8 +57,8 @@ func pathRoles(b *backend) *framework.Path {
 	}
 }
 
-func (b *backend) Role(s logical.Storage, n string) (*roleEntry, error) {
-	entry, err := s.Get("role/" + n)
+func (b *backend) Role(ctx context.Context, s logical.Storage, n string) (*roleEntry, error) {
+	entry, err := s.Get(ctx, "role/"+n)
 	if err != nil {
 		return nil, err
 	}
@@ -70,9 +74,8 @@ func (b *backend) Role(s logical.Storage, n string) (*roleEntry, error) {
 	return &result, nil
 }
 
-func (b *backend) pathRoleDelete(
-	req *logical.Request, data *framework.FieldData) (*logical.Response, error) {
-	err := req.Storage.Delete("role/" + data.Get("name").(string))
+func (b *backend) pathRoleDelete(ctx context.Context, req *logical.Request, data *framework.FieldData) (*logical.Response, error) {
+	err := req.Storage.Delete(ctx, "role/"+data.Get("name").(string))
 	if err != nil {
 		return nil, err
 	}
@@ -80,9 +83,8 @@ func (b *backend) pathRoleDelete(
 	return nil, nil
 }
 
-func (b *backend) pathRoleRead(
-	req *logical.Request, data *framework.FieldData) (*logical.Response, error) {
-	role, err := b.Role(req.Storage, data.Get("name").(string))
+func (b *backend) pathRoleRead(ctx context.Context, req *logical.Request, data *framework.FieldData) (*logical.Response, error) {
+	role, err := b.Role(ctx, req.Storage, data.Get("name").(string))
 	if err != nil {
 		return nil, err
 	}
@@ -90,24 +92,16 @@ func (b *backend) pathRoleRead(
 		return nil, nil
 	}
 
-	resp := &logical.Response{
+	return &logical.Response{
 		Data: map[string]interface{}{
-			"sql": role.SQL,
+			"sql":            role.SQL,
+			"revocation_sql": role.RevocationSQL,
 		},
-	}
-
-	// TODO: This is separate because this is in beta in 0.6.2, so we don't
-	// want it to show up in the general case.
-	if role.RevocationSQL != "" {
-		resp.Data["revocation_sql"] = role.RevocationSQL
-	}
-
-	return resp, nil
+	}, nil
 }
 
-func (b *backend) pathRoleList(
-	req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
-	entries, err := req.Storage.List("role/")
+func (b *backend) pathRoleList(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
+	entries, err := req.Storage.List(ctx, "role/")
 	if err != nil {
 		return nil, err
 	}
@@ -115,13 +109,12 @@ func (b *backend) pathRoleList(
 	return logical.ListResponse(entries), nil
 }
 
-func (b *backend) pathRoleCreate(
-	req *logical.Request, data *framework.FieldData) (*logical.Response, error) {
+func (b *backend) pathRoleCreate(ctx context.Context, req *logical.Request, data *framework.FieldData) (*logical.Response, error) {
 	name := data.Get("name").(string)
 	sql := data.Get("sql").(string)
 
 	// Get our connection
-	db, err := b.DB(req.Storage)
+	db, err := b.DB(ctx, req.Storage)
 	if err != nil {
 		return nil, err
 	}
@@ -153,7 +146,7 @@ func (b *backend) pathRoleCreate(
 	if err != nil {
 		return nil, err
 	}
-	if err := req.Storage.Put(entry); err != nil {
+	if err := req.Storage.Put(ctx, entry); err != nil {
 		return nil, err
 	}
 
@@ -193,4 +186,12 @@ Example of a decent SQL query to use:
 
 Note the above user would be able to access everything in schema public.
 For more complex GRANT clauses, see the PostgreSQL manual.
+
+The "revocation_sql" parameter customizes the SQL string used to revoke a user.
+Example of a decent revocation SQL query to use:
+
+	REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM {{name}};
+	REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM {{name}};
+	REVOKE USAGE ON SCHEMA public FROM {{name}};
+	DROP ROLE IF EXISTS {{name}};
 `

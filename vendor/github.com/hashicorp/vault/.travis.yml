@@ -1,4 +1,5 @@
 sudo: required
+dist: trusty
 
 language: go
 
@@ -6,7 +7,7 @@ services:
   - docker
 
 go:
-  - 1.7
+  - "1.9"
 
 matrix:
   allow_failures:
@@ -18,4 +19,6 @@ branches:
     - travis-testing
 
 script:
-  - make test testrace
+  - make bootstrap
+  - travis_wait 75 make test
+  - travis_wait 75 make testrace

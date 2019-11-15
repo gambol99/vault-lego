@@ -17,80 +17,57 @@ limitations under the License.
 package serviceaccount
 
 import (
-	"fmt"
-	"strings"
-
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/validation"
-	"k8s.io/kubernetes/pkg/auth/user"
+	"k8s.io/api/core/v1"
+	apiserverserviceaccount "k8s.io/apiserver/pkg/authentication/serviceaccount"
+	"k8s.io/apiserver/pkg/authentication/user"
 )
 
 const (
-	ServiceAccountUsernamePrefix    = "system:serviceaccount:"
-	ServiceAccountUsernameSeparator = ":"
-	ServiceAccountGroupPrefix       = "system:serviceaccounts:"
-	AllServiceAccountsGroup         = "system:serviceaccounts"
+	// PodNameKey is the key used in a user's "extra" to specify the pod name of
+	// the authenticating request.
+	PodNameKey = "authentication.kubernetes.io/pod-name"
+	// PodUIDKey is the key used in a user's "extra" to specify the pod UID of
+	// the authenticating request.
+	PodUIDKey = "authentication.kubernetes.io/pod-uid"
 )
-
-// MakeUsername generates a username from the given namespace and ServiceAccount name.
-// The resulting username can be passed to SplitUsername to extract the original namespace and ServiceAccount name.
-func MakeUsername(namespace, name string) string {
-	return ServiceAccountUsernamePrefix + namespace + ServiceAccountUsernameSeparator + name
-}
-
-var invalidUsernameErr = fmt.Errorf("Username must be in the form %s", MakeUsername("namespace", "name"))
-
-// SplitUsername returns the namespace and ServiceAccount name embedded in the given username,
-// or an error if the username is not a valid name produced by MakeUsername
-func SplitUsername(username string) (string, string, error) {
-	if !strings.HasPrefix(username, ServiceAccountUsernamePrefix) {
-		return "", "", invalidUsernameErr
-	}
-	trimmed := strings.TrimPrefix(username, ServiceAccountUsernamePrefix)
-	parts := strings.Split(trimmed, ServiceAccountUsernameSeparator)
-	if len(parts) != 2 {
-		return "", "", invalidUsernameErr
-	}
-	namespace, name := parts[0], parts[1]
-	if len(validation.ValidateNamespaceName(namespace, false)) != 0 {
-		return "", "", invalidUsernameErr
-	}
-	if len(validation.ValidateServiceAccountName(name, false)) != 0 {
-		return "", "", invalidUsernameErr
-	}
-	return namespace, name, nil
-}
-
-// MakeGroupNames generates service account group names for the given namespace and ServiceAccount name
-func MakeGroupNames(namespace, name string) []string {
-	return []string{
-		AllServiceAccountsGroup,
-		MakeNamespaceGroupName(namespace),
-	}
-}
-
-// MakeNamespaceGroupName returns the name of the group all service accounts in the namespace are included in
-func MakeNamespaceGroupName(namespace string) string {
-	return ServiceAccountGroupPrefix + namespace
-}
 
 // UserInfo returns a user.Info interface for the given namespace, service account name and UID
 func UserInfo(namespace, name, uid string) user.Info {
-	return &user.DefaultInfo{
-		Name:   MakeUsername(namespace, name),
-		UID:    uid,
-		Groups: MakeGroupNames(namespace, name),
+	return (&ServiceAccountInfo{
+		Name:      name,
+		Namespace: namespace,
+		UID:       uid,
+	}).UserInfo()
+}
+
+type ServiceAccountInfo struct {
+	Name, Namespace, UID string
+	PodName, PodUID      string
+}
+
+func (sa *ServiceAccountInfo) UserInfo() user.Info {
+	info := &user.DefaultInfo{
+		Name:   apiserverserviceaccount.MakeUsername(sa.Namespace, sa.Name),
+		UID:    sa.UID,
+		Groups: apiserverserviceaccount.MakeGroupNames(sa.Namespace),
 	}
+	if sa.PodName != "" && sa.PodUID != "" {
+		info.Extra = map[string][]string{
+			PodNameKey: {sa.PodName},
+			PodUIDKey:  {sa.PodUID},
+		}
+	}
+	return info
 }
 
 // IsServiceAccountToken returns true if the secret is a valid api token for the service account
-func IsServiceAccountToken(secret *api.Secret, sa *api.ServiceAccount) bool {
-	if secret.Type != api.SecretTypeServiceAccountToken {
+func IsServiceAccountToken(secret *v1.Secret, sa *v1.ServiceAccount) bool {
+	if secret.Type != v1.SecretTypeServiceAccountToken {
 		return false
 	}
 
-	name := secret.Annotations[api.ServiceAccountNameKey]
-	uid := secret.Annotations[api.ServiceAccountUIDKey]
+	name := secret.Annotations[v1.ServiceAccountNameKey]
+	uid := secret.Annotations[v1.ServiceAccountUIDKey]
 	if name != sa.Name {
 		// Name must match
 		return false

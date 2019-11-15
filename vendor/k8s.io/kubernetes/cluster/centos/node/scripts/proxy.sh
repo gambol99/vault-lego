@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Copyright 2014 The Kubernetes Authors.
 #
@@ -53,4 +53,4 @@ EOF
 
 systemctl daemon-reload
 systemctl enable kube-proxy
-systemctl start kube-proxy
+systemctl restart kube-proxy

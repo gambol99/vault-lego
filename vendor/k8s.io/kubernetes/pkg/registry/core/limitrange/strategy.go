@@ -17,42 +17,41 @@ limitations under the License.
 package limitrange
 
 import (
-	"fmt"
+	"context"
 
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/validation"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
-	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/storage"
-	"k8s.io/kubernetes/pkg/util/uuid"
-	"k8s.io/kubernetes/pkg/util/validation/field"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/uuid"
+	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/apiserver/pkg/storage/names"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
+	api "k8s.io/kubernetes/pkg/apis/core"
+	"k8s.io/kubernetes/pkg/apis/core/validation"
 )
 
 type limitrangeStrategy struct {
 	runtime.ObjectTyper
-	api.NameGenerator
+	names.NameGenerator
 }
 
 // Strategy is the default logic that applies when creating and updating
 // LimitRange objects via the REST API.
-var Strategy = limitrangeStrategy{api.Scheme, api.SimpleNameGenerator}
+var Strategy = limitrangeStrategy{legacyscheme.Scheme, names.SimpleNameGenerator}
 
 func (limitrangeStrategy) NamespaceScoped() bool {
 	return true
 }
 
-func (limitrangeStrategy) PrepareForCreate(ctx api.Context, obj runtime.Object) {
+func (limitrangeStrategy) PrepareForCreate(ctx context.Context, obj runtime.Object) {
 	limitRange := obj.(*api.LimitRange)
 	if len(limitRange.Name) == 0 {
 		limitRange.Name = string(uuid.NewUUID())
 	}
 }
 
-func (limitrangeStrategy) PrepareForUpdate(ctx api.Context, obj, old runtime.Object) {
+func (limitrangeStrategy) PrepareForUpdate(ctx context.Context, obj, old runtime.Object) {
 }
 
-func (limitrangeStrategy) Validate(ctx api.Context, obj runtime.Object) field.ErrorList {
+func (limitrangeStrategy) Validate(ctx context.Context, obj runtime.Object) field.ErrorList {
 	limitRange := obj.(*api.LimitRange)
 	return validation.ValidateLimitRange(limitRange)
 }
@@ -65,7 +64,7 @@ func (limitrangeStrategy) AllowCreateOnUpdate() bool {
 	return true
 }
 
-func (limitrangeStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) field.ErrorList {
+func (limitrangeStrategy) ValidateUpdate(ctx context.Context, obj, old runtime.Object) field.ErrorList {
 	limitRange := obj.(*api.LimitRange)
 	return validation.ValidateLimitRange(limitRange)
 }
@@ -74,27 +73,9 @@ func (limitrangeStrategy) AllowUnconditionalUpdate() bool {
 	return true
 }
 
-func LimitRangeToSelectableFields(limitRange *api.LimitRange) fields.Set {
-	return nil
-}
-
-func (limitrangeStrategy) Export(api.Context, runtime.Object, bool) error {
+func (limitrangeStrategy) Export(context.Context, runtime.Object, bool) error {
 	// Copied from OpenShift exporter
 	// TODO: this needs to be fixed
 	//  limitrange.Strategy.PrepareForCreate(ctx, obj)
 	return nil
-}
-
-func MatchLimitRange(label labels.Selector, field fields.Selector) storage.SelectionPredicate {
-	return storage.SelectionPredicate{
-		Label: label,
-		Field: field,
-		GetAttrs: func(obj runtime.Object) (labels.Set, fields.Set, error) {
-			lr, ok := obj.(*api.LimitRange)
-			if !ok {
-				return nil, nil, fmt.Errorf("given object is not a limit range.")
-			}
-			return labels.Set(lr.ObjectMeta.Labels), LimitRangeToSelectableFields(lr), nil
-		},
-	}
 }

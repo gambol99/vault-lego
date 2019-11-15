@@ -17,9 +17,10 @@ limitations under the License.
 package apps
 
 import (
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/unversioned"
-	"k8s.io/kubernetes/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/kubernetes/pkg/apis/autoscaling"
+	"k8s.io/kubernetes/pkg/apis/extensions"
 )
 
 var (
@@ -31,26 +32,34 @@ var (
 const GroupName = "apps"
 
 // SchemeGroupVersion is group version used to register these objects
-var SchemeGroupVersion = unversioned.GroupVersion{Group: GroupName, Version: runtime.APIVersionInternal}
+var SchemeGroupVersion = schema.GroupVersion{Group: GroupName, Version: runtime.APIVersionInternal}
 
 // Kind takes an unqualified kind and returns a Group qualified GroupKind
-func Kind(kind string) unversioned.GroupKind {
+func Kind(kind string) schema.GroupKind {
 	return SchemeGroupVersion.WithKind(kind).GroupKind()
 }
 
 // Resource takes an unqualified resource and returns a Group qualified GroupResource
-func Resource(resource string) unversioned.GroupResource {
+func Resource(resource string) schema.GroupResource {
 	return SchemeGroupVersion.WithResource(resource).GroupResource()
 }
 
-// Adds the list of known types to api.Scheme.
+// Adds the list of known types to the given scheme.
 func addKnownTypes(scheme *runtime.Scheme) error {
 	// TODO this will get cleaned up with the scheme types are fixed
 	scheme.AddKnownTypes(SchemeGroupVersion,
-		&PetSet{},
-		&PetSetList{},
-		&api.ListOptions{},
-		&api.DeleteOptions{},
+		&extensions.DaemonSet{},
+		&extensions.DaemonSetList{},
+		&extensions.Deployment{},
+		&extensions.DeploymentList{},
+		&extensions.DeploymentRollback{},
+		&autoscaling.Scale{},
+		&StatefulSet{},
+		&StatefulSetList{},
+		&ControllerRevision{},
+		&ControllerRevisionList{},
+		&extensions.ReplicaSet{},
+		&extensions.ReplicaSetList{},
 	)
 	return nil
 }

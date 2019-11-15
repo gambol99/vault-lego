@@ -19,14 +19,15 @@ package abac
 import (
 	"io/ioutil"
 	"os"
+	"reflect"
 	"testing"
 
-	api "k8s.io/kubernetes/pkg/apis/abac"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apiserver/pkg/authentication/user"
+	"k8s.io/apiserver/pkg/authorization/authorizer"
+	"k8s.io/kubernetes/pkg/apis/abac"
 	"k8s.io/kubernetes/pkg/apis/abac/v0"
 	"k8s.io/kubernetes/pkg/apis/abac/v1beta1"
-	"k8s.io/kubernetes/pkg/auth/authorizer"
-	"k8s.io/kubernetes/pkg/auth/user"
-	"k8s.io/kubernetes/pkg/runtime"
 )
 
 func TestEmptyFile(t *testing.T) {
@@ -73,51 +74,53 @@ func TestAuthorizeV0(t *testing.T) {
 		t.Fatalf("unable to read policy file: %v", err)
 	}
 
-	uScheduler := user.DefaultInfo{Name: "scheduler", UID: "uid1"}
-	uAlice := user.DefaultInfo{Name: "alice", UID: "uid3"}
-	uChuck := user.DefaultInfo{Name: "chuck", UID: "uid5"}
+	authenticatedGroup := []string{user.AllAuthenticated}
+
+	uScheduler := user.DefaultInfo{Name: "scheduler", UID: "uid1", Groups: authenticatedGroup}
+	uAlice := user.DefaultInfo{Name: "alice", UID: "uid3", Groups: authenticatedGroup}
+	uChuck := user.DefaultInfo{Name: "chuck", UID: "uid5", Groups: authenticatedGroup}
 
 	testCases := []struct {
-		User        user.DefaultInfo
-		Verb        string
-		Resource    string
-		NS          string
-		APIGroup    string
-		Path        string
-		ExpectAllow bool
+		User           user.DefaultInfo
+		Verb           string
+		Resource       string
+		NS             string
+		APIGroup       string
+		Path           string
+		ExpectDecision authorizer.Decision
 	}{
 		// Scheduler can read pods
-		{User: uScheduler, Verb: "list", Resource: "pods", NS: "ns1", ExpectAllow: true},
-		{User: uScheduler, Verb: "list", Resource: "pods", NS: "", ExpectAllow: true},
+		{User: uScheduler, Verb: "list", Resource: "pods", NS: "ns1", ExpectDecision: authorizer.DecisionAllow},
+		{User: uScheduler, Verb: "list", Resource: "pods", NS: "", ExpectDecision: authorizer.DecisionAllow},
 		// Scheduler cannot write pods
-		{User: uScheduler, Verb: "create", Resource: "pods", NS: "ns1", ExpectAllow: false},
-		{User: uScheduler, Verb: "create", Resource: "pods", NS: "", ExpectAllow: false},
+		{User: uScheduler, Verb: "create", Resource: "pods", NS: "ns1", ExpectDecision: authorizer.DecisionNoOpinion},
+		{User: uScheduler, Verb: "create", Resource: "pods", NS: "", ExpectDecision: authorizer.DecisionNoOpinion},
 		// Scheduler can write bindings
-		{User: uScheduler, Verb: "get", Resource: "bindings", NS: "ns1", ExpectAllow: true},
-		{User: uScheduler, Verb: "get", Resource: "bindings", NS: "", ExpectAllow: true},
+		{User: uScheduler, Verb: "get", Resource: "bindings", NS: "ns1", ExpectDecision: authorizer.DecisionAllow},
+		{User: uScheduler, Verb: "get", Resource: "bindings", NS: "", ExpectDecision: authorizer.DecisionAllow},
 
 		// Alice can read and write anything in the right namespace.
-		{User: uAlice, Verb: "get", Resource: "pods", NS: "projectCaribou", ExpectAllow: true},
-		{User: uAlice, Verb: "get", Resource: "widgets", NS: "projectCaribou", ExpectAllow: true},
-		{User: uAlice, Verb: "get", Resource: "", NS: "projectCaribou", ExpectAllow: true},
-		{User: uAlice, Verb: "update", Resource: "pods", NS: "projectCaribou", ExpectAllow: true},
-		{User: uAlice, Verb: "update", Resource: "widgets", NS: "projectCaribou", ExpectAllow: true},
-		{User: uAlice, Verb: "update", Resource: "", NS: "projectCaribou", ExpectAllow: true},
-		{User: uAlice, Verb: "update", Resource: "foo", NS: "projectCaribou", APIGroup: "bar", ExpectAllow: true},
+		{User: uAlice, Verb: "get", Resource: "pods", NS: "projectCaribou", ExpectDecision: authorizer.DecisionAllow},
+		{User: uAlice, Verb: "get", Resource: "widgets", NS: "projectCaribou", ExpectDecision: authorizer.DecisionAllow},
+		{User: uAlice, Verb: "get", Resource: "", NS: "projectCaribou", ExpectDecision: authorizer.DecisionAllow},
+		{User: uAlice, Verb: "update", Resource: "pods", NS: "projectCaribou", ExpectDecision: authorizer.DecisionAllow},
+		{User: uAlice, Verb: "update", Resource: "widgets", NS: "projectCaribou", ExpectDecision: authorizer.DecisionAllow},
+		{User: uAlice, Verb: "update", Resource: "", NS: "projectCaribou", ExpectDecision: authorizer.DecisionAllow},
+		{User: uAlice, Verb: "update", Resource: "foo", NS: "projectCaribou", APIGroup: "bar", ExpectDecision: authorizer.DecisionAllow},
 		// .. but not the wrong namespace.
-		{User: uAlice, Verb: "get", Resource: "pods", NS: "ns1", ExpectAllow: false},
-		{User: uAlice, Verb: "get", Resource: "widgets", NS: "ns1", ExpectAllow: false},
-		{User: uAlice, Verb: "get", Resource: "", NS: "ns1", ExpectAllow: false},
+		{User: uAlice, Verb: "get", Resource: "pods", NS: "ns1", ExpectDecision: authorizer.DecisionNoOpinion},
+		{User: uAlice, Verb: "get", Resource: "widgets", NS: "ns1", ExpectDecision: authorizer.DecisionNoOpinion},
+		{User: uAlice, Verb: "get", Resource: "", NS: "ns1", ExpectDecision: authorizer.DecisionNoOpinion},
 
 		// Chuck can read events, since anyone can.
-		{User: uChuck, Verb: "get", Resource: "events", NS: "ns1", ExpectAllow: true},
-		{User: uChuck, Verb: "get", Resource: "events", NS: "", ExpectAllow: true},
+		{User: uChuck, Verb: "get", Resource: "events", NS: "ns1", ExpectDecision: authorizer.DecisionAllow},
+		{User: uChuck, Verb: "get", Resource: "events", NS: "", ExpectDecision: authorizer.DecisionAllow},
 		// Chuck can't do other things.
-		{User: uChuck, Verb: "update", Resource: "events", NS: "ns1", ExpectAllow: false},
-		{User: uChuck, Verb: "get", Resource: "pods", NS: "ns1", ExpectAllow: false},
-		{User: uChuck, Verb: "get", Resource: "floop", NS: "ns1", ExpectAllow: false},
+		{User: uChuck, Verb: "update", Resource: "events", NS: "ns1", ExpectDecision: authorizer.DecisionNoOpinion},
+		{User: uChuck, Verb: "get", Resource: "pods", NS: "ns1", ExpectDecision: authorizer.DecisionNoOpinion},
+		{User: uChuck, Verb: "get", Resource: "floop", NS: "ns1", ExpectDecision: authorizer.DecisionNoOpinion},
 		// Chunk can't access things with no kind or namespace
-		{User: uChuck, Verb: "get", Path: "/", Resource: "", NS: "", ExpectAllow: false},
+		{User: uChuck, Verb: "get", Path: "/", Resource: "", NS: "", ExpectDecision: authorizer.DecisionNoOpinion},
 	}
 	for i, tc := range testCases {
 		attr := authorizer.AttributesRecord{
@@ -130,11 +133,208 @@ func TestAuthorizeV0(t *testing.T) {
 
 			ResourceRequest: len(tc.NS) > 0 || len(tc.Resource) > 0,
 		}
-		authorized, _, _ := a.Authorize(attr)
-		if tc.ExpectAllow != authorized {
+		decision, _, _ := a.Authorize(attr)
+		if tc.ExpectDecision != decision {
 			t.Logf("tc: %v -> attr %v", tc, attr)
 			t.Errorf("%d: Expected allowed=%v but actually allowed=%v\n\t%v",
-				i, tc.ExpectAllow, authorized, tc)
+				i, tc.ExpectDecision, decision, tc)
+		}
+	}
+}
+
+func getResourceRules(infos []authorizer.ResourceRuleInfo) []authorizer.DefaultResourceRuleInfo {
+	rules := make([]authorizer.DefaultResourceRuleInfo, len(infos))
+	for i, info := range infos {
+		rules[i] = authorizer.DefaultResourceRuleInfo{
+			Verbs:         info.GetVerbs(),
+			APIGroups:     info.GetAPIGroups(),
+			Resources:     info.GetResources(),
+			ResourceNames: info.GetResourceNames(),
+		}
+	}
+	return rules
+}
+
+func getNonResourceRules(infos []authorizer.NonResourceRuleInfo) []authorizer.DefaultNonResourceRuleInfo {
+	rules := make([]authorizer.DefaultNonResourceRuleInfo, len(infos))
+	for i, info := range infos {
+		rules[i] = authorizer.DefaultNonResourceRuleInfo{
+			Verbs:           info.GetVerbs(),
+			NonResourceURLs: info.GetNonResourceURLs(),
+		}
+	}
+	return rules
+}
+
+func TestRulesFor(t *testing.T) {
+	a, err := newWithContents(t, `
+{                    "readonly": true, "resource": "events"   }
+{"user":"scheduler", "readonly": true, "resource": "pods"     }
+{"user":"scheduler",                   "resource": "bindings" }
+{"user":"kubelet",   "readonly": true, "resource": "pods"     }
+{"user":"kubelet",                     "resource": "events"   }
+{"user":"alice",                                              "namespace": "projectCaribou"}
+{"user":"bob",       "readonly": true,                        "namespace": "projectCaribou"}
+{"user":"bob",       "readonly": true,                                                     "nonResourcePath": "*"}
+{"group":"a",                          "resource": "bindings" }
+{"group":"b",        "readonly": true,                                                     "nonResourcePath": "*"}
+`)
+	if err != nil {
+		t.Fatalf("unable to read policy file: %v", err)
+	}
+
+	authenticatedGroup := []string{user.AllAuthenticated}
+
+	uScheduler := user.DefaultInfo{Name: "scheduler", UID: "uid1", Groups: authenticatedGroup}
+	uKubelet := user.DefaultInfo{Name: "kubelet", UID: "uid2", Groups: []string{"a", "b"}}
+	uAlice := user.DefaultInfo{Name: "alice", UID: "uid3", Groups: authenticatedGroup}
+	uBob := user.DefaultInfo{Name: "bob", UID: "uid4", Groups: authenticatedGroup}
+	uChuck := user.DefaultInfo{Name: "chuck", UID: "uid5", Groups: []string{"a", "b"}}
+
+	testCases := []struct {
+		User                   user.DefaultInfo
+		Namespace              string
+		ExpectResourceRules    []authorizer.DefaultResourceRuleInfo
+		ExpectNonResourceRules []authorizer.DefaultNonResourceRuleInfo
+	}{
+		{
+			User:      uScheduler,
+			Namespace: "ns1",
+			ExpectResourceRules: []authorizer.DefaultResourceRuleInfo{
+				{
+					Verbs:     []string{"get", "list", "watch"},
+					APIGroups: []string{"*"},
+					Resources: []string{"events"},
+				},
+				{
+					Verbs:     []string{"get", "list", "watch"},
+					APIGroups: []string{"*"},
+					Resources: []string{"pods"},
+				},
+				{
+					Verbs:     []string{"*"},
+					APIGroups: []string{"*"},
+					Resources: []string{"bindings"},
+				},
+			},
+			ExpectNonResourceRules: []authorizer.DefaultNonResourceRuleInfo{},
+		},
+		{
+			User:      uKubelet,
+			Namespace: "ns1",
+			ExpectResourceRules: []authorizer.DefaultResourceRuleInfo{
+				{
+					Verbs:     []string{"get", "list", "watch"},
+					APIGroups: []string{"*"},
+					Resources: []string{"pods"},
+				},
+				{
+					Verbs:     []string{"*"},
+					APIGroups: []string{"*"},
+					Resources: []string{"events"},
+				},
+				{
+					Verbs:     []string{"*"},
+					APIGroups: []string{"*"},
+					Resources: []string{"bindings"},
+				},
+				{
+					Verbs:     []string{"get", "list", "watch"},
+					APIGroups: []string{"*"},
+					Resources: []string{"*"},
+				},
+			},
+			ExpectNonResourceRules: []authorizer.DefaultNonResourceRuleInfo{
+				{
+					Verbs:           []string{"get", "list", "watch"},
+					NonResourceURLs: []string{"*"},
+				},
+			},
+		},
+		{
+			User:      uAlice,
+			Namespace: "projectCaribou",
+			ExpectResourceRules: []authorizer.DefaultResourceRuleInfo{
+				{
+					Verbs:     []string{"get", "list", "watch"},
+					APIGroups: []string{"*"},
+					Resources: []string{"events"},
+				},
+				{
+					Verbs:     []string{"*"},
+					APIGroups: []string{"*"},
+					Resources: []string{"*"},
+				},
+			},
+			ExpectNonResourceRules: []authorizer.DefaultNonResourceRuleInfo{},
+		},
+		{
+			User:      uBob,
+			Namespace: "projectCaribou",
+			ExpectResourceRules: []authorizer.DefaultResourceRuleInfo{
+				{
+					Verbs:     []string{"get", "list", "watch"},
+					APIGroups: []string{"*"},
+					Resources: []string{"events"},
+				},
+				{
+					Verbs:     []string{"get", "list", "watch"},
+					APIGroups: []string{"*"},
+					Resources: []string{"*"},
+				},
+				{
+					Verbs:     []string{"get", "list", "watch"},
+					APIGroups: []string{"*"},
+					Resources: []string{"*"},
+				},
+			},
+			ExpectNonResourceRules: []authorizer.DefaultNonResourceRuleInfo{
+				{
+					Verbs:           []string{"get", "list", "watch"},
+					NonResourceURLs: []string{"*"},
+				},
+			},
+		},
+		{
+			User:      uChuck,
+			Namespace: "ns1",
+			ExpectResourceRules: []authorizer.DefaultResourceRuleInfo{
+				{
+					Verbs:     []string{"*"},
+					APIGroups: []string{"*"},
+					Resources: []string{"bindings"},
+				},
+				{
+					Verbs:     []string{"get", "list", "watch"},
+					APIGroups: []string{"*"},
+					Resources: []string{"*"},
+				},
+			},
+			ExpectNonResourceRules: []authorizer.DefaultNonResourceRuleInfo{
+				{
+					Verbs:           []string{"get", "list", "watch"},
+					NonResourceURLs: []string{"*"},
+				},
+			},
+		},
+	}
+	for i, tc := range testCases {
+		attr := authorizer.AttributesRecord{
+			User:      &tc.User,
+			Namespace: tc.Namespace,
+		}
+		resourceRules, nonResourceRules, _, _ := a.RulesFor(attr.GetUser(), attr.GetNamespace())
+		actualResourceRules := getResourceRules(resourceRules)
+		if !reflect.DeepEqual(tc.ExpectResourceRules, actualResourceRules) {
+			t.Logf("tc: %v -> attr %v", tc, attr)
+			t.Errorf("%d: Expected: \n%#v\n but actual: \n%#v\n",
+				i, tc.ExpectResourceRules, actualResourceRules)
+		}
+		actualNonResourceRules := getNonResourceRules(nonResourceRules)
+		if !reflect.DeepEqual(tc.ExpectNonResourceRules, actualNonResourceRules) {
+			t.Logf("tc: %v -> attr %v", tc, attr)
+			t.Errorf("%d: Expected: \n%#v\n but actual: \n%#v\n",
+				i, tc.ExpectNonResourceRules, actualNonResourceRules)
 		}
 	}
 }
@@ -163,80 +363,82 @@ func TestAuthorizeV1beta1(t *testing.T) {
 		t.Fatalf("unable to read policy file: %v", err)
 	}
 
-	uScheduler := user.DefaultInfo{Name: "scheduler", UID: "uid1"}
-	uAlice := user.DefaultInfo{Name: "alice", UID: "uid3"}
-	uChuck := user.DefaultInfo{Name: "chuck", UID: "uid5"}
-	uDebbie := user.DefaultInfo{Name: "debbie", UID: "uid6"}
-	uNoResource := user.DefaultInfo{Name: "noresource", UID: "uid7"}
-	uAPIGroup := user.DefaultInfo{Name: "apigroupuser", UID: "uid8"}
+	authenticatedGroup := []string{user.AllAuthenticated}
+
+	uScheduler := user.DefaultInfo{Name: "scheduler", UID: "uid1", Groups: authenticatedGroup}
+	uAlice := user.DefaultInfo{Name: "alice", UID: "uid3", Groups: authenticatedGroup}
+	uChuck := user.DefaultInfo{Name: "chuck", UID: "uid5", Groups: authenticatedGroup}
+	uDebbie := user.DefaultInfo{Name: "debbie", UID: "uid6", Groups: authenticatedGroup}
+	uNoResource := user.DefaultInfo{Name: "noresource", UID: "uid7", Groups: authenticatedGroup}
+	uAPIGroup := user.DefaultInfo{Name: "apigroupuser", UID: "uid8", Groups: authenticatedGroup}
 
 	testCases := []struct {
-		User        user.DefaultInfo
-		Verb        string
-		Resource    string
-		APIGroup    string
-		NS          string
-		Path        string
-		ExpectAllow bool
+		User           user.DefaultInfo
+		Verb           string
+		Resource       string
+		APIGroup       string
+		NS             string
+		Path           string
+		ExpectDecision authorizer.Decision
 	}{
 		// Scheduler can read pods
-		{User: uScheduler, Verb: "list", Resource: "pods", NS: "ns1", ExpectAllow: true},
-		{User: uScheduler, Verb: "list", Resource: "pods", NS: "", ExpectAllow: true},
+		{User: uScheduler, Verb: "list", Resource: "pods", NS: "ns1", ExpectDecision: authorizer.DecisionAllow},
+		{User: uScheduler, Verb: "list", Resource: "pods", NS: "", ExpectDecision: authorizer.DecisionAllow},
 		// Scheduler cannot write pods
-		{User: uScheduler, Verb: "create", Resource: "pods", NS: "ns1", ExpectAllow: false},
-		{User: uScheduler, Verb: "create", Resource: "pods", NS: "", ExpectAllow: false},
+		{User: uScheduler, Verb: "create", Resource: "pods", NS: "ns1", ExpectDecision: authorizer.DecisionNoOpinion},
+		{User: uScheduler, Verb: "create", Resource: "pods", NS: "", ExpectDecision: authorizer.DecisionNoOpinion},
 		// Scheduler can write bindings
-		{User: uScheduler, Verb: "get", Resource: "bindings", NS: "ns1", ExpectAllow: true},
-		{User: uScheduler, Verb: "get", Resource: "bindings", NS: "", ExpectAllow: true},
+		{User: uScheduler, Verb: "get", Resource: "bindings", NS: "ns1", ExpectDecision: authorizer.DecisionAllow},
+		{User: uScheduler, Verb: "get", Resource: "bindings", NS: "", ExpectDecision: authorizer.DecisionAllow},
 
 		// Alice can read and write anything in the right namespace.
-		{User: uAlice, Verb: "get", Resource: "pods", NS: "projectCaribou", ExpectAllow: true},
-		{User: uAlice, Verb: "get", Resource: "widgets", NS: "projectCaribou", ExpectAllow: true},
-		{User: uAlice, Verb: "get", Resource: "", NS: "projectCaribou", ExpectAllow: true},
-		{User: uAlice, Verb: "update", Resource: "pods", NS: "projectCaribou", ExpectAllow: true},
-		{User: uAlice, Verb: "update", Resource: "widgets", NS: "projectCaribou", ExpectAllow: true},
-		{User: uAlice, Verb: "update", Resource: "", NS: "projectCaribou", ExpectAllow: true},
+		{User: uAlice, Verb: "get", Resource: "pods", NS: "projectCaribou", ExpectDecision: authorizer.DecisionAllow},
+		{User: uAlice, Verb: "get", Resource: "widgets", NS: "projectCaribou", ExpectDecision: authorizer.DecisionAllow},
+		{User: uAlice, Verb: "get", Resource: "", NS: "projectCaribou", ExpectDecision: authorizer.DecisionAllow},
+		{User: uAlice, Verb: "update", Resource: "pods", NS: "projectCaribou", ExpectDecision: authorizer.DecisionAllow},
+		{User: uAlice, Verb: "update", Resource: "widgets", NS: "projectCaribou", ExpectDecision: authorizer.DecisionAllow},
+		{User: uAlice, Verb: "update", Resource: "", NS: "projectCaribou", ExpectDecision: authorizer.DecisionAllow},
 		// .. but not the wrong namespace.
-		{User: uAlice, Verb: "get", Resource: "pods", NS: "ns1", ExpectAllow: false},
-		{User: uAlice, Verb: "get", Resource: "widgets", NS: "ns1", ExpectAllow: false},
-		{User: uAlice, Verb: "get", Resource: "", NS: "ns1", ExpectAllow: false},
+		{User: uAlice, Verb: "get", Resource: "pods", NS: "ns1", ExpectDecision: authorizer.DecisionNoOpinion},
+		{User: uAlice, Verb: "get", Resource: "widgets", NS: "ns1", ExpectDecision: authorizer.DecisionNoOpinion},
+		{User: uAlice, Verb: "get", Resource: "", NS: "ns1", ExpectDecision: authorizer.DecisionNoOpinion},
 
 		// Debbie can write to pods in the right namespace
-		{User: uDebbie, Verb: "update", Resource: "pods", NS: "projectCaribou", ExpectAllow: true},
+		{User: uDebbie, Verb: "update", Resource: "pods", NS: "projectCaribou", ExpectDecision: authorizer.DecisionAllow},
 
 		// Chuck can read events, since anyone can.
-		{User: uChuck, Verb: "get", Resource: "events", NS: "ns1", ExpectAllow: true},
-		{User: uChuck, Verb: "get", Resource: "events", NS: "", ExpectAllow: true},
+		{User: uChuck, Verb: "get", Resource: "events", NS: "ns1", ExpectDecision: authorizer.DecisionAllow},
+		{User: uChuck, Verb: "get", Resource: "events", NS: "", ExpectDecision: authorizer.DecisionAllow},
 		// Chuck can't do other things.
-		{User: uChuck, Verb: "update", Resource: "events", NS: "ns1", ExpectAllow: false},
-		{User: uChuck, Verb: "get", Resource: "pods", NS: "ns1", ExpectAllow: false},
-		{User: uChuck, Verb: "get", Resource: "floop", NS: "ns1", ExpectAllow: false},
+		{User: uChuck, Verb: "update", Resource: "events", NS: "ns1", ExpectDecision: authorizer.DecisionNoOpinion},
+		{User: uChuck, Verb: "get", Resource: "pods", NS: "ns1", ExpectDecision: authorizer.DecisionNoOpinion},
+		{User: uChuck, Verb: "get", Resource: "floop", NS: "ns1", ExpectDecision: authorizer.DecisionNoOpinion},
 		// Chuck can't access things with no resource or namespace
-		{User: uChuck, Verb: "get", Path: "/", Resource: "", NS: "", ExpectAllow: false},
+		{User: uChuck, Verb: "get", Path: "/", Resource: "", NS: "", ExpectDecision: authorizer.DecisionNoOpinion},
 		// but can access /api
-		{User: uChuck, Verb: "get", Path: "/api", Resource: "", NS: "", ExpectAllow: true},
+		{User: uChuck, Verb: "get", Path: "/api", Resource: "", NS: "", ExpectDecision: authorizer.DecisionAllow},
 		// though he cannot write to it
-		{User: uChuck, Verb: "create", Path: "/api", Resource: "", NS: "", ExpectAllow: false},
+		{User: uChuck, Verb: "create", Path: "/api", Resource: "", NS: "", ExpectDecision: authorizer.DecisionNoOpinion},
 		// while he can write to /custom
-		{User: uChuck, Verb: "update", Path: "/custom", Resource: "", NS: "", ExpectAllow: true},
+		{User: uChuck, Verb: "update", Path: "/custom", Resource: "", NS: "", ExpectDecision: authorizer.DecisionAllow},
 		// he cannot get "/root"
-		{User: uChuck, Verb: "get", Path: "/root", Resource: "", NS: "", ExpectAllow: false},
+		{User: uChuck, Verb: "get", Path: "/root", Resource: "", NS: "", ExpectDecision: authorizer.DecisionNoOpinion},
 		// but can get any subpath
-		{User: uChuck, Verb: "get", Path: "/root/", Resource: "", NS: "", ExpectAllow: true},
-		{User: uChuck, Verb: "get", Path: "/root/test/1/2/3", Resource: "", NS: "", ExpectAllow: true},
+		{User: uChuck, Verb: "get", Path: "/root/", Resource: "", NS: "", ExpectDecision: authorizer.DecisionAllow},
+		{User: uChuck, Verb: "get", Path: "/root/test/1/2/3", Resource: "", NS: "", ExpectDecision: authorizer.DecisionAllow},
 
 		// the user "noresource" can get any non-resource request
-		{User: uNoResource, Verb: "get", Path: "", Resource: "", NS: "", ExpectAllow: true},
-		{User: uNoResource, Verb: "get", Path: "/", Resource: "", NS: "", ExpectAllow: true},
-		{User: uNoResource, Verb: "get", Path: "/foo/bar/baz", Resource: "", NS: "", ExpectAllow: true},
+		{User: uNoResource, Verb: "get", Path: "", Resource: "", NS: "", ExpectDecision: authorizer.DecisionAllow},
+		{User: uNoResource, Verb: "get", Path: "/", Resource: "", NS: "", ExpectDecision: authorizer.DecisionAllow},
+		{User: uNoResource, Verb: "get", Path: "/foo/bar/baz", Resource: "", NS: "", ExpectDecision: authorizer.DecisionAllow},
 		// but cannot get any request where IsResourceRequest() == true
-		{User: uNoResource, Verb: "get", Path: "/", Resource: "", NS: "bar", ExpectAllow: false},
-		{User: uNoResource, Verb: "get", Path: "/foo/bar/baz", Resource: "foo", NS: "bar", ExpectAllow: false},
+		{User: uNoResource, Verb: "get", Path: "/", Resource: "", NS: "bar", ExpectDecision: authorizer.DecisionNoOpinion},
+		{User: uNoResource, Verb: "get", Path: "/foo/bar/baz", Resource: "foo", NS: "bar", ExpectDecision: authorizer.DecisionNoOpinion},
 
 		// Test APIGroup matching
-		{User: uAPIGroup, Verb: "get", APIGroup: "x", Resource: "foo", NS: "projectAnyGroup", ExpectAllow: true},
-		{User: uAPIGroup, Verb: "get", APIGroup: "x", Resource: "foo", NS: "projectEmptyGroup", ExpectAllow: false},
-		{User: uAPIGroup, Verb: "get", APIGroup: "x", Resource: "foo", NS: "projectXGroup", ExpectAllow: true},
+		{User: uAPIGroup, Verb: "get", APIGroup: "x", Resource: "foo", NS: "projectAnyGroup", ExpectDecision: authorizer.DecisionAllow},
+		{User: uAPIGroup, Verb: "get", APIGroup: "x", Resource: "foo", NS: "projectEmptyGroup", ExpectDecision: authorizer.DecisionNoOpinion},
+		{User: uAPIGroup, Verb: "get", APIGroup: "x", Resource: "foo", NS: "projectXGroup", ExpectDecision: authorizer.DecisionAllow},
 	}
 	for i, tc := range testCases {
 		attr := authorizer.AttributesRecord{
@@ -249,10 +451,10 @@ func TestAuthorizeV1beta1(t *testing.T) {
 			Path:            tc.Path,
 		}
 		// t.Logf("tc %2v: %v -> attr %v", i, tc, attr)
-		authorized, _, _ := a.Authorize(attr)
-		if tc.ExpectAllow != authorized {
+		decision, _, _ := a.Authorize(attr)
+		if tc.ExpectDecision != decision {
 			t.Errorf("%d: Expected allowed=%v but actually allowed=%v, for case %+v & %+v",
-				i, tc.ExpectAllow, authorized, tc, attr)
+				i, tc.ExpectDecision, decision, tc, attr)
 		}
 	}
 }
@@ -263,16 +465,32 @@ func TestSubjectMatches(t *testing.T) {
 		Policy      runtime.Object
 		ExpectMatch bool
 	}{
-		"v0 empty policy matches unauthed user": {
-			User: user.DefaultInfo{},
+		"v0 empty policy does not match unauthed user": {
+			User: user.DefaultInfo{Name: "system:anonymous", Groups: []string{"system:unauthenticated"}},
 			Policy: &v0.Policy{
 				User:  "",
 				Group: "",
 			},
-			ExpectMatch: true,
+			ExpectMatch: false,
+		},
+		"v0 * user policy does not match unauthed user": {
+			User: user.DefaultInfo{Name: "system:anonymous", Groups: []string{"system:unauthenticated"}},
+			Policy: &v0.Policy{
+				User:  "*",
+				Group: "",
+			},
+			ExpectMatch: false,
+		},
+		"v0 * group policy does not match unauthed user": {
+			User: user.DefaultInfo{Name: "system:anonymous", Groups: []string{"system:unauthenticated"}},
+			Policy: &v0.Policy{
+				User:  "",
+				Group: "*",
+			},
+			ExpectMatch: false,
 		},
 		"v0 empty policy matches authed user": {
-			User: user.DefaultInfo{Name: "Foo"},
+			User: user.DefaultInfo{Name: "Foo", Groups: []string{user.AllAuthenticated}},
 			Policy: &v0.Policy{
 				User:  "",
 				Group: "",
@@ -280,7 +498,7 @@ func TestSubjectMatches(t *testing.T) {
 			ExpectMatch: true,
 		},
 		"v0 empty policy matches authed user with groups": {
-			User: user.DefaultInfo{Name: "Foo", Groups: []string{"a", "b"}},
+			User: user.DefaultInfo{Name: "Foo", Groups: []string{"a", "b", user.AllAuthenticated}},
 			Policy: &v0.Policy{
 				User:  "",
 				Group: "",
@@ -289,7 +507,7 @@ func TestSubjectMatches(t *testing.T) {
 		},
 
 		"v0 user policy does not match unauthed user": {
-			User: user.DefaultInfo{},
+			User: user.DefaultInfo{Name: "system:anonymous", Groups: []string{"system:unauthenticated"}},
 			Policy: &v0.Policy{
 				User:  "Foo",
 				Group: "",
@@ -297,7 +515,7 @@ func TestSubjectMatches(t *testing.T) {
 			ExpectMatch: false,
 		},
 		"v0 user policy does not match different user": {
-			User: user.DefaultInfo{Name: "Bar"},
+			User: user.DefaultInfo{Name: "Bar", Groups: []string{user.AllAuthenticated}},
 			Policy: &v0.Policy{
 				User:  "Foo",
 				Group: "",
@@ -305,7 +523,7 @@ func TestSubjectMatches(t *testing.T) {
 			ExpectMatch: false,
 		},
 		"v0 user policy is case-sensitive": {
-			User: user.DefaultInfo{Name: "foo"},
+			User: user.DefaultInfo{Name: "foo", Groups: []string{user.AllAuthenticated}},
 			Policy: &v0.Policy{
 				User:  "Foo",
 				Group: "",
@@ -313,7 +531,7 @@ func TestSubjectMatches(t *testing.T) {
 			ExpectMatch: false,
 		},
 		"v0 user policy does not match substring": {
-			User: user.DefaultInfo{Name: "FooBar"},
+			User: user.DefaultInfo{Name: "FooBar", Groups: []string{user.AllAuthenticated}},
 			Policy: &v0.Policy{
 				User:  "Foo",
 				Group: "",
@@ -321,7 +539,7 @@ func TestSubjectMatches(t *testing.T) {
 			ExpectMatch: false,
 		},
 		"v0 user policy matches username": {
-			User: user.DefaultInfo{Name: "Foo"},
+			User: user.DefaultInfo{Name: "Foo", Groups: []string{user.AllAuthenticated}},
 			Policy: &v0.Policy{
 				User:  "Foo",
 				Group: "",
@@ -330,7 +548,7 @@ func TestSubjectMatches(t *testing.T) {
 		},
 
 		"v0 group policy does not match unauthed user": {
-			User: user.DefaultInfo{},
+			User: user.DefaultInfo{Name: "system:anonymous", Groups: []string{"system:unauthenticated"}},
 			Policy: &v0.Policy{
 				User:  "",
 				Group: "Foo",
@@ -338,7 +556,7 @@ func TestSubjectMatches(t *testing.T) {
 			ExpectMatch: false,
 		},
 		"v0 group policy does not match user in different group": {
-			User: user.DefaultInfo{Name: "FooBar", Groups: []string{"B"}},
+			User: user.DefaultInfo{Name: "FooBar", Groups: []string{"B", user.AllAuthenticated}},
 			Policy: &v0.Policy{
 				User:  "",
 				Group: "A",
@@ -346,7 +564,7 @@ func TestSubjectMatches(t *testing.T) {
 			ExpectMatch: false,
 		},
 		"v0 group policy is case-sensitive": {
-			User: user.DefaultInfo{Name: "Foo", Groups: []string{"A", "B", "C"}},
+			User: user.DefaultInfo{Name: "Foo", Groups: []string{"A", "B", "C", user.AllAuthenticated}},
 			Policy: &v0.Policy{
 				User:  "",
 				Group: "b",
@@ -354,7 +572,7 @@ func TestSubjectMatches(t *testing.T) {
 			ExpectMatch: false,
 		},
 		"v0 group policy does not match substring": {
-			User: user.DefaultInfo{Name: "Foo", Groups: []string{"A", "BBB", "C"}},
+			User: user.DefaultInfo{Name: "Foo", Groups: []string{"A", "BBB", "C", user.AllAuthenticated}},
 			Policy: &v0.Policy{
 				User:  "",
 				Group: "B",
@@ -362,7 +580,7 @@ func TestSubjectMatches(t *testing.T) {
 			ExpectMatch: false,
 		},
 		"v0 group policy matches user in group": {
-			User: user.DefaultInfo{Name: "Foo", Groups: []string{"A", "B", "C"}},
+			User: user.DefaultInfo{Name: "Foo", Groups: []string{"A", "B", "C", user.AllAuthenticated}},
 			Policy: &v0.Policy{
 				User:  "",
 				Group: "B",
@@ -371,7 +589,7 @@ func TestSubjectMatches(t *testing.T) {
 		},
 
 		"v0 user and group policy requires user match": {
-			User: user.DefaultInfo{Name: "Bar", Groups: []string{"A", "B", "C"}},
+			User: user.DefaultInfo{Name: "Bar", Groups: []string{"A", "B", "C", user.AllAuthenticated}},
 			Policy: &v0.Policy{
 				User:  "Foo",
 				Group: "B",
@@ -379,7 +597,7 @@ func TestSubjectMatches(t *testing.T) {
 			ExpectMatch: false,
 		},
 		"v0 user and group policy requires group match": {
-			User: user.DefaultInfo{Name: "Foo", Groups: []string{"A", "B", "C"}},
+			User: user.DefaultInfo{Name: "Foo", Groups: []string{"A", "B", "C", user.AllAuthenticated}},
 			Policy: &v0.Policy{
 				User:  "Foo",
 				Group: "D",
@@ -387,7 +605,7 @@ func TestSubjectMatches(t *testing.T) {
 			ExpectMatch: false,
 		},
 		"v0 user and group policy matches": {
-			User: user.DefaultInfo{Name: "Foo", Groups: []string{"A", "B", "C"}},
+			User: user.DefaultInfo{Name: "Foo", Groups: []string{"A", "B", "C", user.AllAuthenticated}},
 			Policy: &v0.Policy{
 				User:  "Foo",
 				Group: "B",
@@ -396,7 +614,7 @@ func TestSubjectMatches(t *testing.T) {
 		},
 
 		"v1 empty policy does not match unauthed user": {
-			User: user.DefaultInfo{},
+			User: user.DefaultInfo{Name: "system:anonymous", Groups: []string{"system:unauthenticated"}},
 			Policy: &v1beta1.Policy{
 				Spec: v1beta1.PolicySpec{
 					User:  "",
@@ -405,8 +623,28 @@ func TestSubjectMatches(t *testing.T) {
 			},
 			ExpectMatch: false,
 		},
+		"v1 * user policy does not match unauthed user": {
+			User: user.DefaultInfo{Name: "system:anonymous", Groups: []string{"system:unauthenticated"}},
+			Policy: &v1beta1.Policy{
+				Spec: v1beta1.PolicySpec{
+					User:  "*",
+					Group: "",
+				},
+			},
+			ExpectMatch: false,
+		},
+		"v1 * group policy does not match unauthed user": {
+			User: user.DefaultInfo{Name: "system:anonymous", Groups: []string{"system:unauthenticated"}},
+			Policy: &v1beta1.Policy{
+				Spec: v1beta1.PolicySpec{
+					User:  "",
+					Group: "*",
+				},
+			},
+			ExpectMatch: false,
+		},
 		"v1 empty policy does not match authed user": {
-			User: user.DefaultInfo{Name: "Foo"},
+			User: user.DefaultInfo{Name: "Foo", Groups: []string{user.AllAuthenticated}},
 			Policy: &v1beta1.Policy{
 				Spec: v1beta1.PolicySpec{
 					User:  "",
@@ -416,7 +654,7 @@ func TestSubjectMatches(t *testing.T) {
 			ExpectMatch: false,
 		},
 		"v1 empty policy does not match authed user with groups": {
-			User: user.DefaultInfo{Name: "Foo", Groups: []string{"a", "b"}},
+			User: user.DefaultInfo{Name: "Foo", Groups: []string{"a", "b", user.AllAuthenticated}},
 			Policy: &v1beta1.Policy{
 				Spec: v1beta1.PolicySpec{
 					User:  "",
@@ -427,7 +665,7 @@ func TestSubjectMatches(t *testing.T) {
 		},
 
 		"v1 user policy does not match unauthed user": {
-			User: user.DefaultInfo{},
+			User: user.DefaultInfo{Name: "system:anonymous", Groups: []string{"system:unauthenticated"}},
 			Policy: &v1beta1.Policy{
 				Spec: v1beta1.PolicySpec{
 					User:  "Foo",
@@ -437,7 +675,7 @@ func TestSubjectMatches(t *testing.T) {
 			ExpectMatch: false,
 		},
 		"v1 user policy does not match different user": {
-			User: user.DefaultInfo{Name: "Bar"},
+			User: user.DefaultInfo{Name: "Bar", Groups: []string{user.AllAuthenticated}},
 			Policy: &v1beta1.Policy{
 				Spec: v1beta1.PolicySpec{
 					User:  "Foo",
@@ -447,7 +685,7 @@ func TestSubjectMatches(t *testing.T) {
 			ExpectMatch: false,
 		},
 		"v1 user policy is case-sensitive": {
-			User: user.DefaultInfo{Name: "foo"},
+			User: user.DefaultInfo{Name: "foo", Groups: []string{user.AllAuthenticated}},
 			Policy: &v1beta1.Policy{
 				Spec: v1beta1.PolicySpec{
 					User:  "Foo",
@@ -457,7 +695,7 @@ func TestSubjectMatches(t *testing.T) {
 			ExpectMatch: false,
 		},
 		"v1 user policy does not match substring": {
-			User: user.DefaultInfo{Name: "FooBar"},
+			User: user.DefaultInfo{Name: "FooBar", Groups: []string{user.AllAuthenticated}},
 			Policy: &v1beta1.Policy{
 				Spec: v1beta1.PolicySpec{
 					User:  "Foo",
@@ -467,7 +705,7 @@ func TestSubjectMatches(t *testing.T) {
 			ExpectMatch: false,
 		},
 		"v1 user policy matches username": {
-			User: user.DefaultInfo{Name: "Foo"},
+			User: user.DefaultInfo{Name: "Foo", Groups: []string{user.AllAuthenticated}},
 			Policy: &v1beta1.Policy{
 				Spec: v1beta1.PolicySpec{
 					User:  "Foo",
@@ -478,7 +716,7 @@ func TestSubjectMatches(t *testing.T) {
 		},
 
 		"v1 group policy does not match unauthed user": {
-			User: user.DefaultInfo{},
+			User: user.DefaultInfo{Name: "system:anonymous", Groups: []string{"system:unauthenticated"}},
 			Policy: &v1beta1.Policy{
 				Spec: v1beta1.PolicySpec{
 					User:  "",
@@ -488,7 +726,7 @@ func TestSubjectMatches(t *testing.T) {
 			ExpectMatch: false,
 		},
 		"v1 group policy does not match user in different group": {
-			User: user.DefaultInfo{Name: "FooBar", Groups: []string{"B"}},
+			User: user.DefaultInfo{Name: "FooBar", Groups: []string{"B", user.AllAuthenticated}},
 			Policy: &v1beta1.Policy{
 				Spec: v1beta1.PolicySpec{
 					User:  "",
@@ -498,7 +736,7 @@ func TestSubjectMatches(t *testing.T) {
 			ExpectMatch: false,
 		},
 		"v1 group policy is case-sensitive": {
-			User: user.DefaultInfo{Name: "Foo", Groups: []string{"A", "B", "C"}},
+			User: user.DefaultInfo{Name: "Foo", Groups: []string{"A", "B", "C", user.AllAuthenticated}},
 			Policy: &v1beta1.Policy{
 				Spec: v1beta1.PolicySpec{
 					User:  "",
@@ -508,7 +746,7 @@ func TestSubjectMatches(t *testing.T) {
 			ExpectMatch: false,
 		},
 		"v1 group policy does not match substring": {
-			User: user.DefaultInfo{Name: "Foo", Groups: []string{"A", "BBB", "C"}},
+			User: user.DefaultInfo{Name: "Foo", Groups: []string{"A", "BBB", "C", user.AllAuthenticated}},
 			Policy: &v1beta1.Policy{
 				Spec: v1beta1.PolicySpec{
 					User:  "",
@@ -518,7 +756,7 @@ func TestSubjectMatches(t *testing.T) {
 			ExpectMatch: false,
 		},
 		"v1 group policy matches user in group": {
-			User: user.DefaultInfo{Name: "Foo", Groups: []string{"A", "B", "C"}},
+			User: user.DefaultInfo{Name: "Foo", Groups: []string{"A", "B", "C", user.AllAuthenticated}},
 			Policy: &v1beta1.Policy{
 				Spec: v1beta1.PolicySpec{
 					User:  "",
@@ -529,7 +767,7 @@ func TestSubjectMatches(t *testing.T) {
 		},
 
 		"v1 user and group policy requires user match": {
-			User: user.DefaultInfo{Name: "Bar", Groups: []string{"A", "B", "C"}},
+			User: user.DefaultInfo{Name: "Bar", Groups: []string{"A", "B", "C", user.AllAuthenticated}},
 			Policy: &v1beta1.Policy{
 				Spec: v1beta1.PolicySpec{
 					User:  "Foo",
@@ -539,7 +777,7 @@ func TestSubjectMatches(t *testing.T) {
 			ExpectMatch: false,
 		},
 		"v1 user and group policy requires group match": {
-			User: user.DefaultInfo{Name: "Foo", Groups: []string{"A", "B", "C"}},
+			User: user.DefaultInfo{Name: "Foo", Groups: []string{"A", "B", "C", user.AllAuthenticated}},
 			Policy: &v1beta1.Policy{
 				Spec: v1beta1.PolicySpec{
 					User:  "Foo",
@@ -549,7 +787,7 @@ func TestSubjectMatches(t *testing.T) {
 			ExpectMatch: false,
 		},
 		"v1 user and group policy matches": {
-			User: user.DefaultInfo{Name: "Foo", Groups: []string{"A", "B", "C"}},
+			User: user.DefaultInfo{Name: "Foo", Groups: []string{"A", "B", "C", user.AllAuthenticated}},
 			Policy: &v1beta1.Policy{
 				Spec: v1beta1.PolicySpec{
 					User:  "Foo",
@@ -561,15 +799,15 @@ func TestSubjectMatches(t *testing.T) {
 	}
 
 	for k, tc := range testCases {
-		policy := &api.Policy{}
-		if err := api.Scheme.Convert(tc.Policy, policy, nil); err != nil {
+		policy := &abac.Policy{}
+		if err := abac.Scheme.Convert(tc.Policy, policy, nil); err != nil {
 			t.Errorf("%s: error converting: %v", k, err)
 			continue
 		}
 		attr := authorizer.AttributesRecord{
 			User: &tc.User,
 		}
-		actualMatch := subjectMatches(*policy, attr)
+		actualMatch := subjectMatches(*policy, attr.GetUser())
 		if tc.ExpectMatch != actualMatch {
 			t.Errorf("%v: Expected actorMatches=%v but actually got=%v",
 				k, tc.ExpectMatch, actualMatch)
@@ -577,7 +815,7 @@ func TestSubjectMatches(t *testing.T) {
 	}
 }
 
-func newWithContents(t *testing.T, contents string) (authorizer.Authorizer, error) {
+func newWithContents(t *testing.T, contents string) (policyList, error) {
 	f, err := ioutil.TempFile("", "abac_test")
 	if err != nil {
 		t.Fatalf("unexpected error creating policyfile: %v", err)
@@ -600,20 +838,18 @@ func TestPolicy(t *testing.T) {
 		matches bool
 		name    string
 	}{
-		// v0
-		{
-			policy:  &v0.Policy{},
-			attr:    authorizer.AttributesRecord{},
-			matches: true,
-			name:    "v0 null",
-		},
-
 		// v0 mismatches
 		{
 			policy: &v0.Policy{
 				Readonly: true,
 			},
-			attr:    authorizer.AttributesRecord{},
+			attr: authorizer.AttributesRecord{
+				User: &user.DefaultInfo{
+					Name:   "foo",
+					Groups: []string{user.AllAuthenticated},
+				},
+				Verb: "create",
+			},
 			matches: false,
 			name:    "v0 read-only mismatch",
 		},
@@ -623,7 +859,8 @@ func TestPolicy(t *testing.T) {
 			},
 			attr: authorizer.AttributesRecord{
 				User: &user.DefaultInfo{
-					Name: "bar",
+					Name:   "bar",
+					Groups: []string{user.AllAuthenticated},
 				},
 			},
 			matches: false,
@@ -634,6 +871,10 @@ func TestPolicy(t *testing.T) {
 				Resource: "foo",
 			},
 			attr: authorizer.AttributesRecord{
+				User: &user.DefaultInfo{
+					Name:   "foo",
+					Groups: []string{user.AllAuthenticated},
+				},
 				Resource:        "bar",
 				ResourceRequest: true,
 			},
@@ -648,7 +889,8 @@ func TestPolicy(t *testing.T) {
 			},
 			attr: authorizer.AttributesRecord{
 				User: &user.DefaultInfo{
-					Name: "foo",
+					Name:   "foo",
+					Groups: []string{user.AllAuthenticated},
 				},
 				Resource:        "foo",
 				Namespace:       "foo",
@@ -660,8 +902,14 @@ func TestPolicy(t *testing.T) {
 
 		// v0 matches
 		{
-			policy:  &v0.Policy{},
-			attr:    authorizer.AttributesRecord{ResourceRequest: true},
+			policy: &v0.Policy{},
+			attr: authorizer.AttributesRecord{
+				User: &user.DefaultInfo{
+					Name:   "foo",
+					Groups: []string{user.AllAuthenticated},
+				},
+				ResourceRequest: true,
+			},
 			matches: true,
 			name:    "v0 null resource",
 		},
@@ -670,6 +918,10 @@ func TestPolicy(t *testing.T) {
 				Readonly: true,
 			},
 			attr: authorizer.AttributesRecord{
+				User: &user.DefaultInfo{
+					Name:   "foo",
+					Groups: []string{user.AllAuthenticated},
+				},
 				Verb: "get",
 			},
 			matches: true,
@@ -681,7 +933,8 @@ func TestPolicy(t *testing.T) {
 			},
 			attr: authorizer.AttributesRecord{
 				User: &user.DefaultInfo{
-					Name: "foo",
+					Name:   "foo",
+					Groups: []string{user.AllAuthenticated},
 				},
 			},
 			matches: true,
@@ -692,6 +945,10 @@ func TestPolicy(t *testing.T) {
 				Resource: "foo",
 			},
 			attr: authorizer.AttributesRecord{
+				User: &user.DefaultInfo{
+					Name:   "foo",
+					Groups: []string{user.AllAuthenticated},
+				},
 				Resource:        "foo",
 				ResourceRequest: true,
 			},
@@ -703,6 +960,10 @@ func TestPolicy(t *testing.T) {
 		{
 			policy: &v1beta1.Policy{},
 			attr: authorizer.AttributesRecord{
+				User: &user.DefaultInfo{
+					Name:   "foo",
+					Groups: []string{user.AllAuthenticated},
+				},
 				ResourceRequest: true,
 			},
 			matches: false,
@@ -716,7 +977,8 @@ func TestPolicy(t *testing.T) {
 			},
 			attr: authorizer.AttributesRecord{
 				User: &user.DefaultInfo{
-					Name: "bar",
+					Name:   "bar",
+					Groups: []string{user.AllAuthenticated},
 				},
 				ResourceRequest: true,
 			},
@@ -731,6 +993,10 @@ func TestPolicy(t *testing.T) {
 				},
 			},
 			attr: authorizer.AttributesRecord{
+				User: &user.DefaultInfo{
+					Name:   "foo",
+					Groups: []string{user.AllAuthenticated},
+				},
 				ResourceRequest: true,
 			},
 			matches: false,
@@ -744,6 +1010,10 @@ func TestPolicy(t *testing.T) {
 				},
 			},
 			attr: authorizer.AttributesRecord{
+				User: &user.DefaultInfo{
+					Name:   "foo",
+					Groups: []string{user.AllAuthenticated},
+				},
 				Resource:        "bar",
 				ResourceRequest: true,
 			},
@@ -760,7 +1030,8 @@ func TestPolicy(t *testing.T) {
 			},
 			attr: authorizer.AttributesRecord{
 				User: &user.DefaultInfo{
-					Name: "foo",
+					Name:   "foo",
+					Groups: []string{user.AllAuthenticated},
 				},
 				Namespace:       "bar",
 				Resource:        "baz",
@@ -777,6 +1048,10 @@ func TestPolicy(t *testing.T) {
 				},
 			},
 			attr: authorizer.AttributesRecord{
+				User: &user.DefaultInfo{
+					Name:   "foo",
+					Groups: []string{user.AllAuthenticated},
+				},
 				Path:            "/api2",
 				ResourceRequest: false,
 			},
@@ -791,6 +1066,10 @@ func TestPolicy(t *testing.T) {
 				},
 			},
 			attr: authorizer.AttributesRecord{
+				User: &user.DefaultInfo{
+					Name:   "foo",
+					Groups: []string{user.AllAuthenticated},
+				},
 				Path:            "/api2/foo",
 				ResourceRequest: false,
 			},
@@ -807,7 +1086,8 @@ func TestPolicy(t *testing.T) {
 			},
 			attr: authorizer.AttributesRecord{
 				User: &user.DefaultInfo{
-					Name: "foo",
+					Name:   "foo",
+					Groups: []string{user.AllAuthenticated},
 				},
 				ResourceRequest: true,
 			},
@@ -821,6 +1101,10 @@ func TestPolicy(t *testing.T) {
 				},
 			},
 			attr: authorizer.AttributesRecord{
+				User: &user.DefaultInfo{
+					Name:   "foo",
+					Groups: []string{user.AllAuthenticated},
+				},
 				ResourceRequest: true,
 			},
 			matches: true,
@@ -835,7 +1119,7 @@ func TestPolicy(t *testing.T) {
 			attr: authorizer.AttributesRecord{
 				User: &user.DefaultInfo{
 					Name:   "foo",
-					Groups: []string{"bar"},
+					Groups: []string{"bar", user.AllAuthenticated},
 				},
 				ResourceRequest: true,
 			},
@@ -851,7 +1135,7 @@ func TestPolicy(t *testing.T) {
 			attr: authorizer.AttributesRecord{
 				User: &user.DefaultInfo{
 					Name:   "foo",
-					Groups: []string{"bar"},
+					Groups: []string{"bar", user.AllAuthenticated},
 				},
 				ResourceRequest: true,
 			},
@@ -866,6 +1150,10 @@ func TestPolicy(t *testing.T) {
 				},
 			},
 			attr: authorizer.AttributesRecord{
+				User: &user.DefaultInfo{
+					Name:   "foo",
+					Groups: []string{user.AllAuthenticated},
+				},
 				Verb:            "get",
 				ResourceRequest: true,
 			},
@@ -880,6 +1168,10 @@ func TestPolicy(t *testing.T) {
 				},
 			},
 			attr: authorizer.AttributesRecord{
+				User: &user.DefaultInfo{
+					Name:   "foo",
+					Groups: []string{user.AllAuthenticated},
+				},
 				Resource:        "foo",
 				ResourceRequest: true,
 			},
@@ -896,7 +1188,8 @@ func TestPolicy(t *testing.T) {
 			},
 			attr: authorizer.AttributesRecord{
 				User: &user.DefaultInfo{
-					Name: "foo",
+					Name:   "foo",
+					Groups: []string{user.AllAuthenticated},
 				},
 				Namespace:       "bar",
 				Resource:        "baz",
@@ -913,6 +1206,10 @@ func TestPolicy(t *testing.T) {
 				},
 			},
 			attr: authorizer.AttributesRecord{
+				User: &user.DefaultInfo{
+					Name:   "foo",
+					Groups: []string{user.AllAuthenticated},
+				},
 				Path:            "/api",
 				ResourceRequest: false,
 			},
@@ -927,6 +1224,10 @@ func TestPolicy(t *testing.T) {
 				},
 			},
 			attr: authorizer.AttributesRecord{
+				User: &user.DefaultInfo{
+					Name:   "foo",
+					Groups: []string{user.AllAuthenticated},
+				},
 				Path:            "/api",
 				ResourceRequest: false,
 			},
@@ -941,6 +1242,10 @@ func TestPolicy(t *testing.T) {
 				},
 			},
 			attr: authorizer.AttributesRecord{
+				User: &user.DefaultInfo{
+					Name:   "foo",
+					Groups: []string{user.AllAuthenticated},
+				},
 				Path:            "/api/foo",
 				ResourceRequest: false,
 			},
@@ -949,8 +1254,8 @@ func TestPolicy(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
-		policy := &api.Policy{}
-		if err := api.Scheme.Convert(test.policy, policy, nil); err != nil {
+		policy := &abac.Policy{}
+		if err := abac.Scheme.Convert(test.policy, policy, nil); err != nil {
 			t.Errorf("%s: error converting: %v", test.name, err)
 			continue
 		}

@@ -19,7 +19,7 @@ to split the master key into 5 shares, any 3 of which are required to reconstruc
 key. The master key is used to protect the encryption key, which is ultimately used to protect
 data written to the storage backend.
 
-![Keys](/assets/images/keys.png)
+[![Vault Shamir Secret Sharing Algorithm](/assets/images/vault-shamir-secret-sharing.svg)](/assets/images/vault-shamir-secret-sharing.svg)
 
 To support key rotation, we need to support changing the unseal keys, master key, and the
 backend encryption key. We split this into two separate operations, `rekey` and `rotate`.
@@ -52,7 +52,6 @@ but standby instances can still assume an active role after either operation. Th
 done by providing an online upgrade path for standby instances. If the current encryption
 key is `N` and a rotation installs `N+1`, Vault creates a special "upgrade" key, which
 provides the `N+1` encryption key protected by the `N` key. This upgrade key is only available
-for a few minutes enabling standby instances do a periodic check for upgrades.
+for a few minutes enabling standby instances to do a periodic check for upgrades.
 This allows standby instances to update their keys and stay in-sync with the active Vault
 without requiring operators to perform another unseal.
-

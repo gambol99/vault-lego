@@ -1,35 +1,28 @@
 package vault
 
-import "sort"
+import (
+	"context"
+	"sort"
 
-// Struct to identify user input errors.
-// This is helpful in responding the appropriate status codes to clients
-// from the HTTP endpoints.
-type StatusBadRequest struct {
-	Err string
-}
-
-// Implementing error interface
-func (s *StatusBadRequest) Error() string {
-	return s.Err
-}
+	"github.com/hashicorp/vault/logical"
+)
 
 // Capabilities is used to fetch the capabilities of the given token on the given path
-func (c *Core) Capabilities(token, path string) ([]string, error) {
+func (c *Core) Capabilities(ctx context.Context, token, path string) ([]string, error) {
 	if path == "" {
-		return nil, &StatusBadRequest{Err: "missing path"}
+		return nil, &logical.StatusBadRequest{Err: "missing path"}
 	}
 
 	if token == "" {
-		return nil, &StatusBadRequest{Err: "missing token"}
+		return nil, &logical.StatusBadRequest{Err: "missing token"}
 	}
 
-	te, err := c.tokenStore.Lookup(token)
+	te, err := c.tokenStore.Lookup(ctx, token)
 	if err != nil {
 		return nil, err
 	}
 	if te == nil {
-		return nil, &StatusBadRequest{Err: "invalid token"}
+		return nil, &logical.StatusBadRequest{Err: "invalid token"}
 	}
 
 	if te.Policies == nil {
@@ -38,7 +31,20 @@ func (c *Core) Capabilities(token, path string) ([]string, error) {
 
 	var policies []*Policy
 	for _, tePolicy := range te.Policies {
-		policy, err := c.policyStore.GetPolicy(tePolicy)
+		policy, err := c.policyStore.GetPolicy(ctx, tePolicy, PolicyTypeToken)
+		if err != nil {
+			return nil, err
+		}
+		policies = append(policies, policy)
+	}
+
+	_, derivedPolicies, err := c.fetchEntityAndDerivedPolicies(te.EntityID)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, item := range derivedPolicies {
+		policy, err := c.policyStore.GetPolicy(ctx, item, PolicyTypeToken)
 		if err != nil {
 			return nil, err
 		}

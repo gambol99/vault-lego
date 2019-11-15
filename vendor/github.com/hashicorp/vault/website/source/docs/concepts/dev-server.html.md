@@ -44,9 +44,9 @@ The properties of the dev server:
 ## Use Case
 
 The dev server should be used for experimentation with Vault features, such
-as different authentication backends, secret backends, audit backends, etc.
+as different auth methods, secrets engines, audit devices, etc.
 If you're new to Vault, you may want to pick up with [Your First
-Secret](https://www.vaultproject.io/intro/getting-started/first-secret.html) in
+Secret](/intro/getting-started/first-secret.html) in
 our getting started guide.
 
 In addition to experimentation, the dev server is very easy to automate

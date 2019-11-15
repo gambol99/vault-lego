@@ -21,54 +21,58 @@ import (
 	"sort"
 
 	"github.com/golang/glog"
-	"k8s.io/kubernetes/pkg/apis/extensions"
+	apps "k8s.io/api/apps/v1"
+	"k8s.io/client-go/util/integer"
 	"k8s.io/kubernetes/pkg/controller"
 	deploymentutil "k8s.io/kubernetes/pkg/controller/deployment/util"
-	"k8s.io/kubernetes/pkg/util/integer"
 )
 
 // rolloutRolling implements the logic for rolling a new replica set.
-func (dc *DeploymentController) rolloutRolling(deployment *extensions.Deployment) error {
-	newRS, oldRSs, err := dc.getAllReplicaSetsAndSyncRevision(deployment, true)
+func (dc *DeploymentController) rolloutRolling(d *apps.Deployment, rsList []*apps.ReplicaSet) error {
+	newRS, oldRSs, err := dc.getAllReplicaSetsAndSyncRevision(d, rsList, true)
 	if err != nil {
 		return err
 	}
 	allRSs := append(oldRSs, newRS)
 
 	// Scale up, if we can.
-	scaledUp, err := dc.reconcileNewReplicaSet(allRSs, newRS, deployment)
+	scaledUp, err := dc.reconcileNewReplicaSet(allRSs, newRS, d)
 	if err != nil {
 		return err
 	}
 	if scaledUp {
 		// Update DeploymentStatus
-		return dc.updateDeploymentStatus(allRSs, newRS, deployment)
+		return dc.syncRolloutStatus(allRSs, newRS, d)
 	}
 
 	// Scale down, if we can.
-	scaledDown, err := dc.reconcileOldReplicaSets(allRSs, controller.FilterActiveReplicaSets(oldRSs), newRS, deployment)
+	scaledDown, err := dc.reconcileOldReplicaSets(allRSs, controller.FilterActiveReplicaSets(oldRSs), newRS, d)
 	if err != nil {
 		return err
 	}
 	if scaledDown {
 		// Update DeploymentStatus
-		return dc.updateDeploymentStatus(allRSs, newRS, deployment)
+		return dc.syncRolloutStatus(allRSs, newRS, d)
 	}
 
-	dc.cleanupDeployment(oldRSs, deployment)
+	if deploymentutil.DeploymentComplete(d, &d.Status) {
+		if err := dc.cleanupDeployment(oldRSs, d); err != nil {
+			return err
+		}
+	}
 
 	// Sync deployment status
-	return dc.syncDeploymentStatus(allRSs, newRS, deployment)
+	return dc.syncRolloutStatus(allRSs, newRS, d)
 }
 
-func (dc *DeploymentController) reconcileNewReplicaSet(allRSs []*extensions.ReplicaSet, newRS *extensions.ReplicaSet, deployment *extensions.Deployment) (bool, error) {
-	if newRS.Spec.Replicas == deployment.Spec.Replicas {
+func (dc *DeploymentController) reconcileNewReplicaSet(allRSs []*apps.ReplicaSet, newRS *apps.ReplicaSet, deployment *apps.Deployment) (bool, error) {
+	if *(newRS.Spec.Replicas) == *(deployment.Spec.Replicas) {
 		// Scaling not required.
 		return false, nil
 	}
-	if newRS.Spec.Replicas > deployment.Spec.Replicas {
+	if *(newRS.Spec.Replicas) > *(deployment.Spec.Replicas) {
 		// Scale down.
-		scaled, _, err := dc.scaleReplicaSetAndRecordEvent(newRS, deployment.Spec.Replicas, deployment)
+		scaled, _, err := dc.scaleReplicaSetAndRecordEvent(newRS, *(deployment.Spec.Replicas), deployment)
 		return scaled, err
 	}
 	newReplicasCount, err := deploymentutil.NewRSNewReplicas(deployment, allRSs, newRS)
@@ -79,21 +83,15 @@ func (dc *DeploymentController) reconcileNewReplicaSet(allRSs []*extensions.Repl
 	return scaled, err
 }
 
-func (dc *DeploymentController) reconcileOldReplicaSets(allRSs []*extensions.ReplicaSet, oldRSs []*extensions.ReplicaSet, newRS *extensions.ReplicaSet, deployment *extensions.Deployment) (bool, error) {
+func (dc *DeploymentController) reconcileOldReplicaSets(allRSs []*apps.ReplicaSet, oldRSs []*apps.ReplicaSet, newRS *apps.ReplicaSet, deployment *apps.Deployment) (bool, error) {
 	oldPodsCount := deploymentutil.GetReplicaCountForReplicaSets(oldRSs)
 	if oldPodsCount == 0 {
 		// Can't scale down further
 		return false, nil
 	}
 
-	minReadySeconds := deployment.Spec.MinReadySeconds
 	allPodsCount := deploymentutil.GetReplicaCountForReplicaSets(allRSs)
-	// TODO: use dc.getAvailablePodsForReplicaSets instead
-	newRSAvailablePodCount, err := deploymentutil.GetAvailablePodsForReplicaSets(dc.client, deployment, []*extensions.ReplicaSet{newRS}, minReadySeconds)
-	if err != nil {
-		return false, fmt.Errorf("could not find available pods: %v", err)
-	}
-	glog.V(4).Infof("New RS %s/%s has %d available pods.", newRS.Namespace, newRS.Name, newRSAvailablePodCount)
+	glog.V(4).Infof("New replica set %s/%s has %d available pods.", newRS.Namespace, newRS.Name, newRS.Status.AvailableReplicas)
 	maxUnavailable := deploymentutil.MaxUnavailable(*deployment)
 
 	// Check if we can scale down. We can scale down in the following 2 cases:
@@ -126,8 +124,8 @@ func (dc *DeploymentController) reconcileOldReplicaSets(allRSs []*extensions.Rep
 	// * The new replica set created must start with 0 replicas because allPodsCount is already at 13.
 	// * However, newRSPodsUnavailable would also be 0, so the 2 old replica sets could be scaled down by 5 (13 - 8 - 0), which would then
 	// allow the new replica set to be scaled up by 5.
-	minAvailable := deployment.Spec.Replicas - maxUnavailable
-	newRSUnavailablePodCount := newRS.Spec.Replicas - newRSAvailablePodCount
+	minAvailable := *(deployment.Spec.Replicas) - maxUnavailable
+	newRSUnavailablePodCount := *(newRS.Spec.Replicas) - newRS.Status.AvailableReplicas
 	maxScaledDown := allPodsCount - minAvailable - newRSUnavailablePodCount
 	if maxScaledDown <= 0 {
 		return false, nil
@@ -135,7 +133,7 @@ func (dc *DeploymentController) reconcileOldReplicaSets(allRSs []*extensions.Rep
 
 	// Clean up unhealthy replicas first, otherwise unhealthy replicas will block deployment
 	// and cause timeout. See https://github.com/kubernetes/kubernetes/issues/16737
-	oldRSs, cleanupCount, err := dc.cleanupUnhealthyReplicas(oldRSs, deployment, deployment.Spec.MinReadySeconds, maxScaledDown)
+	oldRSs, cleanupCount, err := dc.cleanupUnhealthyReplicas(oldRSs, deployment, maxScaledDown)
 	if err != nil {
 		return false, nil
 	}
@@ -154,7 +152,7 @@ func (dc *DeploymentController) reconcileOldReplicaSets(allRSs []*extensions.Rep
 }
 
 // cleanupUnhealthyReplicas will scale down old replica sets with unhealthy replicas, so that all unhealthy replicas will be deleted.
-func (dc *DeploymentController) cleanupUnhealthyReplicas(oldRSs []*extensions.ReplicaSet, deployment *extensions.Deployment, minReadySeconds, maxCleanupCount int32) ([]*extensions.ReplicaSet, int32, error) {
+func (dc *DeploymentController) cleanupUnhealthyReplicas(oldRSs []*apps.ReplicaSet, deployment *apps.Deployment, maxCleanupCount int32) ([]*apps.ReplicaSet, int32, error) {
 	sort.Sort(controller.ReplicaSetsByCreationTimestamp(oldRSs))
 	// Safely scale down all old replica sets with unhealthy replicas. Replica set will sort the pods in the order
 	// such that not-ready < ready, unscheduled < scheduled, and pending < running. This ensures that unhealthy replicas will
@@ -164,25 +162,20 @@ func (dc *DeploymentController) cleanupUnhealthyReplicas(oldRSs []*extensions.Re
 		if totalScaledDown >= maxCleanupCount {
 			break
 		}
-		if targetRS.Spec.Replicas == 0 {
+		if *(targetRS.Spec.Replicas) == 0 {
 			// cannot scale down this replica set.
 			continue
 		}
-		// TODO: use dc.getAvailablePodsForReplicaSets instead
-		availablePodCount, err := deploymentutil.GetAvailablePodsForReplicaSets(dc.client, deployment, []*extensions.ReplicaSet{targetRS}, minReadySeconds)
-		if err != nil {
-			return nil, totalScaledDown, fmt.Errorf("could not find available pods: %v", err)
-		}
-		glog.V(4).Infof("Found %d available pods in old RS %s/%s", availablePodCount, targetRS.Namespace, targetRS.Name)
-		if targetRS.Spec.Replicas == availablePodCount {
+		glog.V(4).Infof("Found %d available pods in old RS %s/%s", targetRS.Status.AvailableReplicas, targetRS.Namespace, targetRS.Name)
+		if *(targetRS.Spec.Replicas) == targetRS.Status.AvailableReplicas {
 			// no unhealthy replicas found, no scaling required.
 			continue
 		}
 
-		scaledDownCount := int32(integer.IntMin(int(maxCleanupCount-totalScaledDown), int(targetRS.Spec.Replicas-availablePodCount)))
-		newReplicasCount := targetRS.Spec.Replicas - scaledDownCount
-		if newReplicasCount > targetRS.Spec.Replicas {
-			return nil, 0, fmt.Errorf("when cleaning up unhealthy replicas, got invalid request to scale down %s/%s %d -> %d", targetRS.Namespace, targetRS.Name, targetRS.Spec.Replicas, newReplicasCount)
+		scaledDownCount := int32(integer.IntMin(int(maxCleanupCount-totalScaledDown), int(*(targetRS.Spec.Replicas)-targetRS.Status.AvailableReplicas)))
+		newReplicasCount := *(targetRS.Spec.Replicas) - scaledDownCount
+		if newReplicasCount > *(targetRS.Spec.Replicas) {
+			return nil, 0, fmt.Errorf("when cleaning up unhealthy replicas, got invalid request to scale down %s/%s %d -> %d", targetRS.Namespace, targetRS.Name, *(targetRS.Spec.Replicas), newReplicasCount)
 		}
 		_, updatedOldRS, err := dc.scaleReplicaSetAndRecordEvent(targetRS, newReplicasCount, deployment)
 		if err != nil {
@@ -196,18 +189,13 @@ func (dc *DeploymentController) cleanupUnhealthyReplicas(oldRSs []*extensions.Re
 
 // scaleDownOldReplicaSetsForRollingUpdate scales down old replica sets when deployment strategy is "RollingUpdate".
 // Need check maxUnavailable to ensure availability
-func (dc *DeploymentController) scaleDownOldReplicaSetsForRollingUpdate(allRSs []*extensions.ReplicaSet, oldRSs []*extensions.ReplicaSet, deployment *extensions.Deployment) (int32, error) {
+func (dc *DeploymentController) scaleDownOldReplicaSetsForRollingUpdate(allRSs []*apps.ReplicaSet, oldRSs []*apps.ReplicaSet, deployment *apps.Deployment) (int32, error) {
 	maxUnavailable := deploymentutil.MaxUnavailable(*deployment)
 
 	// Check if we can scale down.
-	minAvailable := deployment.Spec.Replicas - maxUnavailable
-	minReadySeconds := deployment.Spec.MinReadySeconds
-	// Find the number of ready pods.
-	// TODO: use dc.getAvailablePodsForReplicaSets instead
-	availablePodCount, err := deploymentutil.GetAvailablePodsForReplicaSets(dc.client, deployment, allRSs, minReadySeconds)
-	if err != nil {
-		return 0, fmt.Errorf("could not find available pods: %v", err)
-	}
+	minAvailable := *(deployment.Spec.Replicas) - maxUnavailable
+	// Find the number of available pods.
+	availablePodCount := deploymentutil.GetAvailableReplicaCountForReplicaSets(allRSs)
 	if availablePodCount <= minAvailable {
 		// Cannot scale down.
 		return 0, nil
@@ -223,17 +211,17 @@ func (dc *DeploymentController) scaleDownOldReplicaSetsForRollingUpdate(allRSs [
 			// No further scaling required.
 			break
 		}
-		if targetRS.Spec.Replicas == 0 {
+		if *(targetRS.Spec.Replicas) == 0 {
 			// cannot scale down this ReplicaSet.
 			continue
 		}
 		// Scale down.
-		scaleDownCount := int32(integer.IntMin(int(targetRS.Spec.Replicas), int(totalScaleDownCount-totalScaledDown)))
-		newReplicasCount := targetRS.Spec.Replicas - scaleDownCount
-		if newReplicasCount > targetRS.Spec.Replicas {
-			return 0, fmt.Errorf("when scaling down old RS, got invalid request to scale down %s/%s %d -> %d", targetRS.Namespace, targetRS.Name, targetRS.Spec.Replicas, newReplicasCount)
+		scaleDownCount := int32(integer.IntMin(int(*(targetRS.Spec.Replicas)), int(totalScaleDownCount-totalScaledDown)))
+		newReplicasCount := *(targetRS.Spec.Replicas) - scaleDownCount
+		if newReplicasCount > *(targetRS.Spec.Replicas) {
+			return 0, fmt.Errorf("when scaling down old RS, got invalid request to scale down %s/%s %d -> %d", targetRS.Namespace, targetRS.Name, *(targetRS.Spec.Replicas), newReplicasCount)
 		}
-		_, _, err = dc.scaleReplicaSetAndRecordEvent(targetRS, newReplicasCount, deployment)
+		_, _, err := dc.scaleReplicaSetAndRecordEvent(targetRS, newReplicasCount, deployment)
 		if err != nil {
 			return totalScaledDown, err
 		}

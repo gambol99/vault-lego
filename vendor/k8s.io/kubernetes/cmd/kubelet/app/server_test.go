@@ -18,56 +18,45 @@ package app
 
 import (
 	"testing"
-
-	"k8s.io/kubernetes/pkg/kubelet"
-	"k8s.io/kubernetes/pkg/util/config"
 )
 
 func TestValueOfAllocatableResources(t *testing.T) {
 	testCases := []struct {
-		kubeReserved   string
-		systemReserved string
+		kubeReserved   map[string]string
+		systemReserved map[string]string
 		errorExpected  bool
 		name           string
 	}{
 		{
-			kubeReserved:   "cpu=200m,memory=-150G",
-			systemReserved: "cpu=200m,memory=150G",
+			kubeReserved:   map[string]string{"cpu": "200m", "memory": "-150G", "ephemeral-storage": "10Gi"},
+			systemReserved: map[string]string{"cpu": "200m", "memory": "15Ki"},
 			errorExpected:  true,
 			name:           "negative quantity value",
 		},
 		{
-			kubeReserved:   "cpu=200m,memory=150GG",
-			systemReserved: "cpu=200m,memory=150G",
+			kubeReserved:   map[string]string{"cpu": "200m", "memory": "150Gi", "ephemeral-storage": "10Gi"},
+			systemReserved: map[string]string{"cpu": "200m", "memory": "15Ky"},
 			errorExpected:  true,
 			name:           "invalid quantity unit",
 		},
 		{
-			kubeReserved:   "cpu=200m,memory=15G",
-			systemReserved: "cpu=200m,memory=15Ki",
+			kubeReserved:   map[string]string{"cpu": "200m", "memory": "15G", "ephemeral-storage": "10Gi"},
+			systemReserved: map[string]string{"cpu": "200m", "memory": "15Ki"},
 			errorExpected:  false,
 			name:           "Valid resource quantity",
 		},
 	}
 
 	for _, test := range testCases {
-		kubeReservedCM := make(config.ConfigurationMap)
-		systemReservedCM := make(config.ConfigurationMap)
-
-		kubeReservedCM.Set(test.kubeReserved)
-		systemReservedCM.Set(test.systemReserved)
-
-		_, err := kubelet.ParseReservation(kubeReservedCM, systemReservedCM)
-		if err != nil {
-			t.Logf("%s: error returned: %v", test.name, err)
-		}
+		_, err1 := parseResourceList(test.kubeReserved)
+		_, err2 := parseResourceList(test.systemReserved)
 		if test.errorExpected {
-			if err == nil {
+			if err1 == nil && err2 == nil {
 				t.Errorf("%s: error expected", test.name)
 			}
 		} else {
-			if err != nil {
-				t.Errorf("%s: unexpected error: %v", test.name, err)
+			if err1 != nil || err2 != nil {
+				t.Errorf("%s: unexpected error: %v, %v", test.name, err1, err2)
 			}
 		}
 	}

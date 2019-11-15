@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Copyright 2016 The Kubernetes Authors.
 #
@@ -19,17 +19,17 @@ set -o nounset
 set -o pipefail
 
 KUBE_ROOT=$(dirname "${BASH_SOURCE}")/..
-KUBE_REMOTE_RUNTIME_ROOT="${KUBE_ROOT}/pkg/kubelet/api/v1alpha1/runtime"
+KUBE_REMOTE_RUNTIME_ROOT="${KUBE_ROOT}/pkg/kubelet/apis/cri/runtime/v1alpha2/"
 source "${KUBE_ROOT}/hack/lib/init.sh"
 
 kube::golang::setup_env
 
 BINS=(
-	cmd/libs/go2idl/go-to-protobuf/protoc-gen-gogo
+	vendor/k8s.io/code-generator/cmd/go-to-protobuf/protoc-gen-gogo
 )
 make -C "${KUBE_ROOT}" WHAT="${BINS[*]}"
 
-if [[ -z "$(which protoc)" || "$(protoc --version)" != "libprotoc 3.0."* ]]; then
+if [[ -z "$(which protoc)" || "$(protoc --version)" != "libprotoc 3."* ]]; then
   echo "Generating protobuf requires protoc 3.0.0-beta1 or newer. Please download and"
   echo "install the platform appropriate Protobuf package for your OS: "
   echo
@@ -46,8 +46,16 @@ function cleanup {
 trap cleanup EXIT
 
 gogopath=$(dirname $(kube::util::find-binary "protoc-gen-gogo"))
-export PATH=$gogopath:$PATH
-protoc -I${KUBE_REMOTE_RUNTIME_ROOT} --gogo_out=plugins=grpc:${KUBE_REMOTE_RUNTIME_ROOT} ${KUBE_REMOTE_RUNTIME_ROOT}/api.proto
-echo "$(cat hack/boilerplate/boilerplate.go.txt ${KUBE_REMOTE_RUNTIME_ROOT}/api.pb.go)" > ${KUBE_REMOTE_RUNTIME_ROOT}/api.pb.go
-sed -i".bak" "s/Copyright YEAR/Copyright $(date '+%Y')/g" ${KUBE_REMOTE_RUNTIME_ROOT}/api.pb.go
 
+PATH="${gogopath}:${PATH}" \
+  protoc \
+  --proto_path="${KUBE_REMOTE_RUNTIME_ROOT}" \
+  --proto_path="${KUBE_ROOT}/vendor" \
+  --gogo_out=plugins=grpc:${KUBE_REMOTE_RUNTIME_ROOT} ${KUBE_REMOTE_RUNTIME_ROOT}/api.proto
+
+# Update boilerplate for the generated file.
+echo "$(cat hack/boilerplate/boilerplate.generatego.txt ${KUBE_REMOTE_RUNTIME_ROOT}/api.pb.go)" > ${KUBE_REMOTE_RUNTIME_ROOT}/api.pb.go
+
+# Run gofmt to clean up the generated code.
+kube::golang::verify_go_version
+gofmt -l -s -w ${KUBE_REMOTE_RUNTIME_ROOT}/api.pb.go

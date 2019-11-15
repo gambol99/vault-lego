@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -209,6 +210,65 @@ func TestDefaultFieldsAreNotPrefixed(t *testing.T) {
 	})
 }
 
+func TestWithTimeShouldOverrideTime(t *testing.T) {
+	now := time.Now().Add(24 * time.Hour)
+
+	LogAndAssertJSON(t, func(log *Logger) {
+		log.WithTime(now).Info("foobar")
+	}, func(fields Fields) {
+		assert.Equal(t, fields["time"], now.Format(defaultTimestampFormat))
+	})
+}
+
+func TestWithTimeShouldNotOverrideFields(t *testing.T) {
+	now := time.Now().Add(24 * time.Hour)
+
+	LogAndAssertJSON(t, func(log *Logger) {
+		log.WithField("herp", "derp").WithTime(now).Info("blah")
+	}, func(fields Fields) {
+		assert.Equal(t, fields["time"], now.Format(defaultTimestampFormat))
+		assert.Equal(t, fields["herp"], "derp")
+	})
+}
+
+func TestWithFieldShouldNotOverrideTime(t *testing.T) {
+	now := time.Now().Add(24 * time.Hour)
+
+	LogAndAssertJSON(t, func(log *Logger) {
+		log.WithTime(now).WithField("herp", "derp").Info("blah")
+	}, func(fields Fields) {
+		assert.Equal(t, fields["time"], now.Format(defaultTimestampFormat))
+		assert.Equal(t, fields["herp"], "derp")
+	})
+}
+
+func TestTimeOverrideMultipleLogs(t *testing.T) {
+	var buffer bytes.Buffer
+	var firstFields, secondFields Fields
+
+	logger := New()
+	logger.Out = &buffer
+	formatter := new(JSONFormatter)
+	formatter.TimestampFormat = time.StampMilli
+	logger.Formatter = formatter
+
+	llog := logger.WithField("herp", "derp")
+	llog.Info("foo")
+
+	err := json.Unmarshal(buffer.Bytes(), &firstFields)
+	assert.NoError(t, err, "should have decoded first message")
+
+	buffer.Reset()
+
+	time.Sleep(10 * time.Millisecond)
+	llog.Info("bar")
+
+	err = json.Unmarshal(buffer.Bytes(), &secondFields)
+	assert.NoError(t, err, "should have decoded second message")
+
+	assert.NotEqual(t, firstFields["time"], secondFields["time"], "timestamps should not be equal")
+}
+
 func TestDoubleLoggingDoesntPrefixPreviousFields(t *testing.T) {
 
 	var buffer bytes.Buffer
@@ -358,4 +418,29 @@ func TestLogrusInterface(t *testing.T) {
 	// test Entry
 	e := logger.WithField("another", "value")
 	fn(e)
+}
+
+// Implements io.Writer using channels for synchronization, so we can wait on
+// the Entry.Writer goroutine to write in a non-racey way. This does assume that
+// there is a single call to Logger.Out for each message.
+type channelWriter chan []byte
+
+func (cw channelWriter) Write(p []byte) (int, error) {
+	cw <- p
+	return len(p), nil
+}
+
+func TestEntryWriter(t *testing.T) {
+	cw := channelWriter(make(chan []byte, 1))
+	log := New()
+	log.Out = cw
+	log.Formatter = new(JSONFormatter)
+	log.WithField("foo", "bar").WriterLevel(WarnLevel).Write([]byte("hello\n"))
+
+	bs := <-cw
+	var fields Fields
+	err := json.Unmarshal(bs, &fields)
+	assert.Nil(t, err)
+	assert.Equal(t, fields["foo"], "bar")
+	assert.Equal(t, fields["level"], "warning")
 }

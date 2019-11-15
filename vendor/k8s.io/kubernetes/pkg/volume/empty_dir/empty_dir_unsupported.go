@@ -19,6 +19,7 @@ limitations under the License.
 package empty_dir
 
 import (
+	"k8s.io/api/core/v1"
 	"k8s.io/kubernetes/pkg/util/mount"
 )
 
@@ -27,10 +28,6 @@ type realMountDetector struct {
 	mounter mount.Interface
 }
 
-func (m *realMountDetector) GetMountMedium(path string) (storageMedium, bool, error) {
-	return mediumUnknown, false, nil
-}
-
-func selinuxEnabled() bool {
-	return false
+func (m *realMountDetector) GetMountMedium(path string) (v1.StorageMedium, bool, error) {
+	return v1.StorageMediumDefault, false, nil
 }

@@ -18,13 +18,17 @@ limitations under the License.
 package policybased
 
 import (
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/errors"
-	"k8s.io/kubernetes/pkg/api/rest"
+	"context"
+
+	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apiserver/pkg/authorization/authorizer"
+	"k8s.io/apiserver/pkg/registry/rest"
+	kapihelper "k8s.io/kubernetes/pkg/apis/core/helper"
 	"k8s.io/kubernetes/pkg/apis/rbac"
-	"k8s.io/kubernetes/pkg/apis/rbac/validation"
-	"k8s.io/kubernetes/pkg/auth/user"
-	"k8s.io/kubernetes/pkg/runtime"
+	rbacregistry "k8s.io/kubernetes/pkg/registry/rbac"
+	rbacregistryvalidation "k8s.io/kubernetes/pkg/registry/rbac/validation"
 )
 
 var groupResource = rbac.Resource("roles")
@@ -32,78 +36,51 @@ var groupResource = rbac.Resource("roles")
 type Storage struct {
 	rest.StandardStorage
 
-	ruleResolver validation.AuthorizationRuleResolver
+	authorizer authorizer.Authorizer
 
-	// user which skips privilege escalation checks
-	superUser string
+	ruleResolver rbacregistryvalidation.AuthorizationRuleResolver
 }
 
-func NewStorage(s rest.StandardStorage, ruleResolver validation.AuthorizationRuleResolver, superUser string) *Storage {
-	return &Storage{s, ruleResolver, superUser}
+func NewStorage(s rest.StandardStorage, authorizer authorizer.Authorizer, ruleResolver rbacregistryvalidation.AuthorizationRuleResolver) *Storage {
+	return &Storage{s, authorizer, ruleResolver}
 }
 
-func (s *Storage) Create(ctx api.Context, obj runtime.Object) (runtime.Object, error) {
-	if u, ok := api.UserFrom(ctx); ok {
-		if s.superUser != "" && u.GetName() == s.superUser {
-			return s.StandardStorage.Create(ctx, obj)
-		}
+func (r *Storage) NamespaceScoped() bool {
+	return true
+}
 
-		// system:masters is special because the API server uses it for privileged loopback connections
-		// therefore we know that a member of system:masters can always do anything
-		for _, group := range u.GetGroups() {
-			if group == user.SystemPrivilegedGroup {
-				return s.StandardStorage.Create(ctx, obj)
-			}
-		}
+func (s *Storage) Create(ctx context.Context, obj runtime.Object, createValidation rest.ValidateObjectFunc, options *metav1.CreateOptions) (runtime.Object, error) {
+	if rbacregistry.EscalationAllowed(ctx) || rbacregistry.RoleEscalationAuthorized(ctx, s.authorizer) {
+		return s.StandardStorage.Create(ctx, obj, createValidation, options)
 	}
 
 	role := obj.(*rbac.Role)
 	rules := role.Rules
-	if err := validation.ConfirmNoEscalation(ctx, s.ruleResolver, rules); err != nil {
+	if err := rbacregistryvalidation.ConfirmNoEscalationInternal(ctx, s.ruleResolver, rules); err != nil {
 		return nil, errors.NewForbidden(groupResource, role.Name, err)
 	}
-	return s.StandardStorage.Create(ctx, obj)
+	return s.StandardStorage.Create(ctx, obj, createValidation, options)
 }
 
-func (s *Storage) Update(ctx api.Context, name string, obj rest.UpdatedObjectInfo) (runtime.Object, bool, error) {
-	if user, ok := api.UserFrom(ctx); ok {
-		if s.superUser != "" && user.GetName() == s.superUser {
-			return s.StandardStorage.Update(ctx, name, obj)
-		}
+func (s *Storage) Update(ctx context.Context, name string, obj rest.UpdatedObjectInfo, createValidation rest.ValidateObjectFunc, updateValidation rest.ValidateObjectUpdateFunc, forceAllowCreate bool, options *metav1.UpdateOptions) (runtime.Object, bool, error) {
+	if rbacregistry.EscalationAllowed(ctx) || rbacregistry.RoleEscalationAuthorized(ctx, s.authorizer) {
+		return s.StandardStorage.Update(ctx, name, obj, createValidation, updateValidation, forceAllowCreate, options)
 	}
 
-	nonEscalatingInfo := wrapUpdatedObjectInfo(obj, func(ctx api.Context, obj runtime.Object, oldObj runtime.Object) (runtime.Object, error) {
+	nonEscalatingInfo := rest.WrapUpdatedObjectInfo(obj, func(ctx context.Context, obj runtime.Object, oldObj runtime.Object) (runtime.Object, error) {
 		role := obj.(*rbac.Role)
 
+		// if we're only mutating fields needed for the GC to eventually delete this obj, return
+		if rbacregistry.IsOnlyMutatingGCFields(obj, oldObj, kapihelper.Semantic) {
+			return obj, nil
+		}
+
 		rules := role.Rules
-		if err := validation.ConfirmNoEscalation(ctx, s.ruleResolver, rules); err != nil {
+		if err := rbacregistryvalidation.ConfirmNoEscalationInternal(ctx, s.ruleResolver, rules); err != nil {
 			return nil, errors.NewForbidden(groupResource, role.Name, err)
 		}
 		return obj, nil
 	})
 
-	return s.StandardStorage.Update(ctx, name, nonEscalatingInfo)
-}
-
-// TODO(ericchiang): This logic is copied from #26240. Replace with once that PR is merged into master.
-type wrappedUpdatedObjectInfo struct {
-	objInfo rest.UpdatedObjectInfo
-
-	transformFunc rest.TransformFunc
-}
-
-func wrapUpdatedObjectInfo(objInfo rest.UpdatedObjectInfo, transformFunc rest.TransformFunc) rest.UpdatedObjectInfo {
-	return &wrappedUpdatedObjectInfo{objInfo, transformFunc}
-}
-
-func (i *wrappedUpdatedObjectInfo) Preconditions() *api.Preconditions {
-	return i.objInfo.Preconditions()
-}
-
-func (i *wrappedUpdatedObjectInfo) UpdatedObject(ctx api.Context, oldObj runtime.Object) (runtime.Object, error) {
-	obj, err := i.objInfo.UpdatedObject(ctx, oldObj)
-	if err != nil {
-		return obj, err
-	}
-	return i.transformFunc(ctx, obj, oldObj)
+	return s.StandardStorage.Update(ctx, name, nonEscalatingInfo, createValidation, updateValidation, forceAllowCreate, options)
 }

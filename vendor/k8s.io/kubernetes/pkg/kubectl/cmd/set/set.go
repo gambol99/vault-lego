@@ -17,35 +17,36 @@ limitations under the License.
 package set
 
 import (
-	"io"
-
-	"github.com/renstrom/dedent"
 	"github.com/spf13/cobra"
+	"k8s.io/cli-runtime/pkg/genericclioptions"
+	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
+	"k8s.io/kubernetes/pkg/kubectl/util/i18n"
 )
 
 var (
-	set_long = dedent.Dedent(`
+	set_long = templates.LongDesc(`
 		Configure application resources
-	
+
 		These commands help you make changes to existing application resources.`)
-	set_example = dedent.Dedent(``)
 )
 
-func NewCmdSet(f *cmdutil.Factory, out io.Writer) *cobra.Command {
-
+func NewCmdSet(f cmdutil.Factory, streams genericclioptions.IOStreams) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:     "set SUBCOMMAND",
-		Short:   "Set specific features on objects",
-		Long:    set_long,
-		Example: set_example,
-		Run: func(cmd *cobra.Command, args []string) {
-			cmd.Help()
-		},
+		Use: "set SUBCOMMAND",
+		DisableFlagsInUseLine: true,
+		Short: i18n.T("Set specific features on objects"),
+		Long:  set_long,
+		Run:   cmdutil.DefaultSubCommandRun(streams.ErrOut),
 	}
 
 	// add subcommands
-	cmd.AddCommand(NewCmdImage(f, out))
+	cmd.AddCommand(NewCmdImage(f, streams))
+	cmd.AddCommand(NewCmdResources(f, streams))
+	cmd.AddCommand(NewCmdSelector(f, streams))
+	cmd.AddCommand(NewCmdSubject(f, streams))
+	cmd.AddCommand(NewCmdServiceAccount(f, streams))
+	cmd.AddCommand(NewCmdEnv(f, streams))
 
 	return cmd
 }

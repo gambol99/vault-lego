@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Copyright 2014 The Kubernetes Authors.
 #
@@ -36,18 +36,23 @@ trap "rm -f '${CACHE}'" HUP INT TERM ERR
 # Example:
 #   kfind -type f -name foobar.go
 function kfind() {
-    find .                         \
+    # We want to include the "special" vendor directories which are actually
+    # part of the Kubernetes source tree (./staging/*) but we need them to be
+    # named as their ./vendor/* equivalents.  Also, we  do not want all of
+    # ./vendor or even all of ./vendor/k8s.io.
+    find -H .                      \
+        \(                         \
         -not \(                    \
             \(                     \
                 -path ./vendor -o  \
-                -path ./staging -o \
                 -path ./_\* -o     \
                 -path ./.\* -o     \
-                -path ./docs -o    \
-                -path ./examples   \
+                -path ./docs       \
             \) -prune              \
         \)                         \
-        "$@"
+        \)                         \
+        "$@"                       \
+        | sed 's|^./staging/src|vendor|'
 }
 
 NEED_FIND=true
@@ -60,9 +65,9 @@ fi
 mkdir -p $(dirname "${CACHE}")
 if $("${NEED_FIND}"); then
     kfind -type f -name \*.go  \
-        | xargs -n1 dirname    \
-        | sort -u              \
+        | sed 's|/[^/]*$||'    \
         | sed 's|^./||'        \
+        | LC_ALL=C sort -u     \
         > "${CACHE}"
 fi
 cat "${CACHE}"

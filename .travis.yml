@@ -1,33 +1,33 @@
 env:
   global:
-  - AUTHOR_EMAIL=gambol99@gmail.com
-  - REGISTRY_USERNAME=gambol99+rebotbuilder
-  - REGISTRY=quay.io
-  - secure: KRN3I4z2dUL6+8oTqi0OHfGSYlCzSkrSaA19VMJFYImewE1mU3iI7bati5i4HopPe75StamekZP79g+vjbWtFGMUyRKfkaNbciKrdS4zwo4MrORj1dFlM7ljd/2MFFjq//4uh9opozbbmqQc5javUdVduXVbU6TYr6tPjH74MhePhuiA/NW/oDlTSA3xmvBhmlX2zBJYws5uUB40T5yq7ZLKAdu50WUJ2q0zdQHJbX2nJbo5VOrVgfyfjr38RVfWa0009yvrcBqaAdcXIsnl6DlQlMQYad4cA3eegTxn+zplJvCT7D5JUmLjl0HI7qclJxmR4Oo78vRSpIyzJnTm5iYJ/f2HQHzht3micv+FeHJ5wNhn/JE39micClMPsWRaJ9rPAcKQLPggxnCb7+JBPP21UnIk2kRLA0WPYOIZvRplmtH9cOX8R0BrnK/lwVIFPWdh99ucxsic30i32eaNs4JHPYx5fuoko/4HoAO0mex/OXHrAqADh3ll2sTfgvawmwF5noEbwVuAseeZFlvNVbQaX6lQyqBFGrIke0UQHPgMHo1MrxBShWh++J/4UBLkPBCgJcewB5YySvkNaZ2zkHmJiNU2k9NUbMWAT+X64JZLZJCLWkoBdP0gD3irjlTR086pueWMWda0n4PKvGtuMikK60CHm4Ae+6UZvQSDa5s=
-  - secure: LjRAcTbUIuPEOy0xoo0s38O3aJlgv4CHkz07JOdY+wBK9N+DufJNfVyokJ9WYp+z7SrmEeYCq1TZRIendpfRLsMt2r8RFXmk6z5Lwo3FB33/VDBHBFJ2qAbMfysrEttjUxHbPxcBYJ7xQ5ElwMttIlbPUQSQdb7DDtkaBA4kezu637TklC0e6S7RQmNrUFhsy9TVS0oToLBZcTYeBoaICUcK6uLA6fIE/QNf9QisYiuc4xmjkBfDPw8TUTYm7NkIe3kX+JaegRyn+1EAy6jlUCJ7CHfO6HELE9aTsLaScdbfWatBDLS992DQYK1U2kbjaxlhJUUOtNyecTX0WaAjcFE+zOL2TVydqIGBXaqG5JlREP/+9dcO1sNG4xJ82byi6oa+EnmBfZemRnBaZeYmLx2INN/KJ2a36Thiq06Wz3A2fFWToRG3gUIvpZ9+MELCshwX5s8tMLTJ2LCVBCbYMLB5wgNinTui35Nsx8SgAxv5YHSHqOLy+pqqYtdrxZ2c5EVWNLhC1BA3k1CrbUeHeccUiBuH2Hr9JoKn8wIQuaufOkzQJLEGku41pyH3mF2wEFG0/rMH28/WoKx22kUxSXqpq9kamgoGeFvWMbPEFp/eXjhDwFNvWuEzGGHdZpa2S/fwVEekXF2NjWHSqu3RWrgc/2DDSQmbafkkI2frqOs=
+  - REGISTRY_USERNAME=catac
+  # REGISTRY_PASSWORD
+  - secure: 0dZ2k0tAujm9R6EVtc02UXsByTU71GzlTrYI4XkM9nOZwBWjoM9j2d/bpCo9Xe/W5K4n+XDzBj+q/BymvbsaqRuxOxIT/tJJkS8hpOeEnfn4hLLJeelHF1YWbvDFLsfE/hu4EQnSGDwNXaWTKmqh2A1jGQyNNhNIYRKhTzPIvyzKU2X99/JPUtk0ZsB9AprVoHOVh2+7S0m/UQ2ro4LNQV7goIdVSxI92yPkqVWUIOhC5qoC8kgWrEcVjJW9dfnYxRNJrlXPpknyrU4Up2CqeapDbhbQlDL+B5aPRMMkGCtWtA4dSv8TVF8dP5hU29+yzLpY7CQ9017spVTUN81EW8fj8Vu5geWDP7CHPgMCtVaDUpiW2DZoeSX88YbpFy/H+iRueHLED51xyncDjSgeYd+pOD+sjetYunnLKEgUuvtBQ1mlqSPS32uydfZ/MuhLsC3O6AP/oGaIcVIOfCzTHpYuc1EQi1E68AMiL00ZU8oQ3nZpCBBf3MHqAWsfOgH1DtCRuiuVvejdamqOqLbYONp0ZzybA0IFbUY/QGZBkA0EDGMeXHsT+GC9nCfG2YM7DwMGrLFpjsGasPMW47+osDBR46eylKy581N6tYyNdBJ6+Qx3kz970vkr0NxgvV96NQfmR/ocjDNy9aSz+vo3zh9P+FjHrper9YHPBMD3SVI=
+  # GITHUB_TOKEN
+  - secure: dQR3YnnuHBl+avo+0EJtu8l+Z3RzKOSS+UKVzWs0tHkEO8xX7KMVaiipjxyXMZ1Yu3EiMUtBEqoaAnOwMJOe4nCKZNQJSgZzl4dFFHJyz20dqxayeGN3/W1BhZ108yzyCppBJHkCbOczA5ZMvY1O/Wa1uk+K9qNAZ8MdtYX3OKG5rlTMtgrVQEFyjEsX3yzHiZ4heVEENT1wPo4UKZ/8fS2JABVwBisXDd1hFT0XgkoB2OV/PSrgn3Hg5HheN03PWigfQuZWKckYiIZYkmBp8csJSfQ1qX6ceGsxyc2oL1N6mwaWbdF7/GW/n2eZoXJxBFQD/8SMFM9FgKbS5GeROsYeoQoHW3atKkLW4pnIbDk6mFGCnAcyykPyPO8fklMXSLutiSyeza7PxnEfzb2lRHbI9qIPeMN/jzYnkBelxXVDl07ndr5FUJGUeX2CQVTJKcAV3iC+HMMXUip1GTi5gHssoK7hiqbmN3Av5UKaIDc28nMlKbdBfK7/0x0WYAnGACQ1IatdTBy8vJoQXiMcqt09MNk4uoBynyCb1j1GalljCbWYjK80TnqLeTJ971s5stvdgQg+LehUAu9vSebrFb5paoId+Oqj6nJ4djEM0N0Bse+o7lF76tfqVbhmcek8pR2jtP01ymB6TclnaEFelJWOzNkoHwbnNJazkALXv/I=
 services:
 - docker
 language: go
 go:
-- 1.7
+- 1.13.4
 install:
 - go get github.com/Masterminds/glide
 script:
 - make test
 - if ([[ ${TRAVIS_BRANCH} == "master" ]] && [[ ${TRAVIS_PULL_REQUEST} != "true" ]])
-  || [[ -n ${TRAVIS_TAG} ]]; then docker login -u ${REGISTRY_USERNAME} -p ${REGISTRY_TOKEN}
-  -e ${AUTHOR_EMAIL} ${REGISTRY}; VERSION="latest" make docker-release; fi
+  || [[ -n ${TRAVIS_TAG} ]]; then docker login -u ${REGISTRY_USERNAME} -p ${REGISTRY_PASSWORD};
+  VERSION="latest" make docker-release; fi
 before_deploy:
 - NAME=GOOS=linux GOARCH=amd64 go build -o bin/vault-lego-linux-amd64
 after_deploy:
-- docker login -u ${REGISTRY_USERNAME} -p ${REGISTRY_TOKEN} -e ${AUTHOR_EMAIL} ${REGISTRY}
+- docker login -u ${REGISTRY_USERNAME} -p ${REGISTRY_PASSWORD}
 - VERSION=$TRAVIS_TAG make docker-release
 deploy:
   provider: releases
   skip_cleanup: true
   on:
-    repo: gambol99/vault-lego
+    repo: catac/vault-lego
     tags: true
   api_key:
-    secure: ${GITHUB_TOKEN}
+    secure: "${GITHUB_TOKEN}"
   file: bin/vault-lego-linux-amd64

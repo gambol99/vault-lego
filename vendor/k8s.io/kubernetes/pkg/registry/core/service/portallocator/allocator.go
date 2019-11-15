@@ -20,9 +20,9 @@ import (
 	"errors"
 	"fmt"
 
-	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/apimachinery/pkg/util/net"
+	api "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/registry/core/service/allocator"
-	"k8s.io/kubernetes/pkg/util/net"
 
 	"github.com/golang/glog"
 )
@@ -33,6 +33,10 @@ type Interface interface {
 	Allocate(int) error
 	AllocateNext() (int, error)
 	Release(int) error
+	ForEach(func(int))
+
+	// For testing
+	Has(int) bool
 }
 
 var (
@@ -70,16 +74,34 @@ func NewPortAllocatorCustom(pr net.PortRange, allocatorFactory allocator.Allocat
 	return a
 }
 
-// Helper that wraps NewAllocatorCIDRRange, for creating a range backed by an in-memory store.
+// Helper that wraps NewPortAllocatorCustom, for creating a range backed by an in-memory store.
 func NewPortAllocator(pr net.PortRange) *PortAllocator {
 	return NewPortAllocatorCustom(pr, func(max int, rangeSpec string) allocator.Interface {
 		return allocator.NewAllocationMap(max, rangeSpec)
 	})
 }
 
+// NewFromSnapshot allocates a PortAllocator and initializes it from a snapshot.
+func NewFromSnapshot(snap *api.RangeAllocation) (*PortAllocator, error) {
+	pr, err := net.ParsePortRange(snap.Range)
+	if err != nil {
+		return nil, err
+	}
+	r := NewPortAllocator(*pr)
+	if err := r.Restore(*pr, snap.Data); err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
 // Free returns the count of port left in the range.
 func (r *PortAllocator) Free() int {
 	return r.alloc.Free()
+}
+
+// Used returns the count of ports used in the range.
+func (r *PortAllocator) Used() int {
+	return r.portRange.Size - r.alloc.Free()
 }
 
 // Allocate attempts to reserve the provided port. ErrNotInRange or
@@ -115,6 +137,13 @@ func (r *PortAllocator) AllocateNext() (int, error) {
 		return 0, ErrFull
 	}
 	return r.portRange.Base + offset, nil
+}
+
+// ForEach calls the provided function for each allocated port.
+func (r *PortAllocator) ForEach(fn func(int)) {
+	r.alloc.ForEach(func(offset int) {
+		fn(r.portRange.Base + offset)
+	})
 }
 
 // Release releases the port back to the pool. Releasing an

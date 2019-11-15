@@ -7,6 +7,43 @@ import (
 	"testing"
 )
 
+func TestStrUtil_StrListDelete(t *testing.T) {
+	output := StrListDelete([]string{"item1", "item2", "item3"}, "item1")
+	if StrListContains(output, "item1") {
+		t.Fatal("bad: 'item1' should not have been present")
+	}
+
+	output = StrListDelete([]string{"item1", "item2", "item3"}, "item2")
+	if StrListContains(output, "item2") {
+		t.Fatal("bad: 'item2' should not have been present")
+	}
+
+	output = StrListDelete([]string{"item1", "item2", "item3"}, "item3")
+	if StrListContains(output, "item3") {
+		t.Fatal("bad: 'item3' should not have been present")
+	}
+
+	output = StrListDelete([]string{"item1", "item1", "item3"}, "item1")
+	if !StrListContains(output, "item1") {
+		t.Fatal("bad: 'item1' should have been present")
+	}
+
+	output = StrListDelete(output, "item1")
+	if StrListContains(output, "item1") {
+		t.Fatal("bad: 'item1' should not have been present")
+	}
+
+	output = StrListDelete(output, "random")
+	if len(output) != 1 {
+		t.Fatalf("bad: expected: 1, actual: %d", len(output))
+	}
+
+	output = StrListDelete(output, "item3")
+	if StrListContains(output, "item3") {
+		t.Fatal("bad: 'item3' should not have been present")
+	}
+}
+
 func TestStrutil_EquivalentSlices(t *testing.T) {
 	slice1 := []string{"test2", "test1", "test3"}
 	slice2 := []string{"test3", "test2", "test1"}
@@ -18,6 +55,38 @@ func TestStrutil_EquivalentSlices(t *testing.T) {
 	if EquivalentSlices(slice1, slice2) {
 		t.Fatalf("bad: expected a mismatch")
 	}
+}
+
+func TestStrutil_ListContainsGlob(t *testing.T) {
+	haystack := []string{
+		"dev",
+		"ops*",
+		"root/*",
+		"*-dev",
+		"_*_",
+	}
+	if StrListContainsGlob(haystack, "tubez") {
+		t.Fatalf("Value shouldn't exist")
+	}
+	if !StrListContainsGlob(haystack, "root/test") {
+		t.Fatalf("Value should exist")
+	}
+	if !StrListContainsGlob(haystack, "ops_test") {
+		t.Fatalf("Value should exist")
+	}
+	if !StrListContainsGlob(haystack, "ops") {
+		t.Fatalf("Value should exist")
+	}
+	if !StrListContainsGlob(haystack, "dev") {
+		t.Fatalf("Value should exist")
+	}
+	if !StrListContainsGlob(haystack, "test-dev") {
+		t.Fatalf("Value should exist")
+	}
+	if !StrListContainsGlob(haystack, "_test_") {
+		t.Fatalf("Value should exist")
+	}
+
 }
 
 func TestStrutil_ListContains(t *testing.T) {
@@ -102,7 +171,7 @@ func TestStrutil_ParseKeyValues(t *testing.T) {
 	input = "key1 = value1, key2	=   "
 	err = ParseKeyValues(input, actual, ",")
 	if err == nil {
-		t.Fatal("expected an error")
+		t.Fatalf("expected an error")
 	}
 	for k, _ := range actual {
 		delete(actual, k)
@@ -111,10 +180,16 @@ func TestStrutil_ParseKeyValues(t *testing.T) {
 	input = "key1 = value1, 	=  value2 "
 	err = ParseKeyValues(input, actual, ",")
 	if err == nil {
-		t.Fatal("expected an error")
+		t.Fatalf("expected an error")
 	}
 	for k, _ := range actual {
 		delete(actual, k)
+	}
+
+	input = "key1"
+	err = ParseKeyValues(input, actual, ",")
+	if err == nil {
+		t.Fatalf("expected an error")
 	}
 }
 
@@ -240,5 +315,111 @@ $$`,
 	actual = ParseArbitraryStringSlice(inputB64, ";")
 	if !reflect.DeepEqual(jsonExpected, actual) {
 		t.Fatalf("bad: expected:\n%#v\nactual:\n%#v", jsonExpected, actual)
+	}
+}
+
+func TestGlobbedStringsMatch(t *testing.T) {
+	type tCase struct {
+		item   string
+		val    string
+		expect bool
+	}
+
+	tCases := []tCase{
+		tCase{"", "", true},
+		tCase{"*", "*", true},
+		tCase{"**", "**", true},
+		tCase{"*t", "t", true},
+		tCase{"*t", "test", true},
+		tCase{"t*", "test", true},
+		tCase{"*test", "test", true},
+		tCase{"*test", "a test", true},
+		tCase{"test", "a test", false},
+		tCase{"*test", "tests", false},
+		tCase{"test*", "test", true},
+		tCase{"test*", "testsss", true},
+		tCase{"test**", "testsss", false},
+		tCase{"test**", "test*", true},
+		tCase{"**test", "*test", true},
+		tCase{"TEST", "test", false},
+		tCase{"test", "test", true},
+	}
+
+	for _, tc := range tCases {
+		actual := GlobbedStringsMatch(tc.item, tc.val)
+
+		if actual != tc.expect {
+			t.Fatalf("Bad testcase %#v, expected %t, got %t", tc, tc.expect, actual)
+		}
+	}
+}
+
+func TestTrimStrings(t *testing.T) {
+	input := []string{"abc", "123", "abcd ", "123  "}
+	expected := []string{"abc", "123", "abcd", "123"}
+	actual := TrimStrings(input)
+	if !reflect.DeepEqual(expected, actual) {
+		t.Fatalf("Bad TrimStrings: expected:%#v, got:%#v", expected, actual)
+	}
+}
+
+func TestStrutil_AppendIfMissing(t *testing.T) {
+	keys := []string{}
+
+	keys = AppendIfMissing(keys, "foo")
+
+	if len(keys) != 1 {
+		t.Fatalf("expected slice to be length of 1: %v", keys)
+	}
+	if keys[0] != "foo" {
+		t.Fatalf("expected slice to contain key 'foo': %v", keys)
+	}
+
+	keys = AppendIfMissing(keys, "bar")
+
+	if len(keys) != 2 {
+		t.Fatalf("expected slice to be length of 2: %v", keys)
+	}
+	if keys[0] != "foo" {
+		t.Fatalf("expected slice to contain key 'foo': %v", keys)
+	}
+	if keys[1] != "bar" {
+		t.Fatalf("expected slice to contain key 'bar': %v", keys)
+	}
+
+	keys = AppendIfMissing(keys, "foo")
+
+	if len(keys) != 2 {
+		t.Fatalf("expected slice to still be length of 2: %v", keys)
+	}
+	if keys[0] != "foo" {
+		t.Fatalf("expected slice to still contain key 'foo': %v", keys)
+	}
+	if keys[1] != "bar" {
+		t.Fatalf("expected slice to still contain key 'bar': %v", keys)
+	}
+}
+
+func TestStrUtil_RemoveDuplicates(t *testing.T) {
+	type tCase struct {
+		input     []string
+		expect    []string
+		lowercase bool
+	}
+
+	tCases := []tCase{
+		tCase{[]string{}, []string{}, false},
+		tCase{[]string{}, []string{}, true},
+		tCase{[]string{"a", "b", "a"}, []string{"a", "b"}, false},
+		tCase{[]string{"A", "b", "a"}, []string{"A", "a", "b"}, false},
+		tCase{[]string{"A", "b", "a"}, []string{"a", "b"}, true},
+	}
+
+	for _, tc := range tCases {
+		actual := RemoveDuplicates(tc.input, tc.lowercase)
+
+		if !reflect.DeepEqual(actual, tc.expect) {
+			t.Fatalf("Bad testcase %#v, expected %v, got %v", tc, tc.expect, actual)
+		}
 	}
 }

@@ -18,139 +18,46 @@ package azure
 
 import (
 	"fmt"
-	"strings"
 
-	"github.com/Azure/azure-sdk-for-go/arm/compute"
+	"github.com/Azure/azure-sdk-for-go/services/storage/mgmt/2017-10-01/storage"
 	"github.com/golang/glog"
-	"k8s.io/kubernetes/pkg/cloudprovider"
-	"k8s.io/kubernetes/pkg/types"
 )
 
 const (
-	maxLUN = 64 // max number of LUNs per VM
+	defaultStorageAccountType      = string(storage.StandardLRS)
+	fileShareAccountNamePrefix     = "f"
+	sharedDiskAccountNamePrefix    = "ds"
+	dedicatedDiskAccountNamePrefix = "dd"
 )
 
-// AttachDisk attaches a vhd to vm
-// the vhd must exist, can be identified by diskName, diskURI, and lun.
-func (az *Cloud) AttachDisk(diskName, diskURI string, nodeName types.NodeName, lun int32, cachingMode compute.CachingTypes) error {
-	vm, exists, err := az.getVirtualMachine(nodeName)
+// CreateFileShare creates a file share, using a matching storage account
+func (az *Cloud) CreateFileShare(shareName, accountName, accountType, resourceGroup, location string, requestGiB int) (string, string, error) {
+	if resourceGroup == "" {
+		resourceGroup = az.resourceGroup
+	}
+
+	account, key, err := az.ensureStorageAccount(accountName, accountType, resourceGroup, location, fileShareAccountNamePrefix)
 	if err != nil {
+		return "", "", fmt.Errorf("could not get storage key for storage account %s: %v", accountName, err)
+	}
+
+	if err := az.createFileShare(account, key, shareName, requestGiB); err != nil {
+		return "", "", fmt.Errorf("failed to create share %s in account %s: %v", shareName, account, err)
+	}
+	glog.V(4).Infof("created share %s in account %s", shareName, account)
+	return account, key, nil
+}
+
+// DeleteFileShare deletes a file share using storage account name and key
+func (az *Cloud) DeleteFileShare(accountName, accountKey, shareName string) error {
+	if err := az.deleteFileShare(accountName, accountKey, shareName); err != nil {
 		return err
-	} else if !exists {
-		return cloudprovider.InstanceNotFound
 	}
-	disks := *vm.Properties.StorageProfile.DataDisks
-	disks = append(disks,
-		compute.DataDisk{
-			Name: &diskName,
-			Vhd: &compute.VirtualHardDisk{
-				URI: &diskURI,
-			},
-			Lun:          &lun,
-			Caching:      cachingMode,
-			CreateOption: "attach",
-		})
-
-	newVM := compute.VirtualMachine{
-		Location: vm.Location,
-		Properties: &compute.VirtualMachineProperties{
-			StorageProfile: &compute.StorageProfile{
-				DataDisks: &disks,
-			},
-		},
-	}
-	vmName := mapNodeNameToVMName(nodeName)
-	_, err = az.VirtualMachinesClient.CreateOrUpdate(az.ResourceGroup, vmName, newVM, nil)
-	if err != nil {
-		glog.Errorf("azure attach failed, err: %v", err)
-		detail := err.Error()
-		if strings.Contains(detail, "Code=\"AcquireDiskLeaseFailed\"") {
-			// if lease cannot be acquired, immediately detach the disk and return the original error
-			glog.Infof("failed to acquire disk lease, try detach")
-			az.DetachDiskByName(diskName, diskURI, nodeName)
-		}
-	} else {
-		glog.V(4).Infof("azure attach succeeded")
-	}
-	return err
+	glog.V(4).Infof("share %s deleted", shareName)
+	return nil
 }
 
-// DetachDiskByName detaches a vhd from host
-// the vhd can be identified by diskName or diskURI
-func (az *Cloud) DetachDiskByName(diskName, diskURI string, nodeName types.NodeName) error {
-	vm, exists, err := az.getVirtualMachine(nodeName)
-	if err != nil || !exists {
-		// if host doesn't exist, no need to detach
-		glog.Warningf("cannot find node %s, skip detaching disk %s", nodeName, diskName)
-		return nil
-	}
-
-	disks := *vm.Properties.StorageProfile.DataDisks
-	for i, disk := range disks {
-		if (disk.Name != nil && diskName != "" && *disk.Name == diskName) || (disk.Vhd.URI != nil && diskURI != "" && *disk.Vhd.URI == diskURI) {
-			// found the disk
-			glog.V(4).Infof("detach disk: name %q uri %q", diskName, diskURI)
-			disks = append(disks[:i], disks[i+1:]...)
-			break
-		}
-	}
-	newVM := compute.VirtualMachine{
-		Location: vm.Location,
-		Properties: &compute.VirtualMachineProperties{
-			StorageProfile: &compute.StorageProfile{
-				DataDisks: &disks,
-			},
-		},
-	}
-	vmName := mapNodeNameToVMName(nodeName)
-	_, err = az.VirtualMachinesClient.CreateOrUpdate(az.ResourceGroup, vmName, newVM, nil)
-	if err != nil {
-		glog.Errorf("azure disk detach failed, err: %v", err)
-	} else {
-		glog.V(4).Infof("azure disk detach succeeded")
-	}
-	return err
-}
-
-// GetDiskLun finds the lun on the host that the vhd is attached to, given a vhd's diskName and diskURI
-func (az *Cloud) GetDiskLun(diskName, diskURI string, nodeName types.NodeName) (int32, error) {
-	vm, exists, err := az.getVirtualMachine(nodeName)
-	if err != nil {
-		return -1, err
-	} else if !exists {
-		return -1, cloudprovider.InstanceNotFound
-	}
-	disks := *vm.Properties.StorageProfile.DataDisks
-	for _, disk := range disks {
-		if disk.Lun != nil && (disk.Name != nil && diskName != "" && *disk.Name == diskName) || (disk.Vhd.URI != nil && diskURI != "" && *disk.Vhd.URI == diskURI) {
-			// found the disk
-			glog.V(4).Infof("find disk: lun %d name %q uri %q", *disk.Lun, diskName, diskURI)
-			return *disk.Lun, nil
-		}
-	}
-	return -1, fmt.Errorf("Cannot find Lun for disk %s", diskName)
-}
-
-// GetNextDiskLun searches all vhd attachment on the host and find unused lun
-// return -1 if all luns are used
-func (az *Cloud) GetNextDiskLun(nodeName types.NodeName) (int32, error) {
-	vm, exists, err := az.getVirtualMachine(nodeName)
-	if err != nil {
-		return -1, err
-	} else if !exists {
-		return -1, cloudprovider.InstanceNotFound
-	}
-	used := make([]bool, maxLUN)
-	disks := *vm.Properties.StorageProfile.DataDisks
-	for _, disk := range disks {
-		if disk.Lun != nil {
-			used[*disk.Lun] = true
-		}
-	}
-	for k, v := range used {
-		if !v {
-			return int32(k), nil
-		}
-	}
-	return -1, fmt.Errorf("All Luns are used")
+// ResizeFileShare resizes a file share
+func (az *Cloud) ResizeFileShare(accountName, accountKey, name string, sizeGiB int) error {
+	return az.resizeFileShare(accountName, accountKey, name, sizeGiB)
 }

@@ -20,13 +20,13 @@ import (
 	"errors"
 	"testing"
 
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/cloudprovider/providers/vsphere"
+	"k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/kubernetes/pkg/cloudprovider/providers/vsphere/vclib"
 	"k8s.io/kubernetes/pkg/volume"
 	volumetest "k8s.io/kubernetes/pkg/volume/testing"
 
 	"github.com/golang/glog"
-	"k8s.io/kubernetes/pkg/types"
 )
 
 func TestGetDeviceName_Volume(t *testing.T) {
@@ -165,7 +165,7 @@ func TestAttachDetach(t *testing.T) {
 // newPlugin creates a new vsphereVolumePlugin with fake cloud, NewAttacher
 // and NewDetacher won't work.
 func newPlugin() *vsphereVolumePlugin {
-	host := volumetest.NewFakeVolumeHost("/tmp", nil, nil, "")
+	host := volumetest.NewFakeVolumeHost("/tmp", nil, nil)
 	plugins := ProbeVolumePlugins()
 	plugin := plugins[0]
 	plugin.Init(host)
@@ -187,9 +187,9 @@ func newDetacher(testcase *testcase) *vsphereVMDKDetacher {
 
 func createVolSpec(name string) *volume.Spec {
 	return &volume.Spec{
-		Volume: &api.Volume{
-			VolumeSource: api.VolumeSource{
-				VsphereVolume: &api.VsphereVirtualDiskVolumeSource{
+		Volume: &v1.Volume{
+			VolumeSource: v1.VolumeSource{
+				VsphereVolume: &v1.VsphereVirtualDiskVolumeSource{
 					VolumePath: name,
 				},
 			},
@@ -199,10 +199,10 @@ func createVolSpec(name string) *volume.Spec {
 
 func createPVSpec(name string) *volume.Spec {
 	return &volume.Spec{
-		PersistentVolume: &api.PersistentVolume{
-			Spec: api.PersistentVolumeSpec{
-				PersistentVolumeSource: api.PersistentVolumeSource{
-					VsphereVolume: &api.VsphereVirtualDiskVolumeSource{
+		PersistentVolume: &v1.PersistentVolume{
+			Spec: v1.PersistentVolumeSpec{
+				PersistentVolumeSource: v1.PersistentVolumeSource{
+					VsphereVolume: &v1.VsphereVirtualDiskVolumeSource{
 						VolumePath: name,
 					},
 				},
@@ -233,29 +233,29 @@ type diskIsAttachedCall struct {
 	ret        error
 }
 
-func (testcase *testcase) AttachDisk(diskName string, nodeName types.NodeName) (string, string, error) {
+func (testcase *testcase) AttachDisk(diskName string, storagePolicyName string, nodeName types.NodeName) (string, error) {
 	expected := &testcase.attach
 
 	if expected.diskName == "" && expected.nodeName == "" {
 		// testcase.attach looks uninitialized, test did not expect to call
 		// AttachDisk
 		testcase.t.Errorf("Unexpected AttachDisk call!")
-		return "", "", errors.New("Unexpected AttachDisk call!")
+		return "", errors.New("Unexpected AttachDisk call!")
 	}
 
 	if expected.diskName != diskName {
 		testcase.t.Errorf("Unexpected AttachDisk call: expected diskName %s, got %s", expected.diskName, diskName)
-		return "", "", errors.New("Unexpected AttachDisk call: wrong diskName")
+		return "", errors.New("Unexpected AttachDisk call: wrong diskName")
 	}
 
 	if expected.nodeName != nodeName {
 		testcase.t.Errorf("Unexpected AttachDisk call: expected nodeName %s, got %s", expected.nodeName, nodeName)
-		return "", "", errors.New("Unexpected AttachDisk call: wrong nodeName")
+		return "", errors.New("Unexpected AttachDisk call: wrong nodeName")
 	}
 
 	glog.V(4).Infof("AttachDisk call: %s, %s, returning %q, %v", diskName, nodeName, expected.retDeviceUUID, expected.ret)
 
-	return "", expected.retDeviceUUID, expected.ret
+	return expected.retDeviceUUID, expected.ret
 }
 
 func (testcase *testcase) DetachDisk(diskName string, nodeName types.NodeName) error {
@@ -308,7 +308,11 @@ func (testcase *testcase) DiskIsAttached(diskName string, nodeName types.NodeNam
 	return expected.isAttached, expected.ret
 }
 
-func (testcase *testcase) CreateVolume(volumeOptions *vsphere.VolumeOptions) (volumePath string, err error) {
+func (testcase *testcase) DisksAreAttached(nodeVolumes map[types.NodeName][]string) (map[types.NodeName]map[string]bool, error) {
+	return nil, errors.New("Not implemented")
+}
+
+func (testcase *testcase) CreateVolume(volumeOptions *vclib.VolumeOptions) (volumePath string, err error) {
 	return "", errors.New("Not implemented")
 }
 

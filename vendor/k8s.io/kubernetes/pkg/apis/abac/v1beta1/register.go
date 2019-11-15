@@ -17,32 +17,46 @@ limitations under the License.
 package v1beta1
 
 import (
-	"k8s.io/kubernetes/pkg/api/unversioned"
-	api "k8s.io/kubernetes/pkg/apis/abac"
-	"k8s.io/kubernetes/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/kubernetes/pkg/apis/abac"
 )
 
-// GroupVersion is the API group and version for abac v1beta1
-var GroupVersion = unversioned.GroupVersion{Group: api.Group, Version: "v1beta1"}
+const GroupName = "abac.authorization.kubernetes.io"
+
+// SchemeGroupVersion is the API group and version for abac v1beta1
+var SchemeGroupVersion = schema.GroupVersion{Group: GroupName, Version: "v1beta1"}
 
 func init() {
 	// TODO: delete this, abac should not have its own scheme.
-	if err := addKnownTypes(api.Scheme); err != nil {
+	if err := addKnownTypes(abac.Scheme); err != nil {
+		// Programmer error.
+		panic(err)
+	}
+	if err := addConversionFuncs(abac.Scheme); err != nil {
 		// Programmer error.
 		panic(err)
 	}
 }
 
 var (
-	SchemeBuilder = runtime.NewSchemeBuilder(addKnownTypes)
-	AddToScheme   = SchemeBuilder.AddToScheme
+	// TODO: move SchemeBuilder with zz_generated.deepcopy.go to k8s.io/api.
+	// localSchemeBuilder and AddToScheme will stay in k8s.io/kubernetes.
+	SchemeBuilder      runtime.SchemeBuilder
+	localSchemeBuilder = &SchemeBuilder
+	AddToScheme        = localSchemeBuilder.AddToScheme
 )
 
+func init() {
+	// We only register manually written functions here. The registration of the
+	// generated functions takes place in the generated files. The separation
+	// makes the code compile even when the generated files are missing.
+	localSchemeBuilder.Register(addKnownTypes, addConversionFuncs, RegisterDefaults)
+}
+
 func addKnownTypes(scheme *runtime.Scheme) error {
-	scheme.AddKnownTypes(GroupVersion,
+	scheme.AddKnownTypes(SchemeGroupVersion,
 		&Policy{},
 	)
 	return nil
 }
-
-func (obj *Policy) GetObjectKind() unversioned.ObjectKind { return &obj.TypeMeta }

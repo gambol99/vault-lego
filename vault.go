@@ -77,8 +77,54 @@ func isCertificateExpiring(content []byte, threshold time.Duration) (bool, error
 	if time.Now().After(crt.NotAfter) {
 		return true, nil
 	}
-	if time.Now().After(crt.NotAfter.Add(threshold)) {
+	if time.Now().After(crt.NotAfter.Add(-threshold)) {
 		return true, nil
+	}
+
+	return false, nil
+}
+
+// haveDNSNamesChanged parses and checks if the certificate hosts have changed
+func haveDNSNamesChanged(content []byte, hosts []string) (bool, error) {
+	// decode the pem content
+	block, _ := pem.Decode(content)
+	if block == nil {
+		return false, errors.New("unable to parse the pem block")
+	}
+	// decode the certificate
+	crt, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return false, err
+	}
+
+	// step: spit out some logging
+	logrus.WithFields(logrus.Fields{
+		"cert_hosts":    strings.Join(crt.DNSNames, ","),
+		"ingress_hosts": strings.Join(hosts, ","),
+	}).Debugf("comparing certficate and ingress hosts")
+
+	for _, certHost := range crt.DNSNames {
+		found := false
+		for _, specHost := range hosts {
+			if certHost == specHost {
+				found = true
+			}
+		}
+		if !found {
+			return true, nil
+		}
+	}
+
+	for _, ingHost := range hosts {
+		found := false
+		for _, certHost := range crt.DNSNames {
+			if ingHost == certHost {
+				found = true
+			}
+		}
+		if !found {
+			return true, nil
+		}
 	}
 
 	return false, nil

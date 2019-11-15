@@ -22,12 +22,8 @@
     "description": "get available API versions"
    },
    {
-    "path": "/apis/apps/v1alpha1",
-    "description": "API at /apis/apps/v1alpha1"
-   },
-   {
-    "path": "/apis/apps",
-    "description": "get information of a group"
+    "path": "/apis/authentication.k8s.io/v1",
+    "description": "API at /apis/authentication.k8s.io/v1"
    },
    {
     "path": "/apis/authentication.k8s.io/v1beta1",
@@ -36,6 +32,10 @@
    {
     "path": "/apis/authentication.k8s.io",
     "description": "get information of a group"
+   },
+   {
+    "path": "/apis/authorization.k8s.io/v1",
+    "description": "API at /apis/authorization.k8s.io/v1"
    },
    {
     "path": "/apis/authorization.k8s.io/v1beta1",
@@ -50,12 +50,24 @@
     "description": "API at /apis/autoscaling/v1"
    },
    {
+    "path": "/apis/autoscaling/v2beta1",
+    "description": "API at /apis/autoscaling/v2beta1"
+   },
+   {
+    "path": "/apis/autoscaling/v2beta2",
+    "description": "API at /apis/autoscaling/v2beta2"
+   },
+   {
     "path": "/apis/autoscaling",
     "description": "get information of a group"
    },
    {
     "path": "/apis/batch/v1",
     "description": "API at /apis/batch/v1"
+   },
+   {
+    "path": "/apis/batch/v1beta1",
+    "description": "API at /apis/batch/v1beta1"
    },
    {
     "path": "/apis/batch/v2alpha1",
@@ -66,11 +78,19 @@
     "description": "get information of a group"
    },
    {
-    "path": "/apis/certificates.k8s.io/v1alpha1",
-    "description": "API at /apis/certificates.k8s.io/v1alpha1"
+    "path": "/apis/certificates.k8s.io/v1beta1",
+    "description": "API at /apis/certificates.k8s.io/v1beta1"
    },
    {
     "path": "/apis/certificates.k8s.io",
+    "description": "get information of a group"
+   },
+   {
+    "path": "/apis/coordination.k8s.io/v1beta1",
+    "description": "API at /apis/coordination.k8s.io/v1beta1"
+   },
+   {
+    "path": "/apis/coordination.k8s.io",
     "description": "get information of a group"
    },
    {
@@ -82,12 +102,28 @@
     "description": "get information of a group"
    },
    {
-    "path": "/apis/policy/v1alpha1",
-    "description": "API at /apis/policy/v1alpha1"
+    "path": "/apis/networking.k8s.io/v1",
+    "description": "API at /apis/networking.k8s.io/v1"
+   },
+   {
+    "path": "/apis/networking.k8s.io",
+    "description": "get information of a group"
+   },
+   {
+    "path": "/apis/policy/v1beta1",
+    "description": "API at /apis/policy/v1beta1"
    },
    {
     "path": "/apis/policy",
     "description": "get information of a group"
+   },
+   {
+    "path": "/apis/rbac.authorization.k8s.io/v1",
+    "description": "API at /apis/rbac.authorization.k8s.io/v1"
+   },
+   {
+    "path": "/apis/rbac.authorization.k8s.io/v1beta1",
+    "description": "API at /apis/rbac.authorization.k8s.io/v1beta1"
    },
    {
     "path": "/apis/rbac.authorization.k8s.io/v1alpha1",
@@ -98,11 +134,75 @@
     "description": "get information of a group"
    },
    {
+    "path": "/apis/scheduling.k8s.io/v1beta1",
+    "description": "API at /apis/scheduling.k8s.io/v1beta1"
+   },
+   {
+    "path": "/apis/scheduling.k8s.io/v1alpha1",
+    "description": "API at /apis/scheduling.k8s.io/v1alpha1"
+   },
+   {
+    "path": "/apis/scheduling.k8s.io",
+    "description": "get information of a group"
+   },
+   {
+    "path": "/apis/settings.k8s.io/v1alpha1",
+    "description": "API at /apis/settings.k8s.io/v1alpha1"
+   },
+   {
+    "path": "/apis/settings.k8s.io",
+    "description": "get information of a group"
+   },
+   {
+    "path": "/apis/storage.k8s.io/v1",
+    "description": "API at /apis/storage.k8s.io/v1"
+   },
+   {
     "path": "/apis/storage.k8s.io/v1beta1",
     "description": "API at /apis/storage.k8s.io/v1beta1"
    },
    {
+    "path": "/apis/storage.k8s.io/v1alpha1",
+    "description": "API at /apis/storage.k8s.io/v1alpha1"
+   },
+   {
     "path": "/apis/storage.k8s.io",
+    "description": "get information of a group"
+   },
+   {
+    "path": "/apis/apps/v1",
+    "description": "API at /apis/apps/v1"
+   },
+   {
+    "path": "/apis/apps/v1beta2",
+    "description": "API at /apis/apps/v1beta2"
+   },
+   {
+    "path": "/apis/apps/v1beta1",
+    "description": "API at /apis/apps/v1beta1"
+   },
+   {
+    "path": "/apis/apps",
+    "description": "get information of a group"
+   },
+   {
+    "path": "/apis/admissionregistration.k8s.io/v1beta1",
+    "description": "API at /apis/admissionregistration.k8s.io/v1beta1"
+   },
+   {
+    "path": "/apis/admissionregistration.k8s.io/v1alpha1",
+    "description": "API at /apis/admissionregistration.k8s.io/v1alpha1"
+   },
+   {
+    "path": "/apis/admissionregistration.k8s.io",
+    "description": "get information of a group"
+   },
+   {
+    "path": "/apis/events.k8s.io/v1beta1",
+    "description": "API at /apis/events.k8s.io/v1beta1"
+   },
+   {
+    "path": "/apis/events.k8s.io",
     "description": "get information of a group"
    }
   ],

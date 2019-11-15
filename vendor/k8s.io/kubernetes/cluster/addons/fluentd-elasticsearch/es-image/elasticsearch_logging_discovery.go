@@ -1,5 +1,5 @@
 /*
-Copyright 2015 The Kubernetes Authors.
+Copyright 2017 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,13 +20,33 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/golang/glog"
-	"k8s.io/kubernetes/pkg/api"
-	client "k8s.io/kubernetes/pkg/client/unversioned"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	restclient "k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
+	clientapi "k8s.io/client-go/tools/clientcmd/api"
+	api "k8s.io/kubernetes/pkg/apis/core"
+	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
 )
+
+func buildConfigFromEnvs(masterURL, kubeconfigPath string) (*restclient.Config, error) {
+	if kubeconfigPath == "" && masterURL == "" {
+		kubeconfig, err := restclient.InClusterConfig()
+		if err != nil {
+			return nil, err
+		}
+
+		return kubeconfig, nil
+	}
+
+	return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+		&clientcmd.ClientConfigLoadingRules{ExplicitPath: kubeconfigPath},
+		&clientcmd.ConfigOverrides{ClusterInfo: clientapi.Cluster{Server: masterURL}}).ClientConfig()
+}
 
 func flattenSubsets(subsets []api.EndpointSubset) []string {
 	ips := []string{}
@@ -40,26 +60,37 @@ func flattenSubsets(subsets []api.EndpointSubset) []string {
 
 func main() {
 	flag.Parse()
+
 	glog.Info("Kubernetes Elasticsearch logging discovery")
 
-	c, err := client.NewInCluster()
+	cc, err := buildConfigFromEnvs(os.Getenv("APISERVER_HOST"), os.Getenv("KUBE_CONFIG_FILE"))
 	if err != nil {
 		glog.Fatalf("Failed to make client: %v", err)
 	}
-	namespace := api.NamespaceSystem
+	client, err := clientset.NewForConfig(cc)
+
+	if err != nil {
+		glog.Fatalf("Failed to make client: %v", err)
+	}
+	namespace := metav1.NamespaceSystem
 	envNamespace := os.Getenv("NAMESPACE")
 	if envNamespace != "" {
-		if _, err := c.Namespaces().Get(envNamespace); err != nil {
+		if _, err := client.Core().Namespaces().Get(envNamespace, metav1.GetOptions{}); err != nil {
 			glog.Fatalf("%s namespace doesn't exist: %v", envNamespace, err)
 		}
 		namespace = envNamespace
 	}
 
 	var elasticsearch *api.Service
-	// Look for endpoints associated with the Elasticsearch loggging service.
+	serviceName := os.Getenv("ELASTICSEARCH_SERVICE_NAME")
+	if serviceName == "" {
+		serviceName = "elasticsearch-logging"
+	}
+
+	// Look for endpoints associated with the Elasticsearch logging service.
 	// First wait for the service to become available.
 	for t := time.Now(); time.Since(t) < 5*time.Minute; time.Sleep(10 * time.Second) {
-		elasticsearch, err = c.Services(namespace).Get("elasticsearch-logging")
+		elasticsearch, err = client.Core().Services(namespace).Get(serviceName, metav1.GetOptions{})
 		if err == nil {
 			break
 		}
@@ -74,9 +105,9 @@ func main() {
 	var endpoints *api.Endpoints
 	addrs := []string{}
 	// Wait for some endpoints.
-	count := 0
+	count, _ := strconv.Atoi(os.Getenv("MINIMUM_MASTER_NODES"))
 	for t := time.Now(); time.Since(t) < 5*time.Minute; time.Sleep(10 * time.Second) {
-		endpoints, err = c.Endpoints(namespace).Get("elasticsearch-logging")
+		endpoints, err = client.Core().Endpoints(namespace).Get(serviceName, metav1.GetOptions{})
 		if err != nil {
 			continue
 		}
@@ -85,7 +116,6 @@ func main() {
 		if len(addrs) > 0 && len(addrs) == count {
 			break
 		}
-		count = len(addrs)
 	}
 	// If there was an error finding endpoints then log a warning and quit.
 	if err != nil {

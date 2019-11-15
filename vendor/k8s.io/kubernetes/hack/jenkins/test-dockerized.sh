@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Copyright 2015 The Kubernetes Authors.
 #
@@ -29,35 +29,31 @@ retry() {
 # Runs the unit and integration tests, producing JUnit-style XML test
 # reports in ${WORKSPACE}/artifacts. This script is intended to be run from
 # kubekins-test container with a kubernetes repo mapped in. See
-# hack/jenkins/gotest-dockerized.sh
+# k8s.io/test-infra/scenarios/kubernetes_verify.py
 
 export PATH=${GOPATH}/bin:${PWD}/third_party/etcd:/usr/local/go/bin:${PATH}
 
-retry go get github.com/tools/godep && godep version
-retry go get github.com/jteeuwen/go-bindata/go-bindata
 retry go get github.com/jstemmer/go-junit-report
 
 # Enable the Go race detector.
 export KUBE_RACE=-race
 # Disable coverage report
 export KUBE_COVER="n"
-# Produce a JUnit-style XML test report for Jenkins.
-export KUBE_JUNIT_REPORT_DIR=${WORKSPACE}/artifacts
-export ARTIFACTS_DIR=${WORKSPACE}/artifacts
+# Set artifacts directory
+export ARTIFACTS=${ARTIFACTS:-"${WORKSPACE}/artifacts"}
+# Produce a JUnit-style XML test report
+export KUBE_JUNIT_REPORT_DIR="${ARTIFACTS}"
 # Save the verbose stdout as well.
 export KUBE_KEEP_VERBOSE_TEST_OUTPUT=y
-export KUBE_TIMEOUT='-timeout 300s'
 export KUBE_INTEGRATION_TEST_MAX_CONCURRENCY=4
 export LOG_LEVEL=4
 
-cd /go/src/k8s.io/kubernetes
-rm -rf Godeps/_workspace # Temporary until _workspace is fully obliterated
+cd "${GOPATH}/src/k8s.io/kubernetes"
 
 make generated_files
 go install ./cmd/...
 ./hack/install-etcd.sh
 
-make test
 make test-cmd
 make test-integration
 ./hack/test-update-storage-objects.sh

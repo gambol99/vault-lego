@@ -1,19 +1,34 @@
-package: github.com/gambol99/vault-lego
+package: github.com/catac/vault-lego
 import:
+- package: github.com/golang/glog
 - package: github.com/Sirupsen/logrus
-  version: ^0.10.0
+  version: ~1.0.5
 - package: github.com/hashicorp/vault
-  version: ^0.6.2
+  version: ~0.9.6
   subpackages:
   - api
 - package: github.com/urfave/cli
-  version: ^1.18.1
-- package: k8s.io/kubernetes
-  version: ^1.5.0-alpha.1
+  version: ~1.20.0
+- package: k8s.io/api
+  version: kubernetes-1.12.10
   subpackages:
-  - pkg/api
-  - pkg/apis/extensions
-  - pkg/client/cache
-  - pkg/client/unversioned
+  - core/v1
+  - extensions/v1beta1
+- package: k8s.io/apimachinery
+  version: kubernetes-1.12.10
+  subpackages:
+  - pkg/apis/meta/v1
   - pkg/runtime
   - pkg/watch
+- package: k8s.io/client-go
+  version: kubernetes-1.12.10
+  subpackages:
+  - kubernetes
+  - rest
+  - tools/cache
+  - tools/clientcmd
+  - util/flowcontrol
+- package: k8s.io/kubernetes
+  version: v1.12.10
+  subpackages:
+  - pkg/apis/extensions

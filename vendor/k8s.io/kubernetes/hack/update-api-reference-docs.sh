@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Copyright 2016 The Kubernetes Authors.
 #
@@ -44,7 +44,7 @@ for gv in "${ALL_GROUP_VERSIONS[@]}"; do
     fi
 
 	INTERESTING_GROUP_VERSIONS+=(${gv})
-	GV_DIRS+=("${REPO_DIR}/pkg/$(kube::util::group-version-to-pkg-path "${gv}")")
+	GV_DIRS+=("${REPO_DIR}/$(kube::util::group-version-to-pkg-path "${gv}")")
 done
 
 GROUP_VERSIONS="${INTERESTING_GROUP_VERSIONS[@]}" GV_DIRS="${GV_DIRS[@]}" kube::swagger::gen_api_ref_docs "${SWAGGER_SPEC_PATH}" "${OUTPUT}"

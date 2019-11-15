@@ -18,25 +18,8 @@ limitations under the License.
 
 package cm
 
-import "k8s.io/kubernetes/pkg/api"
-
 type unsupportedPodContainerManager struct {
+	podContainerManagerStub
 }
 
 var _ PodContainerManager = &unsupportedPodContainerManager{}
-
-func (m *unsupportedPodContainerManager) Exists(_ *api.Pod) bool {
-	return true
-}
-
-func (m *unsupportedPodContainerManager) EnsureExists(_ *api.Pod) error {
-	return nil
-}
-
-func (m *unsupportedPodContainerManager) GetPodContainerName(_ *api.Pod) string {
-	return ""
-}
-
-func (m *unsupportedPodContainerManager) Destroy(_ string) error {
-	return nil
-}

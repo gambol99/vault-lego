@@ -1,3 +1,8 @@
-assignees:
-  - erictune
-  - liggitt
+approvers:
+- erictune
+- liggitt
+- deads2k
+- mikedanese
+reviewers:
+- mikedanese
+- enj

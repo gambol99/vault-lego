@@ -17,39 +17,45 @@ limitations under the License.
 package persistentvolumeclaim
 
 import (
+	"context"
 	"fmt"
 
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/validation"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
-	"k8s.io/kubernetes/pkg/registry/generic"
-	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/storage"
-	"k8s.io/kubernetes/pkg/util/validation/field"
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/apiserver/pkg/registry/generic"
+	"k8s.io/apiserver/pkg/storage"
+	"k8s.io/apiserver/pkg/storage/names"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
+	pvcutil "k8s.io/kubernetes/pkg/api/persistentvolumeclaim"
+	api "k8s.io/kubernetes/pkg/apis/core"
+	"k8s.io/kubernetes/pkg/apis/core/validation"
 )
 
 // persistentvolumeclaimStrategy implements behavior for PersistentVolumeClaim objects
 type persistentvolumeclaimStrategy struct {
 	runtime.ObjectTyper
-	api.NameGenerator
+	names.NameGenerator
 }
 
 // Strategy is the default logic that applies when creating and updating PersistentVolumeClaim
 // objects via the REST API.
-var Strategy = persistentvolumeclaimStrategy{api.Scheme, api.SimpleNameGenerator}
+var Strategy = persistentvolumeclaimStrategy{legacyscheme.Scheme, names.SimpleNameGenerator}
 
 func (persistentvolumeclaimStrategy) NamespaceScoped() bool {
 	return true
 }
 
 // PrepareForCreate clears the Status field which is not allowed to be set by end users on creation.
-func (persistentvolumeclaimStrategy) PrepareForCreate(ctx api.Context, obj runtime.Object) {
-	pv := obj.(*api.PersistentVolumeClaim)
-	pv.Status = api.PersistentVolumeClaimStatus{}
+func (persistentvolumeclaimStrategy) PrepareForCreate(ctx context.Context, obj runtime.Object) {
+	pvc := obj.(*api.PersistentVolumeClaim)
+	pvc.Status = api.PersistentVolumeClaimStatus{}
+
+	pvcutil.DropDisabledAlphaFields(&pvc.Spec)
 }
 
-func (persistentvolumeclaimStrategy) Validate(ctx api.Context, obj runtime.Object) field.ErrorList {
+func (persistentvolumeclaimStrategy) Validate(ctx context.Context, obj runtime.Object) field.ErrorList {
 	pvc := obj.(*api.PersistentVolumeClaim)
 	return validation.ValidatePersistentVolumeClaim(pvc)
 }
@@ -63,13 +69,16 @@ func (persistentvolumeclaimStrategy) AllowCreateOnUpdate() bool {
 }
 
 // PrepareForUpdate sets the Status field which is not allowed to be set by end users on update
-func (persistentvolumeclaimStrategy) PrepareForUpdate(ctx api.Context, obj, old runtime.Object) {
+func (persistentvolumeclaimStrategy) PrepareForUpdate(ctx context.Context, obj, old runtime.Object) {
 	newPvc := obj.(*api.PersistentVolumeClaim)
 	oldPvc := old.(*api.PersistentVolumeClaim)
 	newPvc.Status = oldPvc.Status
+
+	pvcutil.DropDisabledAlphaFields(&newPvc.Spec)
+	pvcutil.DropDisabledAlphaFields(&oldPvc.Spec)
 }
 
-func (persistentvolumeclaimStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) field.ErrorList {
+func (persistentvolumeclaimStrategy) ValidateUpdate(ctx context.Context, obj, old runtime.Object) field.ErrorList {
 	errorList := validation.ValidatePersistentVolumeClaim(obj.(*api.PersistentVolumeClaim))
 	return append(errorList, validation.ValidatePersistentVolumeClaimUpdate(obj.(*api.PersistentVolumeClaim), old.(*api.PersistentVolumeClaim))...)
 }
@@ -85,28 +94,31 @@ type persistentvolumeclaimStatusStrategy struct {
 var StatusStrategy = persistentvolumeclaimStatusStrategy{Strategy}
 
 // PrepareForUpdate sets the Spec field which is not allowed to be changed when updating a PV's Status
-func (persistentvolumeclaimStatusStrategy) PrepareForUpdate(ctx api.Context, obj, old runtime.Object) {
+func (persistentvolumeclaimStatusStrategy) PrepareForUpdate(ctx context.Context, obj, old runtime.Object) {
 	newPv := obj.(*api.PersistentVolumeClaim)
 	oldPv := old.(*api.PersistentVolumeClaim)
 	newPv.Spec = oldPv.Spec
 }
 
-func (persistentvolumeclaimStatusStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) field.ErrorList {
+func (persistentvolumeclaimStatusStrategy) ValidateUpdate(ctx context.Context, obj, old runtime.Object) field.ErrorList {
 	return validation.ValidatePersistentVolumeClaimStatusUpdate(obj.(*api.PersistentVolumeClaim), old.(*api.PersistentVolumeClaim))
+}
+
+// GetAttrs returns labels and fields of a given object for filtering purposes.
+func GetAttrs(obj runtime.Object) (labels.Set, fields.Set, bool, error) {
+	persistentvolumeclaimObj, ok := obj.(*api.PersistentVolumeClaim)
+	if !ok {
+		return nil, nil, false, fmt.Errorf("not a persistentvolumeclaim")
+	}
+	return labels.Set(persistentvolumeclaimObj.Labels), PersistentVolumeClaimToSelectableFields(persistentvolumeclaimObj), persistentvolumeclaimObj.Initializers != nil, nil
 }
 
 // MatchPersistentVolumeClaim returns a generic matcher for a given label and field selector.
 func MatchPersistentVolumeClaim(label labels.Selector, field fields.Selector) storage.SelectionPredicate {
 	return storage.SelectionPredicate{
-		Label: label,
-		Field: field,
-		GetAttrs: func(obj runtime.Object) (labels.Set, fields.Set, error) {
-			persistentvolumeclaimObj, ok := obj.(*api.PersistentVolumeClaim)
-			if !ok {
-				return nil, nil, fmt.Errorf("not a persistentvolumeclaim")
-			}
-			return labels.Set(persistentvolumeclaimObj.Labels), PersistentVolumeClaimToSelectableFields(persistentvolumeclaimObj), nil
-		},
+		Label:    label,
+		Field:    field,
+		GetAttrs: GetAttrs,
 	}
 }
 

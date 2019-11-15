@@ -1,28 +1,60 @@
 package locksutil
 
 import (
-	"fmt"
+	"crypto/md5"
 	"sync"
 )
 
-// Takes in a map, indexed by string and creates new 'sync.RWMutex' items.
-// This utility creates 'count' number of mutexes (with a cap of 256) and
-// places them in the map. The indices will be 2 character hexadecimal
-// string values from 0 to count.
-func CreateLocks(p map[string]*sync.RWMutex, count int64) error {
-	// Since the indices of the map entries are based on 2 character
-	// hex values, this utility can only create upto 256 locks.
-	if count <= 0 || count > 256 {
-		return fmt.Errorf("invalid count: %d", count)
+const (
+	LockCount = 256
+)
+
+type LockEntry struct {
+	sync.RWMutex
+}
+
+// CreateLocks returns an array so that the locks can be iterated over in
+// order.
+//
+// This is only threadsafe if a process is using a single lock, or iterating
+// over the entire lock slice in order. Using a consistent order avoids
+// deadlocks because you can never have the following:
+//
+// Lock A, Lock B
+// Lock B, Lock A
+//
+// Where process 1 is now deadlocked trying to lock B, and process 2 deadlocked trying to lock A
+//
+func CreateLocks() []*LockEntry {
+	ret := make([]*LockEntry, LockCount)
+	for i := range ret {
+		ret[i] = new(LockEntry)
+	}
+	return ret
+}
+
+func LockIndexForKey(key string) uint8 {
+	hf := md5.New()
+	hf.Write([]byte(key))
+	return uint8(hf.Sum(nil)[0])
+}
+
+func LockForKey(locks []*LockEntry, key string) *LockEntry {
+	return locks[LockIndexForKey(key)]
+}
+
+func LocksForKeys(locks []*LockEntry, keys []string) []*LockEntry {
+	lockIndexes := make(map[uint8]struct{}, len(keys))
+	for _, k := range keys {
+		lockIndexes[LockIndexForKey(k)] = struct{}{}
 	}
 
-	if p == nil {
-		return fmt.Errorf("map of locks is not initialized")
+	locksToReturn := make([]*LockEntry, 0, len(keys))
+	for i, l := range locks {
+		if _, ok := lockIndexes[uint8(i)]; ok {
+			locksToReturn = append(locksToReturn, l)
+		}
 	}
 
-	for i := int64(0); i < count; i++ {
-		p[fmt.Sprintf("%02x", i)] = &sync.RWMutex{}
-	}
-
-	return nil
+	return locksToReturn
 }

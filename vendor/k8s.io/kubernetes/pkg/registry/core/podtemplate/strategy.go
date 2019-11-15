@@ -17,26 +17,26 @@ limitations under the License.
 package podtemplate
 
 import (
-	"fmt"
+	"context"
 
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/validation"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
-	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/storage"
-	"k8s.io/kubernetes/pkg/util/validation/field"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/apiserver/pkg/storage/names"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
+	"k8s.io/kubernetes/pkg/api/pod"
+	api "k8s.io/kubernetes/pkg/apis/core"
+	"k8s.io/kubernetes/pkg/apis/core/validation"
 )
 
 // podTemplateStrategy implements behavior for PodTemplates
 type podTemplateStrategy struct {
 	runtime.ObjectTyper
-	api.NameGenerator
+	names.NameGenerator
 }
 
 // Strategy is the default logic that applies when creating and updating PodTemplate
 // objects via the REST API.
-var Strategy = podTemplateStrategy{api.Scheme, api.SimpleNameGenerator}
+var Strategy = podTemplateStrategy{legacyscheme.Scheme, names.SimpleNameGenerator}
 
 // NamespaceScoped is true for pod templates.
 func (podTemplateStrategy) NamespaceScoped() bool {
@@ -44,12 +44,14 @@ func (podTemplateStrategy) NamespaceScoped() bool {
 }
 
 // PrepareForCreate clears fields that are not allowed to be set by end users on creation.
-func (podTemplateStrategy) PrepareForCreate(ctx api.Context, obj runtime.Object) {
-	_ = obj.(*api.PodTemplate)
+func (podTemplateStrategy) PrepareForCreate(ctx context.Context, obj runtime.Object) {
+	template := obj.(*api.PodTemplate)
+
+	pod.DropDisabledAlphaFields(&template.Template.Spec)
 }
 
 // Validate validates a new pod template.
-func (podTemplateStrategy) Validate(ctx api.Context, obj runtime.Object) field.ErrorList {
+func (podTemplateStrategy) Validate(ctx context.Context, obj runtime.Object) field.ErrorList {
 	pod := obj.(*api.PodTemplate)
 	return validation.ValidatePodTemplate(pod)
 }
@@ -64,12 +66,16 @@ func (podTemplateStrategy) AllowCreateOnUpdate() bool {
 }
 
 // PrepareForUpdate clears fields that are not allowed to be set by end users on update.
-func (podTemplateStrategy) PrepareForUpdate(ctx api.Context, obj, old runtime.Object) {
-	_ = obj.(*api.PodTemplate)
+func (podTemplateStrategy) PrepareForUpdate(ctx context.Context, obj, old runtime.Object) {
+	newTemplate := obj.(*api.PodTemplate)
+	oldTemplate := old.(*api.PodTemplate)
+
+	pod.DropDisabledAlphaFields(&newTemplate.Template.Spec)
+	pod.DropDisabledAlphaFields(&oldTemplate.Template.Spec)
 }
 
 // ValidateUpdate is the default update validation for an end user.
-func (podTemplateStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) field.ErrorList {
+func (podTemplateStrategy) ValidateUpdate(ctx context.Context, obj, old runtime.Object) field.ErrorList {
 	return validation.ValidatePodTemplateUpdate(obj.(*api.PodTemplate), old.(*api.PodTemplate))
 }
 
@@ -77,25 +83,7 @@ func (podTemplateStrategy) AllowUnconditionalUpdate() bool {
 	return true
 }
 
-func (podTemplateStrategy) Export(ctx api.Context, obj runtime.Object, exact bool) error {
+func (podTemplateStrategy) Export(ctx context.Context, obj runtime.Object, exact bool) error {
 	// Do nothing
 	return nil
-}
-
-func PodTemplateToSelectableFields(podTemplate *api.PodTemplate) fields.Set {
-	return nil
-}
-
-func MatchPodTemplate(label labels.Selector, field fields.Selector) storage.SelectionPredicate {
-	return storage.SelectionPredicate{
-		Label: label,
-		Field: field,
-		GetAttrs: func(obj runtime.Object) (labels.Set, fields.Set, error) {
-			pt, ok := obj.(*api.PodTemplate)
-			if !ok {
-				return nil, nil, fmt.Errorf("given object is not a pod template.")
-			}
-			return labels.Set(pt.ObjectMeta.Labels), PodTemplateToSelectableFields(pt), nil
-		},
-	}
 }

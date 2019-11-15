@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Copyright 2014 The Kubernetes Authors.
 #
@@ -32,7 +32,6 @@ BINS=(
 	cmd/genkubedocs
 	cmd/genman
 	cmd/genyaml
-	federation/cmd/genfeddocs
 )
 make -C "${KUBE_ROOT}" WHAT="${BINS[*]}"
 
@@ -44,14 +43,10 @@ kube::util::gen-docs "${KUBE_TEMP}"
 kube::util::remove-gen-docs
 
 # Copy fresh docs into the repo.
-# the shopt is so that we get .generated_docs from the glob.
+# the shopt is so that we get docs/.generated_docs from the glob.
 shopt -s dotglob
 cp -af "${KUBE_TEMP}"/* "${KUBE_ROOT}"
 shopt -u dotglob
 
 # Replace with placeholder docs
 kube::util::set-placeholder-gen-docs
-
-echo "Generated docs have been placed in the repository tree. Running hack/update-munge-docs.sh."
-
-"${KUBE_ROOT}/hack/update-munge-docs.sh"

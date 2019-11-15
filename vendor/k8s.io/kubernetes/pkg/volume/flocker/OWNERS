@@ -1,3 +1,11 @@
-maintainers:
+approvers:
+- rootfs
+- saad-ali
+reviewers:
 - agonzalezro
 - simonswine
+- saad-ali
+- jsafrane
+- rootfs
+- jingxu97
+- msau42

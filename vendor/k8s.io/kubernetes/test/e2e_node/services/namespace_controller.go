@@ -19,13 +19,12 @@ package services
 import (
 	"time"
 
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/apimachinery/registered"
-	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
-	"k8s.io/kubernetes/pkg/client/restclient"
-	"k8s.io/kubernetes/pkg/client/typed/dynamic"
+	"k8s.io/api/core/v1"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/informers"
+	clientset "k8s.io/client-go/kubernetes"
+	restclient "k8s.io/client-go/rest"
 	namespacecontroller "k8s.io/kubernetes/pkg/controller/namespace"
-	"k8s.io/kubernetes/test/e2e/framework"
 )
 
 const (
@@ -39,28 +38,41 @@ const (
 
 // NamespaceController is a server which manages namespace controller.
 type NamespaceController struct {
+	host   string
 	stopCh chan struct{}
 }
 
 // NewNamespaceController creates a new namespace controller.
-func NewNamespaceController() *NamespaceController {
-	return &NamespaceController{stopCh: make(chan struct{})}
+func NewNamespaceController(host string) *NamespaceController {
+	return &NamespaceController{host: host, stopCh: make(chan struct{})}
 }
 
 // Start starts the namespace controller.
 func (n *NamespaceController) Start() error {
-	// Use the default QPS
-	config := restclient.AddUserAgent(&restclient.Config{Host: framework.TestContext.Host}, ncName)
+	config := restclient.AddUserAgent(&restclient.Config{Host: n.host}, ncName)
+
+	// the namespace cleanup controller is very chatty.  It makes lots of discovery calls and then it makes lots of delete calls.
+	config.QPS = 50
+	config.Burst = 200
+
 	client, err := clientset.NewForConfig(config)
 	if err != nil {
 		return err
 	}
-	clientPool := dynamic.NewClientPool(config, registered.RESTMapper(), dynamic.LegacyAPIPathResolverFunc)
-	resources, err := client.Discovery().ServerPreferredNamespacedResources()
+	dynamicClient, err := dynamic.NewForConfig(config)
 	if err != nil {
 		return err
 	}
-	nc := namespacecontroller.NewNamespaceController(client, clientPool, resources, ncResyncPeriod, api.FinalizerKubernetes)
+	discoverResourcesFn := client.Discovery().ServerPreferredNamespacedResources
+	informerFactory := informers.NewSharedInformerFactory(client, ncResyncPeriod)
+	nc := namespacecontroller.NewNamespaceController(
+		client,
+		dynamicClient,
+		discoverResourcesFn,
+		informerFactory.Core().V1().Namespaces(),
+		ncResyncPeriod, v1.FinalizerKubernetes,
+	)
+	informerFactory.Start(n.stopCh)
 	go nc.Run(ncConcurrency, n.stopCh)
 	return nil
 }

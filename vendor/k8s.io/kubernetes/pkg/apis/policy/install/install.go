@@ -19,23 +19,20 @@ limitations under the License.
 package install
 
 import (
-	"k8s.io/kubernetes/pkg/apimachinery/announced"
+	"k8s.io/apimachinery/pkg/runtime"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	"k8s.io/kubernetes/pkg/apis/policy"
-	"k8s.io/kubernetes/pkg/apis/policy/v1alpha1"
+	"k8s.io/kubernetes/pkg/apis/policy/v1beta1"
 )
 
 func init() {
-	if err := announced.NewGroupMetaFactory(
-		&announced.GroupMetaFactoryArgs{
-			GroupName:                  policy.GroupName,
-			VersionPreferenceOrder:     []string{v1alpha1.SchemeGroupVersion.Version},
-			ImportPrefix:               "k8s.io/kubernetes/pkg/apis/policy",
-			AddInternalObjectsToScheme: policy.AddToScheme,
-		},
-		announced.VersionToSchemeFunc{
-			v1alpha1.SchemeGroupVersion.Version: v1alpha1.AddToScheme,
-		},
-	).Announce().RegisterAndEnable(); err != nil {
-		panic(err)
-	}
+	Install(legacyscheme.Scheme)
+}
+
+// Install registers the API group and adds types to a scheme
+func Install(scheme *runtime.Scheme) {
+	utilruntime.Must(policy.AddToScheme(scheme))
+	utilruntime.Must(v1beta1.AddToScheme(scheme))
+	utilruntime.Must(scheme.SetVersionPriority(v1beta1.SchemeGroupVersion))
 }

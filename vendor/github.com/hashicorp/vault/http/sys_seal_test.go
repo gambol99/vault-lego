@@ -3,6 +3,7 @@ package http
 import (
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"reflect"
 	"strconv"
@@ -26,9 +27,11 @@ func TestSysSealStatus(t *testing.T) {
 	var actual map[string]interface{}
 	expected := map[string]interface{}{
 		"sealed":   true,
-		"t":        json.Number("1"),
-		"n":        json.Number("1"),
+		"t":        json.Number("3"),
+		"n":        json.Number("3"),
 		"progress": json.Number("0"),
+		"nonce":    "",
+		"type":     "shamir",
 	}
 	testResponseStatus(t, resp, 200)
 	testResponseBody(t, resp, &actual)
@@ -101,39 +104,52 @@ func TestSysSeal_unsealed(t *testing.T) {
 
 func TestSysUnseal(t *testing.T) {
 	core := vault.TestCore(t)
-	key, _ := vault.TestCoreInit(t, core)
+	keys, _ := vault.TestCoreInit(t, core)
 	ln, addr := TestServer(t, core)
 	defer ln.Close()
 
-	resp := testHttpPut(t, "", addr+"/v1/sys/unseal", map[string]interface{}{
-		"key": hex.EncodeToString(key),
-	})
+	for i, key := range keys {
+		resp := testHttpPut(t, "", addr+"/v1/sys/unseal", map[string]interface{}{
+			"key": hex.EncodeToString(key),
+		})
 
-	var actual map[string]interface{}
-	expected := map[string]interface{}{
-		"sealed":   false,
-		"t":        json.Number("1"),
-		"n":        json.Number("1"),
-		"progress": json.Number("0"),
-	}
-	testResponseStatus(t, resp, 200)
-	testResponseBody(t, resp, &actual)
-	if actual["version"] == nil {
-		t.Fatalf("expected version information")
-	}
-	expected["version"] = actual["version"]
-	if actual["cluster_name"] == nil {
-		delete(expected, "cluster_name")
-	} else {
-		expected["cluster_name"] = actual["cluster_name"]
-	}
-	if actual["cluster_id"] == nil {
-		delete(expected, "cluster_id")
-	} else {
-		expected["cluster_id"] = actual["cluster_id"]
-	}
-	if !reflect.DeepEqual(actual, expected) {
-		t.Fatalf("bad: expected: %#v\nactual: %#v", expected, actual)
+		var actual map[string]interface{}
+		expected := map[string]interface{}{
+			"sealed":   true,
+			"t":        json.Number("3"),
+			"n":        json.Number("3"),
+			"progress": json.Number(fmt.Sprintf("%d", i+1)),
+			"nonce":    "",
+			"type":     "shamir",
+		}
+		if i == len(keys)-1 {
+			expected["sealed"] = false
+			expected["progress"] = json.Number("0")
+		}
+		testResponseStatus(t, resp, 200)
+		testResponseBody(t, resp, &actual)
+		if i < len(keys)-1 && (actual["nonce"] == nil || actual["nonce"].(string) == "") {
+			t.Fatalf("got nil nonce, actual is %#v", actual)
+		} else {
+			expected["nonce"] = actual["nonce"]
+		}
+		if actual["version"] == nil {
+			t.Fatalf("expected version information")
+		}
+		expected["version"] = actual["version"]
+		if actual["cluster_name"] == nil {
+			delete(expected, "cluster_name")
+		} else {
+			expected["cluster_name"] = actual["cluster_name"]
+		}
+		if actual["cluster_id"] == nil {
+			delete(expected, "cluster_id")
+		} else {
+			expected["cluster_id"] = actual["cluster_id"]
+		}
+		if !reflect.DeepEqual(actual, expected) {
+			t.Fatalf("bad: expected: \n%#v\nactual: \n%#v", expected, actual)
+		}
 	}
 }
 
@@ -182,6 +198,7 @@ func TestSysUnseal_Reset(t *testing.T) {
 			"t":        json.Number("3"),
 			"n":        json.Number("5"),
 			"progress": json.Number(strconv.Itoa(i + 1)),
+			"type":     "shamir",
 		}
 		testResponseStatus(t, resp, 200)
 		testResponseBody(t, resp, &actual)
@@ -189,6 +206,10 @@ func TestSysUnseal_Reset(t *testing.T) {
 			t.Fatalf("expected version information")
 		}
 		expected["version"] = actual["version"]
+		if actual["nonce"] == "" && expected["sealed"].(bool) {
+			t.Fatalf("expected a nonce")
+		}
+		expected["nonce"] = actual["nonce"]
 		if actual["cluster_name"] == nil {
 			delete(expected, "cluster_name")
 		} else {
@@ -214,6 +235,7 @@ func TestSysUnseal_Reset(t *testing.T) {
 		"t":        json.Number("3"),
 		"n":        json.Number("5"),
 		"progress": json.Number("0"),
+		"type":     "shamir",
 	}
 	testResponseStatus(t, resp, 200)
 	testResponseBody(t, resp, &actual)
@@ -221,6 +243,7 @@ func TestSysUnseal_Reset(t *testing.T) {
 		t.Fatalf("expected version information")
 	}
 	expected["version"] = actual["version"]
+	expected["nonce"] = actual["nonce"]
 	if actual["cluster_name"] == nil {
 		delete(expected, "cluster_name")
 	} else {
@@ -262,7 +285,7 @@ func TestSysSeal_Permissions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if resp != nil {
+	if resp == nil || resp.IsError() {
 		t.Fatalf("bad: %#v", resp)
 	}
 
@@ -285,7 +308,7 @@ func TestSysSeal_Permissions(t *testing.T) {
 
 	// We expect this to fail since it needs update and sudo
 	httpResp := testHttpPut(t, "child", addr+"/v1/sys/seal", nil)
-	testResponseStatus(t, httpResp, 500)
+	testResponseStatus(t, httpResp, 403)
 
 	// Now modify to add update capability
 	req = &logical.Request{
@@ -300,13 +323,13 @@ func TestSysSeal_Permissions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if resp != nil {
+	if resp == nil || resp.IsError() {
 		t.Fatalf("bad: %#v", resp)
 	}
 
 	// We expect this to fail since it needs sudo
 	httpResp = testHttpPut(t, "child", addr+"/v1/sys/seal", nil)
-	testResponseStatus(t, httpResp, 500)
+	testResponseStatus(t, httpResp, 403)
 
 	// Now modify to just sudo capability
 	req = &logical.Request{
@@ -321,13 +344,13 @@ func TestSysSeal_Permissions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if resp != nil {
+	if resp == nil || resp.IsError() {
 		t.Fatalf("bad: %#v", resp)
 	}
 
 	// We expect this to fail since it needs update
 	httpResp = testHttpPut(t, "child", addr+"/v1/sys/seal", nil)
-	testResponseStatus(t, httpResp, 500)
+	testResponseStatus(t, httpResp, 403)
 
 	// Now modify to add all needed capabilities
 	req = &logical.Request{
@@ -342,7 +365,7 @@ func TestSysSeal_Permissions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if resp != nil {
+	if resp == nil || resp.IsError() {
 		t.Fatalf("bad: %#v", resp)
 	}
 

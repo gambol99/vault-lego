@@ -20,75 +20,82 @@ import (
 	"reflect"
 	"testing"
 
-	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestQuotaGenerate(t *testing.T) {
 	hard := "cpu=10,memory=5G,pods=10,services=7"
-	resourceQuotaSpecList, err := populateResourceList(hard)
+	resourceQuotaSpecList, err := populateResourceListV1(hard)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
 
-	tests := map[string]struct {
+	tests := []struct {
+		name      string
 		params    map[string]interface{}
-		expected  *api.ResourceQuota
+		expected  *v1.ResourceQuota
 		expectErr bool
 	}{
-		"test-valid-use": {
+		{
+			name: "test-valid-use",
 			params: map[string]interface{}{
 				"name": "foo",
 				"hard": hard,
 			},
-			expected: &api.ResourceQuota{
-				ObjectMeta: api.ObjectMeta{
+			expected: &v1.ResourceQuota{
+				ObjectMeta: metav1.ObjectMeta{
 					Name: "foo",
 				},
-				Spec: api.ResourceQuotaSpec{Hard: resourceQuotaSpecList},
+				Spec: v1.ResourceQuotaSpec{Hard: resourceQuotaSpecList},
 			},
 			expectErr: false,
 		},
-		"test-missing-required-param": {
+		{
+			name: "test-missing-required-param",
 			params: map[string]interface{}{
 				"name": "foo",
 			},
 			expectErr: true,
 		},
-		"test-valid-scopes": {
+		{
+			name: "test-valid-scopes",
 			params: map[string]interface{}{
 				"name":   "foo",
 				"hard":   hard,
 				"scopes": "BestEffort,NotTerminating",
 			},
-			expected: &api.ResourceQuota{
-				ObjectMeta: api.ObjectMeta{
+			expected: &v1.ResourceQuota{
+				ObjectMeta: metav1.ObjectMeta{
 					Name: "foo",
 				},
-				Spec: api.ResourceQuotaSpec{
+				Spec: v1.ResourceQuotaSpec{
 					Hard: resourceQuotaSpecList,
-					Scopes: []api.ResourceQuotaScope{
-						api.ResourceQuotaScopeBestEffort,
-						api.ResourceQuotaScopeNotTerminating,
+					Scopes: []v1.ResourceQuotaScope{
+						v1.ResourceQuotaScopeBestEffort,
+						v1.ResourceQuotaScopeNotTerminating,
 					},
 				},
 			},
 			expectErr: false,
 		},
-		"test-empty-scopes": {
+		{
+			name: "test-empty-scopes",
 			params: map[string]interface{}{
 				"name":   "foo",
 				"hard":   hard,
 				"scopes": "",
 			},
-			expected: &api.ResourceQuota{
-				ObjectMeta: api.ObjectMeta{
+			expected: &v1.ResourceQuota{
+				ObjectMeta: metav1.ObjectMeta{
 					Name: "foo",
 				},
-				Spec: api.ResourceQuotaSpec{Hard: resourceQuotaSpecList},
+				Spec: v1.ResourceQuotaSpec{Hard: resourceQuotaSpecList},
 			},
 			expectErr: false,
 		},
-		"test-invalid-scopes": {
+		{
+			name: "test-invalid-scopes",
 			params: map[string]interface{}{
 				"name":   "foo",
 				"hard":   hard,
@@ -99,16 +106,18 @@ func TestQuotaGenerate(t *testing.T) {
 	}
 
 	generator := ResourceQuotaGeneratorV1{}
-	for name, test := range tests {
-		obj, err := generator.Generate(test.params)
-		if !test.expectErr && err != nil {
-			t.Errorf("%s: unexpected error: %v", name, err)
-		}
-		if test.expectErr && err != nil {
-			continue
-		}
-		if !reflect.DeepEqual(obj.(*api.ResourceQuota), test.expected) {
-			t.Errorf("%s:\nexpected:\n%#v\nsaw:\n%#v", name, test.expected, obj.(*api.ResourceQuota))
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			obj, err := generator.Generate(tt.params)
+			if !tt.expectErr && err != nil {
+				t.Errorf("%s: unexpected error: %v", tt.name, err)
+			}
+			if tt.expectErr && err != nil {
+				return
+			}
+			if !reflect.DeepEqual(obj.(*v1.ResourceQuota), tt.expected) {
+				t.Errorf("%s:\nexpected:\n%#v\nsaw:\n%#v", tt.name, tt.expected, obj.(*v1.ResourceQuota))
+			}
+		})
 	}
 }

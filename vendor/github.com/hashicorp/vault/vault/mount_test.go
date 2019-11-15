@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"context"
 	"encoding/json"
 	"reflect"
 	"strings"
@@ -9,11 +10,36 @@ import (
 
 	"github.com/hashicorp/vault/audit"
 	"github.com/hashicorp/vault/helper/compressutil"
+	"github.com/hashicorp/vault/helper/jsonutil"
 	"github.com/hashicorp/vault/logical"
 )
 
+func TestMount_ReadOnlyViewDuringMount(t *testing.T) {
+	c, _, _ := TestCoreUnsealed(t)
+	c.logicalBackends["noop"] = func(ctx context.Context, config *logical.BackendConfig) (logical.Backend, error) {
+		err := config.StorageView.Put(ctx, &logical.StorageEntry{
+			Key:   "bar",
+			Value: []byte("baz"),
+		})
+		if err == nil || !strings.Contains(err.Error(), logical.ErrSetupReadOnly.Error()) {
+			t.Fatalf("expected a read-only error")
+		}
+		return &NoopBackend{}, nil
+	}
+
+	me := &MountEntry{
+		Table: mountTableType,
+		Path:  "foo",
+		Type:  "noop",
+	}
+	err := c.mount(context.Background(), me)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+}
+
 func TestCore_DefaultMountTable(t *testing.T) {
-	c, key, _ := TestCoreUnsealed(t)
+	c, keys, _ := TestCoreUnsealed(t)
 	verifyDefaultTable(t, c.mounts)
 
 	// Start a second core with same physical
@@ -25,28 +51,30 @@ func TestCore_DefaultMountTable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	unseal, err := TestCoreUnseal(c2, key)
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	if !unseal {
-		t.Fatalf("should be unsealed")
+	for i, key := range keys {
+		unseal, err := TestCoreUnseal(c2, key)
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if i+1 == len(keys) && !unseal {
+			t.Fatalf("should be unsealed")
+		}
 	}
 
 	// Verify matching mount tables
-	if !reflect.DeepEqual(c.mounts, c2.mounts) {
+	if !reflect.DeepEqual(c.mounts.sortEntriesByPath(), c2.mounts.sortEntriesByPath()) {
 		t.Fatalf("mismatch: %v %v", c.mounts, c2.mounts)
 	}
 }
 
 func TestCore_Mount(t *testing.T) {
-	c, key, _ := TestCoreUnsealed(t)
+	c, keys, _ := TestCoreUnsealed(t)
 	me := &MountEntry{
 		Table: mountTableType,
 		Path:  "foo",
-		Type:  "generic",
+		Type:  "kv",
 	}
-	err := c.mount(me)
+	err := c.mount(context.Background(), me)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -64,25 +92,123 @@ func TestCore_Mount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	unseal, err := TestCoreUnseal(c2, key)
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	if !unseal {
-		t.Fatalf("should be unsealed")
+	for i, key := range keys {
+		unseal, err := TestCoreUnseal(c2, key)
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if i+1 == len(keys) && !unseal {
+			t.Fatalf("should be unsealed")
+		}
 	}
 
 	// Verify matching mount tables
-	if !reflect.DeepEqual(c.mounts, c2.mounts) {
+	if !reflect.DeepEqual(c.mounts.sortEntriesByPath(), c2.mounts.sortEntriesByPath()) {
 		t.Fatalf("mismatch: %v %v", c.mounts, c2.mounts)
 	}
 }
 
+// Test that the local table actually gets populated as expected with local
+// entries, and that upon reading the entries from both are recombined
+// correctly
+func TestCore_Mount_Local(t *testing.T) {
+	c, _, _ := TestCoreUnsealed(t)
+
+	c.mounts = &MountTable{
+		Type: mountTableType,
+		Entries: []*MountEntry{
+			&MountEntry{
+				Table:    mountTableType,
+				Path:     "noop/",
+				Type:     "kv",
+				UUID:     "abcd",
+				Accessor: "kv-abcd",
+			},
+			&MountEntry{
+				Table:    mountTableType,
+				Path:     "noop2/",
+				Type:     "kv",
+				UUID:     "bcde",
+				Accessor: "kv-bcde",
+			},
+		},
+	}
+
+	// Both should set up successfully
+	err := c.setupMounts(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.mounts.Entries) != 2 {
+		t.Fatalf("expected two entries, got %d", len(c.mounts.Entries))
+	}
+
+	rawLocal, err := c.barrier.Get(context.Background(), coreLocalMountConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rawLocal == nil {
+		t.Fatal("expected non-nil local mounts")
+	}
+	localMountsTable := &MountTable{}
+	if err := jsonutil.DecodeJSON(rawLocal.Value, localMountsTable); err != nil {
+		t.Fatal(err)
+	}
+	if len(localMountsTable.Entries) != 1 || localMountsTable.Entries[0].Type != "cubbyhole" {
+		t.Fatalf("expected only cubbyhole entry in local mount table, got %#v", localMountsTable)
+	}
+
+	c.mounts.Entries[1].Local = true
+	if err := c.persistMounts(context.Background(), c.mounts, false); err != nil {
+		t.Fatal(err)
+	}
+
+	rawLocal, err = c.barrier.Get(context.Background(), coreLocalMountConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rawLocal == nil {
+		t.Fatal("expected non-nil local mount")
+	}
+	localMountsTable = &MountTable{}
+	if err := jsonutil.DecodeJSON(rawLocal.Value, localMountsTable); err != nil {
+		t.Fatal(err)
+	}
+	// This requires some explanation: because we're directly munging the mount
+	// table, the table initially when core unseals contains cubbyhole as per
+	// above, but then we overwrite it with our own table with one local entry,
+	// so we should now only expect the noop2 entry
+	if len(localMountsTable.Entries) != 1 || localMountsTable.Entries[0].Path != "noop2/" {
+		t.Fatalf("expected one entry in local mount table, got %#v", localMountsTable)
+	}
+
+	oldMounts := c.mounts
+	if err := c.loadMounts(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	compEntries := c.mounts.Entries[:0]
+	// Filter out required mounts
+	for _, v := range c.mounts.Entries {
+		if v.Type == "kv" {
+			compEntries = append(compEntries, v)
+		}
+	}
+	c.mounts.Entries = compEntries
+
+	if !reflect.DeepEqual(oldMounts, c.mounts) {
+		t.Fatalf("expected\n%#v\ngot\n%#v\n", oldMounts, c.mounts)
+	}
+
+	if len(c.mounts.Entries) != 2 {
+		t.Fatalf("expected two mount entries, got %#v", localMountsTable)
+	}
+}
+
 func TestCore_Unmount(t *testing.T) {
-	c, key, _ := TestCoreUnsealed(t)
-	existed, err := c.unmount("secret")
-	if !existed || err != nil {
-		t.Fatalf("existed: %v; err: %v", existed, err)
+	c, keys, _ := TestCoreUnsealed(t)
+	err := c.unmount(context.Background(), "secret")
+	if err != nil {
+		t.Fatalf("err: %v", err)
 	}
 
 	match := c.router.MatchingMount("secret/foo")
@@ -98,16 +224,18 @@ func TestCore_Unmount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	unseal, err := TestCoreUnseal(c2, key)
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	if !unseal {
-		t.Fatalf("should be unsealed")
+	for i, key := range keys {
+		unseal, err := TestCoreUnseal(c2, key)
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if i+1 == len(keys) && !unseal {
+			t.Fatalf("should be unsealed")
+		}
 	}
 
 	// Verify matching mount tables
-	if !reflect.DeepEqual(c.mounts, c2.mounts) {
+	if !reflect.DeepEqual(c.mounts.sortEntriesByPath(), c2.mounts.sortEntriesByPath()) {
 		t.Fatalf("mismatch: %v %v", c.mounts, c2.mounts)
 	}
 }
@@ -115,7 +243,7 @@ func TestCore_Unmount(t *testing.T) {
 func TestCore_Unmount_Cleanup(t *testing.T) {
 	noop := &NoopBackend{}
 	c, _, root := TestCoreUnsealed(t)
-	c.logicalBackends["noop"] = func(*logical.BackendConfig) (logical.Backend, error) {
+	c.logicalBackends["noop"] = func(context.Context, *logical.BackendConfig) (logical.Backend, error) {
 		return noop, nil
 	}
 
@@ -125,19 +253,19 @@ func TestCore_Unmount_Cleanup(t *testing.T) {
 		Path:  "test/",
 		Type:  "noop",
 	}
-	if err := c.mount(me); err != nil {
+	if err := c.mount(context.Background(), me); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 
 	// Store the view
-	view := c.router.MatchingStorageView("test/")
+	view := c.router.MatchingStorageByAPIPath("test/")
 
 	// Inject data
 	se := &logical.StorageEntry{
 		Key:   "plstodelete",
 		Value: []byte("test"),
 	}
-	if err := view.Put(se); err != nil {
+	if err := view.Put(context.Background(), se); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 
@@ -169,8 +297,8 @@ func TestCore_Unmount_Cleanup(t *testing.T) {
 	}
 
 	// Unmount, this should cleanup
-	if existed, err := c.unmount("test/"); !existed || err != nil {
-		t.Fatalf("existed: %v; err: %v", existed, err)
+	if err := c.unmount(context.Background(), "test/"); err != nil {
+		t.Fatalf("err: %v", err)
 	}
 
 	// Rollback should be invoked
@@ -187,7 +315,7 @@ func TestCore_Unmount_Cleanup(t *testing.T) {
 	}
 
 	// View should be empty
-	out, err := CollectKeys(view)
+	out, err := logical.CollectKeys(context.Background(), view)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -197,8 +325,8 @@ func TestCore_Unmount_Cleanup(t *testing.T) {
 }
 
 func TestCore_Remount(t *testing.T) {
-	c, key, _ := TestCoreUnsealed(t)
-	err := c.remount("secret", "foo")
+	c, keys, _ := TestCoreUnsealed(t)
+	err := c.remount(context.Background(), "secret", "foo")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -216,12 +344,14 @@ func TestCore_Remount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	unseal, err := TestCoreUnseal(c2, key)
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	if !unseal {
-		t.Fatalf("should be unsealed")
+	for i, key := range keys {
+		unseal, err := TestCoreUnseal(c2, key)
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if i+1 == len(keys) && !unseal {
+			t.Fatalf("should be unsealed")
+		}
 	}
 
 	// Verify matching mount tables
@@ -233,7 +363,7 @@ func TestCore_Remount(t *testing.T) {
 func TestCore_Remount_Cleanup(t *testing.T) {
 	noop := &NoopBackend{}
 	c, _, root := TestCoreUnsealed(t)
-	c.logicalBackends["noop"] = func(*logical.BackendConfig) (logical.Backend, error) {
+	c.logicalBackends["noop"] = func(context.Context, *logical.BackendConfig) (logical.Backend, error) {
 		return noop, nil
 	}
 
@@ -243,19 +373,19 @@ func TestCore_Remount_Cleanup(t *testing.T) {
 		Path:  "test/",
 		Type:  "noop",
 	}
-	if err := c.mount(me); err != nil {
+	if err := c.mount(context.Background(), me); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 
 	// Store the view
-	view := c.router.MatchingStorageView("test/")
+	view := c.router.MatchingStorageByAPIPath("test/")
 
 	// Inject data
 	se := &logical.StorageEntry{
 		Key:   "plstokeep",
 		Value: []byte("test"),
 	}
-	if err := view.Put(se); err != nil {
+	if err := view.Put(context.Background(), se); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 
@@ -287,7 +417,7 @@ func TestCore_Remount_Cleanup(t *testing.T) {
 	}
 
 	// Remount, this should cleanup
-	if err := c.remount("test/", "new/"); err != nil {
+	if err := c.remount(context.Background(), "test/", "new/"); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 
@@ -305,7 +435,7 @@ func TestCore_Remount_Cleanup(t *testing.T) {
 	}
 
 	// View should not be empty
-	out, err := CollectKeys(view)
+	out, err := logical.CollectKeys(context.Background(), view)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -316,21 +446,22 @@ func TestCore_Remount_Cleanup(t *testing.T) {
 
 func TestCore_Remount_Protected(t *testing.T) {
 	c, _, _ := TestCoreUnsealed(t)
-	err := c.remount("sys", "foo")
+	err := c.remount(context.Background(), "sys", "foo")
 	if err.Error() != "cannot remount 'sys/'" {
 		t.Fatalf("err: %v", err)
 	}
 }
 
 func TestDefaultMountTable(t *testing.T) {
-	table := defaultMountTable()
+	c, _, _ := TestCoreUnsealed(t)
+	table := c.defaultMountTable()
 	verifyDefaultTable(t, table)
 }
 
 func TestCore_MountTable_UpgradeToTyped(t *testing.T) {
 	c, _, _ := TestCoreUnsealed(t)
 
-	c.auditBackends["noop"] = func(config *audit.BackendConfig) (audit.Backend, error) {
+	c.auditBackends["noop"] = func(ctx context.Context, config *audit.BackendConfig) (audit.Backend, error) {
 		return &NoopAudit{
 			Config: config,
 		}, nil
@@ -341,12 +472,12 @@ func TestCore_MountTable_UpgradeToTyped(t *testing.T) {
 		Path:  "foo",
 		Type:  "noop",
 	}
-	err := c.enableAudit(me)
+	err := c.enableAudit(context.Background(), me)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
 
-	c.credentialBackends["noop"] = func(*logical.BackendConfig) (logical.Backend, error) {
+	c.credentialBackends["noop"] = func(context.Context, *logical.BackendConfig) (logical.Backend, error) {
 		return &NoopBackend{}, nil
 	}
 
@@ -355,7 +486,7 @@ func TestCore_MountTable_UpgradeToTyped(t *testing.T) {
 		Path:  "foo",
 		Type:  "noop",
 	}
-	err = c.enableCredential(me)
+	err = c.enableCredential(context.Background(), me)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -384,6 +515,17 @@ func testCore_MountTable_UpgradeToTyped_Common(
 		mt = c.auth
 	}
 
+	// We filter out local entries here since the logic is rather dumb
+	// (straight JSON comparison) and doesn't seal well with the separate
+	// locations
+	newEntries := mt.Entries[:0]
+	for _, entry := range mt.Entries {
+		if !entry.Local {
+			newEntries = append(newEntries, entry)
+		}
+	}
+	mt.Entries = newEntries
+
 	// Save the expected table
 	goodJson, err := json.Marshal(mt)
 	if err != nil {
@@ -409,24 +551,24 @@ func testCore_MountTable_UpgradeToTyped_Common(
 		Key:   path,
 		Value: raw,
 	}
-	if err := c.barrier.Put(entry); err != nil {
+	if err := c.barrier.Put(context.Background(), entry); err != nil {
 		t.Fatal(err)
 	}
 
-	var persistFunc func(*MountTable) error
+	var persistFunc func(context.Context, *MountTable, bool) error
 
 	// It should load successfully and be upgraded and persisted
 	switch testType {
 	case "mounts":
-		err = c.loadMounts()
+		err = c.loadMounts(context.Background())
 		persistFunc = c.persistMounts
 		mt = c.mounts
 	case "credentials":
-		err = c.loadCredentials()
+		err = c.loadCredentials(context.Background())
 		persistFunc = c.persistAuth
 		mt = c.auth
 	case "audits":
-		err = c.loadAudits()
+		err = c.loadAudits(context.Background())
 		persistFunc = c.persistAudit
 		mt = c.audit
 	}
@@ -434,7 +576,7 @@ func testCore_MountTable_UpgradeToTyped_Common(
 		t.Fatal(err)
 	}
 
-	entry, err = c.barrier.Get(path)
+	entry, err = c.barrier.Get(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -456,49 +598,45 @@ func testCore_MountTable_UpgradeToTyped_Common(
 	// Now try saving invalid versions
 	origTableType := mt.Type
 	mt.Type = "foo"
-	if err := persistFunc(mt); err == nil {
+	if err := persistFunc(context.Background(), mt, false); err == nil {
 		t.Fatal("expected error")
 	}
 
 	if len(mt.Entries) > 0 {
 		mt.Type = origTableType
 		mt.Entries[0].Table = "bar"
-		if err := persistFunc(mt); err == nil {
+		if err := persistFunc(context.Background(), mt, false); err == nil {
 			t.Fatal("expected error")
 		}
 
 		mt.Entries[0].Table = mt.Type
-		if err := persistFunc(mt); err != nil {
+		if err := persistFunc(context.Background(), mt, false); err != nil {
 			t.Fatal(err)
 		}
 	}
 }
 
 func verifyDefaultTable(t *testing.T, table *MountTable) {
-	if len(table.Entries) != 3 {
+	if len(table.Entries) != 4 {
 		t.Fatalf("bad: %v", table.Entries)
 	}
-	for idx, entry := range table.Entries {
-		switch idx {
-		case 0:
-			if entry.Path != "secret/" {
-				t.Fatalf("bad: %v", entry)
-			}
-			if entry.Type != "generic" {
-				t.Fatalf("bad: %v", entry)
-			}
-		case 1:
-			if entry.Path != "cubbyhole/" {
-				t.Fatalf("bad: %v", entry)
-			}
+	table.sortEntriesByPath()
+	for _, entry := range table.Entries {
+		switch entry.Path {
+		case "cubbyhole/":
 			if entry.Type != "cubbyhole" {
 				t.Fatalf("bad: %v", entry)
 			}
-		case 2:
-			if entry.Path != "sys/" {
+		case "secret/":
+			if entry.Type != "kv" {
 				t.Fatalf("bad: %v", entry)
 			}
+		case "sys/":
 			if entry.Type != "system" {
+				t.Fatalf("bad: %v", entry)
+			}
+		case "identity/":
+			if entry.Type != "identity" {
 				t.Fatalf("bad: %v", entry)
 			}
 		}
@@ -512,5 +650,31 @@ func verifyDefaultTable(t *testing.T, table *MountTable) {
 			t.Fatalf("bad: %v", entry)
 		}
 	}
+}
 
+func TestSingletonMountTableFunc(t *testing.T) {
+	c, _, _ := TestCoreUnsealed(t)
+
+	mounts, auth := c.singletonMountTables()
+
+	if len(mounts.Entries) != 2 {
+		t.Fatalf("length of mounts is wrong; expected 2, got %d", len(mounts.Entries))
+	}
+
+	for _, entry := range mounts.Entries {
+		switch entry.Type {
+		case "system":
+		case "identity":
+		default:
+			t.Fatalf("unknown type %s", entry.Type)
+		}
+	}
+
+	if len(auth.Entries) != 1 {
+		t.Fatal("length of auth is wrong")
+	}
+
+	if auth.Entries[0].Type != "token" {
+		t.Fatal("unexpected entry type for auth")
+	}
 }

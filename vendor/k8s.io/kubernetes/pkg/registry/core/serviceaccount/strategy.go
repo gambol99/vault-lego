@@ -17,37 +17,35 @@ limitations under the License.
 package serviceaccount
 
 import (
-	"fmt"
+	"context"
 
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/validation"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
-	"k8s.io/kubernetes/pkg/registry/generic"
-	"k8s.io/kubernetes/pkg/runtime"
-	apistorage "k8s.io/kubernetes/pkg/storage"
-	"k8s.io/kubernetes/pkg/util/validation/field"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/apiserver/pkg/storage/names"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
+	api "k8s.io/kubernetes/pkg/apis/core"
+	"k8s.io/kubernetes/pkg/apis/core/validation"
 )
 
 // strategy implements behavior for ServiceAccount objects
 type strategy struct {
 	runtime.ObjectTyper
-	api.NameGenerator
+	names.NameGenerator
 }
 
 // Strategy is the default logic that applies when creating and updating ServiceAccount
 // objects via the REST API.
-var Strategy = strategy{api.Scheme, api.SimpleNameGenerator}
+var Strategy = strategy{legacyscheme.Scheme, names.SimpleNameGenerator}
 
 func (strategy) NamespaceScoped() bool {
 	return true
 }
 
-func (strategy) PrepareForCreate(ctx api.Context, obj runtime.Object) {
+func (strategy) PrepareForCreate(ctx context.Context, obj runtime.Object) {
 	cleanSecretReferences(obj.(*api.ServiceAccount))
 }
 
-func (strategy) Validate(ctx api.Context, obj runtime.Object) field.ErrorList {
+func (strategy) Validate(ctx context.Context, obj runtime.Object) field.ErrorList {
 	return validation.ValidateServiceAccount(obj.(*api.ServiceAccount))
 }
 
@@ -59,7 +57,7 @@ func (strategy) AllowCreateOnUpdate() bool {
 	return false
 }
 
-func (strategy) PrepareForUpdate(ctx api.Context, obj, old runtime.Object) {
+func (strategy) PrepareForUpdate(ctx context.Context, obj, old runtime.Object) {
 	cleanSecretReferences(obj.(*api.ServiceAccount))
 }
 
@@ -69,30 +67,10 @@ func cleanSecretReferences(serviceAccount *api.ServiceAccount) {
 	}
 }
 
-func (strategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) field.ErrorList {
+func (strategy) ValidateUpdate(ctx context.Context, obj, old runtime.Object) field.ErrorList {
 	return validation.ValidateServiceAccountUpdate(obj.(*api.ServiceAccount), old.(*api.ServiceAccount))
 }
 
 func (strategy) AllowUnconditionalUpdate() bool {
 	return true
-}
-
-// Matcher returns a generic matcher for a given label and field selector.
-func Matcher(label labels.Selector, field fields.Selector) apistorage.SelectionPredicate {
-	return apistorage.SelectionPredicate{
-		Label: label,
-		Field: field,
-		GetAttrs: func(obj runtime.Object) (labels.Set, fields.Set, error) {
-			sa, ok := obj.(*api.ServiceAccount)
-			if !ok {
-				return nil, nil, fmt.Errorf("not a serviceaccount")
-			}
-			return labels.Set(sa.Labels), SelectableFields(sa), nil
-		},
-	}
-}
-
-// SelectableFields returns a field set that represents the object
-func SelectableFields(obj *api.ServiceAccount) fields.Set {
-	return generic.ObjectMetaFieldsSet(&obj.ObjectMeta, true)
 }

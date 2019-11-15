@@ -17,24 +17,36 @@
 from __future__ import print_function
 
 import argparse
+import datetime
+import difflib
 import glob
-import json
-import mmap
 import os
 import re
 import sys
 
 parser = argparse.ArgumentParser()
-parser.add_argument("filenames", help="list of files to check, all files if unspecified", nargs='*')
+parser.add_argument(
+    "filenames",
+    help="list of files to check, all files if unspecified",
+    nargs='*')
 
 rootdir = os.path.dirname(__file__) + "/../../"
 rootdir = os.path.abspath(rootdir)
-parser.add_argument("--rootdir", default=rootdir, help="root directory to examine")
+parser.add_argument(
+    "--rootdir", default=rootdir, help="root directory to examine")
 
 default_boilerplate_dir = os.path.join(rootdir, "hack/boilerplate")
-parser.add_argument("--boilerplate-dir", default=default_boilerplate_dir)
+parser.add_argument(
+    "--boilerplate-dir", default=default_boilerplate_dir)
+
+parser.add_argument(
+    "-v", "--verbose",
+    help="give verbose output regarding why a file does not pass",
+    action="store_true")
+
 args = parser.parse_args()
 
+verbose_out = sys.stderr if args.verbose else open("/dev/null", "w")
 
 def get_refs():
     refs = {}
@@ -49,29 +61,43 @@ def get_refs():
 
     return refs
 
+def is_generated_file(filename, data, regexs):
+    for d in skipped_ungenerated_files:
+        if d in filename:
+            return False
+
+    p = regexs["generated"]
+    return p.search(data)
+
 def file_passes(filename, refs, regexs):
     try:
         f = open(filename, 'r')
-    except:
+    except Exception as exc:
+        print("Unable to open %s: %s" % (filename, exc), file=verbose_out)
         return False
 
     data = f.read()
     f.close()
 
+    # determine if the file is automatically generated
+    generated = is_generated_file(filename, data, regexs)
+
     basename = os.path.basename(filename)
-    extension = file_extension(filename)
+    if generated:
+        extension = "generatego"
+    else:
+        extension = file_extension(filename)
+
     if extension != "":
         ref = refs[extension]
     else:
         ref = refs[basename]
 
-    # remove build tags from the top of Go files
-    if extension == "go":
+    # remove extra content from the top of files
+    if extension == "go" or extension == "generatego":
         p = regexs["go_build_constraints"]
         (data, found) = p.subn("", data, 1)
-
-    # remove shebang from the top of shell files
-    if extension == "sh":
+    elif extension == "sh":
         p = regexs["shebang"]
         (data, found) = p.subn("", data, 1)
 
@@ -79,6 +105,9 @@ def file_passes(filename, refs, regexs):
 
     # if our test file is smaller than the reference it surely fails!
     if len(ref) > len(data):
+        print('File %s smaller than reference (%d < %d)' %
+              (filename, len(data), len(ref)),
+              file=verbose_out)
         return False
 
     # trim our file to the same number of lines as the reference file
@@ -87,17 +116,28 @@ def file_passes(filename, refs, regexs):
     p = regexs["year"]
     for d in data:
         if p.search(d):
+            if generated:
+                print('File %s has the YEAR field, but it should not be in generated file' % filename, file=verbose_out)
+            else:
+                print('File %s has the YEAR field, but missing the year of date' % filename, file=verbose_out)
             return False
 
-    # Replace all occurrences of the regex "2016|2015|2014" with "YEAR"
-    p = regexs["date"]
-    for i, d in enumerate(data):
-        (data[i], found) = p.subn('YEAR', d)
-        if found != 0:
-            break
+    if not generated:
+        # Replace all occurrences of the regex "2014|2015|2016|2017|2018" with "YEAR"
+        p = regexs["date"]
+        for i, d in enumerate(data):
+            (data[i], found) = p.subn('YEAR', d)
+            if found != 0:
+                break
 
     # if we don't match the reference at this point, fail
     if ref != data:
+        print("Header in %s does not match reference, diff:" % filename, file=verbose_out)
+        if args.verbose:
+            print(file=verbose_out)
+            for line in difflib.unified_diff(ref, data, 'reference', filename, lineterm=''):
+                print(line, file=verbose_out)
+            print(file=verbose_out)
         return False
 
     return True
@@ -105,7 +145,13 @@ def file_passes(filename, refs, regexs):
 def file_extension(filename):
     return os.path.splitext(filename)[1].split(".")[-1].lower()
 
-skipped_dirs = ['Godeps', 'third_party', '_gopath', '_output', '.git', 'cluster/env.sh', "vendor", "test/e2e/generated/bindata.go"]
+skipped_dirs = ['Godeps', 'third_party', '_gopath', '_output', '.git', 'cluster/env.sh',
+                "vendor", "test/e2e/generated/bindata.go", "hack/boilerplate/test",
+                "pkg/generated/bindata.go"]
+
+# list all the files contain 'DO NOT EDIT', but are not generated
+skipped_ungenerated_files = ['hack/build-ui.sh', 'hack/lib/swagger.sh',
+                             'hack/boilerplate/boilerplate.py']
 
 def normalize_files(files):
     newfiles = []
@@ -145,16 +191,23 @@ def get_files(extensions):
             outfiles.append(pathname)
     return outfiles
 
+def get_dates():
+    years = datetime.datetime.now().year
+    return '(%s)' % '|'.join((str(year) for year in range(2014, years+1)))
+
 def get_regexs():
     regexs = {}
     # Search for "YEAR" which exists in the boilerplate, but shouldn't in the real thing
     regexs["year"] = re.compile( 'YEAR' )
-    # dates can be 2014, 2015 or 2016, company holder names can be anything
-    regexs["date"] = re.compile( '(2014|2015|2016)' )
+    # get_dates return 2014, 2015, 2016, 2017, or 2018 until the current year as a regex like: "(2014|2015|2016|2017|2018)";
+    # company holder names can be anything
+    regexs["date"] = re.compile(get_dates())
     # strip // +build \n\n build constraints
     regexs["go_build_constraints"] = re.compile(r"^(// \+build.*\n)+\n", re.MULTILINE)
     # strip #!.* from shell scripts
     regexs["shebang"] = re.compile(r"^(#!.*\n)\n*", re.MULTILINE)
+    # Search for generated files
+    regexs["generated"] = re.compile( 'DO NOT EDIT' )
     return regexs
 
 def main():
@@ -165,6 +218,8 @@ def main():
     for filename in filenames:
         if not file_passes(filename, refs, regexs):
             print(filename, file=sys.stdout)
+
+    return 0
 
 if __name__ == "__main__":
   sys.exit(main())

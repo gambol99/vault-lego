@@ -17,20 +17,22 @@ limitations under the License.
 package cloudstack
 
 import (
+	"context"
 	"os"
 	"strconv"
 	"strings"
 	"testing"
 
-	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 const testClusterName = "testCluster"
 
 func TestReadConfig(t *testing.T) {
 	_, err := readConfig(nil)
-	if err == nil {
-		t.Errorf("Should fail when no config is provided: %v", err)
+	if err != nil {
+		t.Fatalf("Should not return an error when no config is provided: %v", err)
 	}
 
 	cfg, err := readConfig(strings.NewReader(`
@@ -40,7 +42,6 @@ func TestReadConfig(t *testing.T) {
  secret-key			= a-valid-secret-key
  ssl-no-verify	= true
  project-id			= a-valid-project-id
- zone						= a-valid-zone
  `))
 	if err != nil {
 		t.Fatalf("Should succeed when a valid config is provided: %v", err)
@@ -58,9 +59,6 @@ func TestReadConfig(t *testing.T) {
 	if !cfg.Global.SSLNoVerify {
 		t.Errorf("incorrect ssl-no-verify: %t", cfg.Global.SSLNoVerify)
 	}
-	if cfg.Global.Zone != "a-valid-zone" {
-		t.Errorf("incorrect zone: %s", cfg.Global.Zone)
-	}
 }
 
 // This allows acceptance testing against an existing CloudStack environment.
@@ -71,7 +69,6 @@ func configFromEnv() (*CSConfig, bool) {
 	cfg.Global.APIKey = os.Getenv("CS_API_KEY")
 	cfg.Global.SecretKey = os.Getenv("CS_SECRET_KEY")
 	cfg.Global.ProjectID = os.Getenv("CS_PROJECT_ID")
-	cfg.Global.Zone = os.Getenv("CS_ZONE")
 
 	// It is save to ignore the error here. If the input cannot be parsed SSLNoVerify
 	// will still be a bool with its zero value (false) which is the expected default.
@@ -111,31 +108,11 @@ func TestLoadBalancer(t *testing.T) {
 		t.Fatalf("LoadBalancer() returned false")
 	}
 
-	_, exists, err := lb.GetLoadBalancer(testClusterName, &api.Service{ObjectMeta: api.ObjectMeta{Name: "noexist"}})
+	_, exists, err := lb.GetLoadBalancer(context.TODO(), testClusterName, &v1.Service{ObjectMeta: metav1.ObjectMeta{Name: "noexist"}})
 	if err != nil {
 		t.Fatalf("GetLoadBalancer(\"noexist\") returned error: %s", err)
 	}
 	if exists {
 		t.Fatalf("GetLoadBalancer(\"noexist\") returned exists")
-	}
-}
-
-func TestZones(t *testing.T) {
-	cs := &CSCloud{
-		zone: "myRegion",
-	}
-
-	z, ok := cs.Zones()
-	if !ok {
-		t.Fatalf("Zones() returned false")
-	}
-
-	zone, err := z.GetZone()
-	if err != nil {
-		t.Fatalf("GetZone() returned error: %s", err)
-	}
-
-	if zone.Region != "myRegion" {
-		t.Fatalf("GetZone() returned wrong region (%s)", zone.Region)
 	}
 }

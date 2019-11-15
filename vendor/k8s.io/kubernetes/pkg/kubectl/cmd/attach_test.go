@@ -17,22 +17,25 @@ limitations under the License.
 package cmd
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/spf13/cobra"
-
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/unversioned"
-	"k8s.io/kubernetes/pkg/apimachinery/registered"
-	"k8s.io/kubernetes/pkg/client/restclient"
-	"k8s.io/kubernetes/pkg/client/unversioned/fake"
-	"k8s.io/kubernetes/pkg/util/term"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/cli-runtime/pkg/genericclioptions"
+	restclient "k8s.io/client-go/rest"
+	"k8s.io/client-go/rest/fake"
+	"k8s.io/client-go/tools/remotecommand"
+	cmdtesting "k8s.io/kubernetes/pkg/kubectl/cmd/testing"
+	"k8s.io/kubernetes/pkg/kubectl/polymorphichelpers"
+	"k8s.io/kubernetes/pkg/kubectl/scheme"
 )
 
 type fakeRemoteAttach struct {
@@ -41,110 +44,169 @@ type fakeRemoteAttach struct {
 	err    error
 }
 
-func (f *fakeRemoteAttach) Attach(method string, url *url.URL, config *restclient.Config, stdin io.Reader, stdout, stderr io.Writer, tty bool, terminalSizeQueue term.TerminalSizeQueue) error {
+func (f *fakeRemoteAttach) Attach(method string, url *url.URL, config *restclient.Config, stdin io.Reader, stdout, stderr io.Writer, tty bool, terminalSizeQueue remotecommand.TerminalSizeQueue) error {
 	f.method = method
 	f.url = url
 	return f.err
 }
 
+func fakeAttachablePodFn(pod *corev1.Pod) polymorphichelpers.AttachableLogsForObjectFunc {
+	return func(getter genericclioptions.RESTClientGetter, obj runtime.Object, timeout time.Duration) (*corev1.Pod, error) {
+		return pod, nil
+	}
+}
+
 func TestPodAndContainerAttach(t *testing.T) {
 	tests := []struct {
-		args              []string
-		p                 *AttachOptions
-		name              string
-		expectError       bool
-		expectedPod       string
-		expectedContainer string
+		name                  string
+		args                  []string
+		options               *AttachOptions
+		expectError           string
+		expectedPodName       string
+		expectedContainerName string
+		obj                   *corev1.Pod
 	}{
 		{
-			p:           &AttachOptions{},
-			expectError: true,
 			name:        "empty",
+			options:     &AttachOptions{GetPodTimeout: 1},
+			expectError: "at least 1 argument is required",
 		},
 		{
-			p:           &AttachOptions{},
-			args:        []string{"foo", "bar"},
-			expectError: true,
 			name:        "too many args",
+			options:     &AttachOptions{GetPodTimeout: 2},
+			args:        []string{"one", "two", "three"},
+			expectError: "at most 2 arguments",
 		},
 		{
-			p:           &AttachOptions{},
-			args:        []string{"foo"},
-			expectedPod: "foo",
-			name:        "no container, no flags",
+			name:                  "no container, no flags",
+			options:               &AttachOptions{GetPodTimeout: defaultPodLogsTimeout},
+			args:                  []string{"foo"},
+			expectedPodName:       "foo",
+			expectedContainerName: "bar",
+			obj: attachPod(),
 		},
 		{
-			p:                 &AttachOptions{StreamOptions: StreamOptions{ContainerName: "bar"}},
-			args:              []string{"foo"},
-			expectedPod:       "foo",
-			expectedContainer: "bar",
-			name:              "container in flag",
+			name:                  "container in flag",
+			options:               &AttachOptions{StreamOptions: StreamOptions{ContainerName: "bar"}, GetPodTimeout: 10000000},
+			args:                  []string{"foo"},
+			expectedPodName:       "foo",
+			expectedContainerName: "bar",
+			obj: attachPod(),
 		},
 		{
-			p:                 &AttachOptions{StreamOptions: StreamOptions{ContainerName: "initfoo"}},
-			args:              []string{"foo"},
-			expectedPod:       "foo",
-			expectedContainer: "initfoo",
-			name:              "init container in flag",
+			name:                  "init container in flag",
+			options:               &AttachOptions{StreamOptions: StreamOptions{ContainerName: "initfoo"}, GetPodTimeout: 30},
+			args:                  []string{"foo"},
+			expectedPodName:       "foo",
+			expectedContainerName: "initfoo",
+			obj: attachPod(),
 		},
 		{
-			p:           &AttachOptions{StreamOptions: StreamOptions{ContainerName: "bar"}},
-			args:        []string{"foo", "-c", "wrong"},
-			expectError: true,
-			name:        "non-existing container in flag",
+			name:            "non-existing container",
+			options:         &AttachOptions{StreamOptions: StreamOptions{ContainerName: "wrong"}, GetPodTimeout: 10},
+			args:            []string{"foo"},
+			expectedPodName: "foo",
+			expectError:     "container not found",
+			obj:             attachPod(),
+		},
+		{
+			name:                  "no container, no flags, pods and name",
+			options:               &AttachOptions{GetPodTimeout: 10000},
+			args:                  []string{"pods", "foo"},
+			expectedPodName:       "foo",
+			expectedContainerName: "bar",
+			obj: attachPod(),
+		},
+		{
+			name:                  "invalid get pod timeout value",
+			options:               &AttachOptions{GetPodTimeout: 0},
+			args:                  []string{"pod/foo"},
+			expectedPodName:       "foo",
+			expectedContainerName: "bar",
+			obj:         attachPod(),
+			expectError: "must be higher than zero",
 		},
 	}
 
 	for _, test := range tests {
-		f, tf, _, ns := NewAPIFactory()
-		tf.Client = &fake.RESTClient{
-			NegotiatedSerializer: ns,
-			Client:               fake.CreateHTTPClient(func(req *http.Request) (*http.Response, error) { return nil, nil }),
-		}
-		tf.Namespace = "test"
-		tf.ClientConfig = defaultClientConfig()
+		t.Run(test.name, func(t *testing.T) {
+			// setup opts to fetch our test pod
+			test.options.AttachablePodFn = fakeAttachablePodFn(test.obj)
+			test.options.Resources = test.args
 
-		cmd := &cobra.Command{}
-		options := test.p
-		err := options.Complete(f, cmd, test.args)
-		if test.expectError && err == nil {
-			t.Errorf("unexpected non-error (%s)", test.name)
-		}
-		if !test.expectError && err != nil {
-			t.Errorf("unexpected error: %v (%s)", err, test.name)
-		}
-		if err != nil {
-			continue
-		}
-		if options.PodName != test.expectedPod {
-			t.Errorf("expected: %s, got: %s (%s)", test.expectedPod, options.PodName, test.name)
-		}
-		if options.ContainerName != test.expectedContainer {
-			t.Errorf("expected: %s, got: %s (%s)", test.expectedContainer, options.ContainerName, test.name)
-		}
+			if err := test.options.Validate(); err != nil {
+				if !strings.Contains(err.Error(), test.expectError) {
+					t.Errorf("unexpected error: expected %q, got %q", test.expectError, err)
+				}
+				return
+			}
+
+			pod, err := test.options.findAttachablePod(&corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "test"},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name: "foobar",
+						},
+					},
+				},
+			})
+			if err != nil {
+				if !strings.Contains(err.Error(), test.expectError) {
+					t.Errorf("unexpected error: expected %q, got %q", err, test.expectError)
+				}
+				return
+			}
+
+			if pod.Name != test.expectedPodName {
+				t.Errorf("unexpected pod name: expected %q, got %q", test.expectedContainerName, pod.Name)
+			}
+
+			container, err := test.options.containerToAttachTo(attachPod())
+			if err != nil {
+				if !strings.Contains(err.Error(), test.expectError) {
+					t.Errorf("unexpected error: expected %q, got %q", err, test.expectError)
+				}
+				return
+			}
+
+			if container.Name != test.expectedContainerName {
+				t.Errorf("unexpected container name: expected %q, got %q", test.expectedContainerName, container.Name)
+			}
+
+			if test.options.PodName != test.expectedPodName {
+				t.Errorf("%s: expected: %s, got: %s", test.name, test.expectedPodName, test.options.PodName)
+			}
+
+			if len(test.expectError) > 0 {
+				t.Fatalf("expected error %q, but saw none", test.expectError)
+			}
+		})
 	}
 }
 
 func TestAttach(t *testing.T) {
-	version := registered.GroupOrDie(api.GroupName).GroupVersion.Version
+	version := "v1"
 	tests := []struct {
-		name, version, podPath, attachPath, container string
-		pod                                           *api.Pod
-		remoteAttachErr                               bool
-		exepctedErr                                   string
+		name, version, podPath, fetchPodPath, attachPath, container string
+		pod                                                         *corev1.Pod
+		remoteAttachErr                                             bool
+		exepctedErr                                                 string
 	}{
 		{
-			name:       "pod attach",
-			version:    version,
-			podPath:    "/api/" + version + "/namespaces/test/pods/foo",
-			attachPath: "/api/" + version + "/namespaces/test/pods/foo/attach",
-			pod:        attachPod(),
-			container:  "bar",
+			name:         "pod attach",
+			version:      version,
+			podPath:      "/api/" + version + "/namespaces/test/pods/foo",
+			fetchPodPath: "/namespaces/test/pods/foo",
+			attachPath:   "/api/" + version + "/namespaces/test/pods/foo/attach",
+			pod:          attachPod(),
+			container:    "bar",
 		},
 		{
 			name:            "pod attach error",
 			version:         version,
 			podPath:         "/api/" + version + "/namespaces/test/pods/foo",
+			fetchPodPath:    "/namespaces/test/pods/foo",
 			attachPath:      "/api/" + version + "/namespaces/test/pods/foo/attach",
 			pod:             attachPod(),
 			remoteAttachErr: true,
@@ -152,165 +214,208 @@ func TestAttach(t *testing.T) {
 			exepctedErr:     "attach error",
 		},
 		{
-			name:        "container not found error",
-			version:     version,
-			podPath:     "/api/" + version + "/namespaces/test/pods/foo",
-			attachPath:  "/api/" + version + "/namespaces/test/pods/foo/attach",
-			pod:         attachPod(),
-			container:   "foo",
-			exepctedErr: "cannot attach to the container: container not found (foo)",
+			name:         "container not found error",
+			version:      version,
+			podPath:      "/api/" + version + "/namespaces/test/pods/foo",
+			fetchPodPath: "/namespaces/test/pods/foo",
+			attachPath:   "/api/" + version + "/namespaces/test/pods/foo/attach",
+			pod:          attachPod(),
+			container:    "foo",
+			exepctedErr:  "cannot attach to the container: container not found (foo)",
 		},
 	}
 	for _, test := range tests {
-		f, tf, codec, ns := NewAPIFactory()
-		tf.Client = &fake.RESTClient{
-			NegotiatedSerializer: ns,
-			Client: fake.CreateHTTPClient(func(req *http.Request) (*http.Response, error) {
-				switch p, m := req.URL.Path, req.Method; {
-				case p == test.podPath && m == "GET":
-					body := objBody(codec, test.pod)
-					return &http.Response{StatusCode: 200, Header: defaultHeader(), Body: body}, nil
-				default:
-					// Ensures no GET is performed when deleting by name
-					t.Errorf("%s: unexpected request: %s %#v\n%#v", test.name, req.Method, req.URL, req)
-					return nil, fmt.Errorf("unexpected request")
+		t.Run(test.name, func(t *testing.T) {
+			tf := cmdtesting.NewTestFactory().WithNamespace("test")
+			defer tf.Cleanup()
+
+			codec := scheme.Codecs.LegacyCodec(scheme.Scheme.PrioritizedVersionsAllGroups()...)
+			ns := scheme.Codecs
+
+			tf.Client = &fake.RESTClient{
+				GroupVersion:         schema.GroupVersion{Group: "", Version: "v1"},
+				NegotiatedSerializer: ns,
+				Client: fake.CreateHTTPClient(func(req *http.Request) (*http.Response, error) {
+					switch p, m := req.URL.Path, req.Method; {
+					case p == test.podPath && m == "GET":
+						body := objBody(codec, test.pod)
+						return &http.Response{StatusCode: 200, Header: defaultHeader(), Body: body}, nil
+					case p == test.fetchPodPath && m == "GET":
+						body := objBody(codec, test.pod)
+						return &http.Response{StatusCode: 200, Header: defaultHeader(), Body: body}, nil
+					default:
+						t.Errorf("%s: unexpected request: %s %#v\n%#v", p, req.Method, req.URL, req)
+						return nil, fmt.Errorf("unexpected request")
+					}
+				}),
+			}
+			tf.ClientConfigVal = &restclient.Config{APIPath: "/api", ContentConfig: restclient.ContentConfig{NegotiatedSerializer: scheme.Codecs, GroupVersion: &schema.GroupVersion{Version: test.version}}}
+
+			remoteAttach := &fakeRemoteAttach{}
+			if test.remoteAttachErr {
+				remoteAttach.err = fmt.Errorf("attach error")
+			}
+			options := &AttachOptions{
+				StreamOptions: StreamOptions{
+					ContainerName: test.container,
+					IOStreams:     genericclioptions.NewTestIOStreamsDiscard(),
+				},
+				Attach:        remoteAttach,
+				GetPodTimeout: 1000,
+			}
+
+			options.restClientGetter = tf
+			options.Namespace = "test"
+			options.Resources = []string{"foo"}
+			options.Builder = tf.NewBuilder
+			options.AttachablePodFn = fakeAttachablePodFn(test.pod)
+			options.AttachFunc = func(opts *AttachOptions, containerToAttach *corev1.Container, raw bool, sizeQueue remotecommand.TerminalSizeQueue) func() error {
+				return func() error {
+					u, err := url.Parse(fmt.Sprintf("%s?container=%s", test.attachPath, containerToAttach.Name))
+					if err != nil {
+						return err
+					}
+
+					return options.Attach.Attach("POST", u, nil, nil, nil, nil, raw, sizeQueue)
 				}
-			}),
-		}
-		tf.Namespace = "test"
-		tf.ClientConfig = &restclient.Config{APIPath: "/api", ContentConfig: restclient.ContentConfig{NegotiatedSerializer: api.Codecs, GroupVersion: &unversioned.GroupVersion{Version: test.version}}}
-		bufOut := bytes.NewBuffer([]byte{})
-		bufErr := bytes.NewBuffer([]byte{})
-		bufIn := bytes.NewBuffer([]byte{})
-		remoteAttach := &fakeRemoteAttach{}
-		if test.remoteAttachErr {
-			remoteAttach.err = fmt.Errorf("attach error")
-		}
-		params := &AttachOptions{
-			StreamOptions: StreamOptions{
-				ContainerName: test.container,
-				In:            bufIn,
-				Out:           bufOut,
-				Err:           bufErr,
-			},
-			Attach: remoteAttach,
-		}
-		cmd := &cobra.Command{}
-		if err := params.Complete(f, cmd, []string{"foo"}); err != nil {
-			t.Fatal(err)
-		}
-		err := params.Run()
-		if test.exepctedErr != "" && err.Error() != test.exepctedErr {
-			t.Errorf("%s: Unexpected exec error: %v", test.name, err)
-			continue
-		}
-		if test.exepctedErr == "" && err != nil {
-			t.Errorf("%s: Unexpected error: %v", test.name, err)
-			continue
-		}
-		if test.exepctedErr != "" {
-			continue
-		}
-		if remoteAttach.url.Path != test.attachPath {
-			t.Errorf("%s: Did not get expected path for exec request: %q %q", test.name, test.attachPath, remoteAttach.url.Path)
-			continue
-		}
-		if remoteAttach.method != "POST" {
-			t.Errorf("%s: Did not get method for attach request: %s", test.name, remoteAttach.method)
-		}
-		if remoteAttach.url.Query().Get("container") != "bar" {
-			t.Errorf("%s: Did not have query parameters: %s", test.name, remoteAttach.url.Query())
-		}
+			}
+
+			err := options.Run()
+			if test.exepctedErr != "" && err.Error() != test.exepctedErr {
+				t.Errorf("%s: Unexpected exec error: %v", test.name, err)
+				return
+			}
+			if test.exepctedErr == "" && err != nil {
+				t.Errorf("%s: Unexpected error: %v", test.name, err)
+				return
+			}
+			if test.exepctedErr != "" {
+				return
+			}
+			if remoteAttach.url.Path != test.attachPath {
+				t.Errorf("%s: Did not get expected path for exec request: %q %q", test.name, test.attachPath, remoteAttach.url.Path)
+				return
+			}
+			if remoteAttach.method != "POST" {
+				t.Errorf("%s: Did not get method for attach request: %s", test.name, remoteAttach.method)
+			}
+			if remoteAttach.url.Query().Get("container") != "bar" {
+				t.Errorf("%s: Did not have query parameters: %s", test.name, remoteAttach.url.Query())
+			}
+		})
 	}
 }
 
 func TestAttachWarnings(t *testing.T) {
-	version := registered.GroupOrDie(api.GroupName).GroupVersion.Version
+	version := "v1"
 	tests := []struct {
-		name, container, version, podPath, expectedErr, expectedOut string
-		pod                                                         *api.Pod
-		stdin, tty                                                  bool
+		name, container, version, podPath, fetchPodPath, expectedErr string
+		pod                                                          *corev1.Pod
+		stdin, tty                                                   bool
 	}{
 		{
-			name:        "fallback tty if not supported",
-			version:     version,
-			podPath:     "/api/" + version + "/namespaces/test/pods/foo",
-			pod:         attachPod(),
-			stdin:       true,
-			tty:         true,
-			expectedErr: "Unable to use a TTY - container bar did not allocate one",
+			name:         "fallback tty if not supported",
+			version:      version,
+			podPath:      "/api/" + version + "/namespaces/test/pods/foo",
+			fetchPodPath: "/namespaces/test/pods/foo",
+			pod:          attachPod(),
+			stdin:        true,
+			tty:          true,
+			expectedErr:  "Unable to use a TTY - container bar did not allocate one",
 		},
 	}
 	for _, test := range tests {
-		f, tf, codec, ns := NewAPIFactory()
-		tf.Client = &fake.RESTClient{
-			NegotiatedSerializer: ns,
-			Client: fake.CreateHTTPClient(func(req *http.Request) (*http.Response, error) {
-				switch p, m := req.URL.Path, req.Method; {
-				case p == test.podPath && m == "GET":
-					body := objBody(codec, test.pod)
-					return &http.Response{StatusCode: 200, Header: defaultHeader(), Body: body}, nil
-				default:
-					t.Errorf("%s: unexpected request: %s %#v\n%#v", test.name, req.Method, req.URL, req)
-					return nil, fmt.Errorf("unexpected request")
-				}
-			}),
-		}
-		tf.Namespace = "test"
-		tf.ClientConfig = &restclient.Config{APIPath: "/api", ContentConfig: restclient.ContentConfig{NegotiatedSerializer: api.Codecs, GroupVersion: &unversioned.GroupVersion{Version: test.version}}}
-		bufOut := bytes.NewBuffer([]byte{})
-		bufErr := bytes.NewBuffer([]byte{})
-		bufIn := bytes.NewBuffer([]byte{})
-		ex := &fakeRemoteAttach{}
-		params := &AttachOptions{
-			StreamOptions: StreamOptions{
-				ContainerName: test.container,
-				In:            bufIn,
-				Out:           bufOut,
-				Err:           bufErr,
-				Stdin:         test.stdin,
-				TTY:           test.tty,
-			},
-			Attach: ex,
-		}
-		cmd := &cobra.Command{}
-		if err := params.Complete(f, cmd, []string{"foo"}); err != nil {
-			t.Fatal(err)
-		}
-		if err := params.Run(); err != nil {
-			t.Fatal(err)
-		}
+		t.Run(test.name, func(t *testing.T) {
+			tf := cmdtesting.NewTestFactory().WithNamespace("test")
+			defer tf.Cleanup()
 
-		if test.stdin && test.tty {
-			if !test.pod.Spec.Containers[0].TTY {
-				if !strings.Contains(bufErr.String(), test.expectedErr) {
-					t.Errorf("%s: Expected TTY fallback warning for attach request: %s", test.name, bufErr.String())
-					continue
+			streams, _, _, bufErr := genericclioptions.NewTestIOStreams()
+
+			codec := scheme.Codecs.LegacyCodec(scheme.Scheme.PrioritizedVersionsAllGroups()...)
+			ns := scheme.Codecs
+
+			tf.Client = &fake.RESTClient{
+				GroupVersion:         schema.GroupVersion{Group: "", Version: "v1"},
+				NegotiatedSerializer: ns,
+				Client: fake.CreateHTTPClient(func(req *http.Request) (*http.Response, error) {
+					switch p, m := req.URL.Path, req.Method; {
+					case p == test.podPath && m == "GET":
+						body := objBody(codec, test.pod)
+						return &http.Response{StatusCode: 200, Header: defaultHeader(), Body: body}, nil
+					case p == test.fetchPodPath && m == "GET":
+						body := objBody(codec, test.pod)
+						return &http.Response{StatusCode: 200, Header: defaultHeader(), Body: body}, nil
+					default:
+						t.Errorf("%s: unexpected request: %s %#v\n%#v", p, req.Method, req.URL, req)
+						return nil, fmt.Errorf("unexpected request")
+					}
+				}),
+			}
+			tf.ClientConfigVal = &restclient.Config{APIPath: "/api", ContentConfig: restclient.ContentConfig{NegotiatedSerializer: scheme.Codecs, GroupVersion: &schema.GroupVersion{Version: test.version}}}
+
+			options := &AttachOptions{
+				StreamOptions: StreamOptions{
+					Stdin:         test.stdin,
+					TTY:           test.tty,
+					ContainerName: test.container,
+					IOStreams:     streams,
+				},
+
+				Attach:        &fakeRemoteAttach{},
+				GetPodTimeout: 1000,
+			}
+
+			options.restClientGetter = tf
+			options.Namespace = "test"
+			options.Resources = []string{"foo"}
+			options.Builder = tf.NewBuilder
+			options.AttachablePodFn = fakeAttachablePodFn(test.pod)
+			options.AttachFunc = func(opts *AttachOptions, containerToAttach *corev1.Container, raw bool, sizeQueue remotecommand.TerminalSizeQueue) func() error {
+				return func() error {
+					u, err := url.Parse("http://foo.bar")
+					if err != nil {
+						return err
+					}
+
+					return options.Attach.Attach("POST", u, nil, nil, nil, nil, raw, sizeQueue)
 				}
 			}
-		}
+
+			if err := options.Run(); err != nil {
+				t.Fatal(err)
+			}
+
+			if test.stdin && test.tty {
+				if !test.pod.Spec.Containers[0].TTY {
+					if !strings.Contains(bufErr.String(), test.expectedErr) {
+						t.Errorf("%s: Expected TTY fallback warning for attach request: %s", test.name, bufErr.String())
+						return
+					}
+				}
+			}
+		})
 	}
 }
 
-func attachPod() *api.Pod {
-	return &api.Pod{
-		ObjectMeta: api.ObjectMeta{Name: "foo", Namespace: "test", ResourceVersion: "10"},
-		Spec: api.PodSpec{
-			RestartPolicy: api.RestartPolicyAlways,
-			DNSPolicy:     api.DNSClusterFirst,
-			Containers: []api.Container{
+func attachPod() *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "foo", Namespace: "test", ResourceVersion: "10"},
+		Spec: corev1.PodSpec{
+			RestartPolicy: corev1.RestartPolicyAlways,
+			DNSPolicy:     corev1.DNSClusterFirst,
+			Containers: []corev1.Container{
 				{
 					Name: "bar",
 				},
 			},
-			InitContainers: []api.Container{
+			InitContainers: []corev1.Container{
 				{
 					Name: "initfoo",
 				},
 			},
 		},
-		Status: api.PodStatus{
-			Phase: api.PodRunning,
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
 		},
 	}
 }

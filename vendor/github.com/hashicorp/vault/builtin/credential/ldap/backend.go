@@ -2,17 +2,24 @@ package ldap
 
 import (
 	"bytes"
+	"context"
 	"fmt"
+	"math"
 	"text/template"
 
 	"github.com/go-ldap/ldap"
 	"github.com/hashicorp/vault/helper/mfa"
+	"github.com/hashicorp/vault/helper/strutil"
 	"github.com/hashicorp/vault/logical"
 	"github.com/hashicorp/vault/logical/framework"
 )
 
-func Factory(conf *logical.BackendConfig) (logical.Backend, error) {
-	return Backend().Setup(conf)
+func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend, error) {
+	b := Backend()
+	if err := b.Setup(ctx, conf); err != nil {
+		return nil, err
+	}
+	return b, nil
 }
 
 func Backend() *backend {
@@ -26,6 +33,10 @@ func Backend() *backend {
 			Unauthenticated: []string{
 				"login/*",
 			},
+
+			SealWrapStorage: []string{
+				"config",
+			},
 		},
 
 		Paths: append([]*framework.Path{
@@ -38,7 +49,8 @@ func Backend() *backend {
 			mfa.MFAPaths(b.Backend, pathLogin(&b))...,
 		),
 
-		AuthRenew: b.pathLoginRenew,
+		AuthRenew:   b.pathLoginRenew,
+		BackendType: logical.TypeCredential,
 	}
 
 	return &b
@@ -82,46 +94,69 @@ func EscapeLDAPValue(input string) string {
 	return input
 }
 
-func (b *backend) Login(req *logical.Request, username string, password string) ([]string, *logical.Response, error) {
+func (b *backend) Login(ctx context.Context, req *logical.Request, username string, password string) ([]string, *logical.Response, []string, error) {
 
-	cfg, err := b.Config(req)
+	cfg, err := b.Config(ctx, req)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if cfg == nil {
-		return nil, logical.ErrorResponse("ldap backend not configured"), nil
+		return nil, logical.ErrorResponse("ldap backend not configured"), nil, nil
 	}
 
 	c, err := cfg.DialLDAP()
 	if err != nil {
-		return nil, logical.ErrorResponse(err.Error()), nil
+		return nil, logical.ErrorResponse(err.Error()), nil, nil
 	}
 	if c == nil {
-		return nil, logical.ErrorResponse("invalid connection returned from LDAP dial"), nil
+		return nil, logical.ErrorResponse("invalid connection returned from LDAP dial"), nil, nil
 	}
 
-	bindDN, err := b.getBindDN(cfg, c, username)
+	// Clean connection
+	defer c.Close()
+
+	userBindDN, err := b.getUserBindDN(cfg, c, username)
 	if err != nil {
-		return nil, logical.ErrorResponse(err.Error()), nil
+		return nil, logical.ErrorResponse(err.Error()), nil, nil
 	}
 
 	if b.Logger().IsDebug() {
-		b.Logger().Debug("auth/ldap: BindDN fetched", "username", username, "binddn", bindDN)
+		b.Logger().Debug("auth/ldap: User BindDN fetched", "username", username, "binddn", userBindDN)
+	}
+
+	if cfg.DenyNullBind && len(password) == 0 {
+		return nil, logical.ErrorResponse("password cannot be of zero length when passwordless binds are being denied"), nil, nil
 	}
 
 	// Try to bind as the login user. This is where the actual authentication takes place.
-	if err = c.Bind(bindDN, password); err != nil {
-		return nil, logical.ErrorResponse(fmt.Sprintf("LDAP bind failed: %v", err)), nil
+	if len(password) > 0 {
+		err = c.Bind(userBindDN, password)
+	} else {
+		err = c.UnauthenticatedBind(userBindDN)
+	}
+	if err != nil {
+		return nil, logical.ErrorResponse(fmt.Sprintf("LDAP bind failed: %v", err)), nil, nil
 	}
 
-	userDN, err := b.getUserDN(cfg, c, bindDN)
+	// We re-bind to the BindDN if it's defined because we assume
+	// the BindDN should be the one to search, not the user logging in.
+	if cfg.BindDN != "" && cfg.BindPassword != "" {
+		if err := c.Bind(cfg.BindDN, cfg.BindPassword); err != nil {
+			return nil, logical.ErrorResponse(fmt.Sprintf("Encountered an error while attempting to re-bind with the BindDN User: %s", err.Error())), nil, nil
+		}
+		if b.Logger().IsDebug() {
+			b.Logger().Debug("auth/ldap: Re-Bound to original BindDN")
+		}
+	}
+
+	userDN, err := b.getUserDN(cfg, c, userBindDN)
 	if err != nil {
-		return nil, logical.ErrorResponse(err.Error()), nil
+		return nil, logical.ErrorResponse(err.Error()), nil, nil
 	}
 
 	ldapGroups, err := b.getLdapGroups(cfg, c, userDN, username)
 	if err != nil {
-		return nil, logical.ErrorResponse(err.Error()), nil
+		return nil, logical.ErrorResponse(err.Error()), nil, nil
 	}
 	if b.Logger().IsDebug() {
 		b.Logger().Debug("auth/ldap: Groups fetched from server", "num_server_groups", len(ldapGroups), "server_groups", ldapGroups)
@@ -139,7 +174,7 @@ func (b *backend) Login(req *logical.Request, username string, password string) 
 
 	var allGroups []string
 	// Import the custom added groups from ldap backend
-	user, err := b.User(req.Storage, username)
+	user, err := b.User(ctx, req.Storage, username)
 	if err == nil && user != nil && user.Groups != nil {
 		if b.Logger().IsDebug() {
 			b.Logger().Debug("auth/ldap: adding local groups", "num_local_groups", len(user.Groups), "local_groups", user.Groups)
@@ -152,23 +187,28 @@ func (b *backend) Login(req *logical.Request, username string, password string) 
 	// Retrieve policies
 	var policies []string
 	for _, groupName := range allGroups {
-		group, err := b.Group(req.Storage, groupName)
+		group, err := b.Group(ctx, req.Storage, groupName)
 		if err == nil && group != nil {
 			policies = append(policies, group.Policies...)
 		}
 	}
+	if user != nil && user.Policies != nil {
+		policies = append(policies, user.Policies...)
+	}
+	// Policies from each group may overlap
+	policies = strutil.RemoveDuplicates(policies, true)
 
 	if len(policies) == 0 {
 		errStr := "user is not a member of any authorized group"
-		if len(ldapResponse.Warnings()) > 0 {
-			errStr = fmt.Sprintf("%s; additionally, %s", errStr, ldapResponse.Warnings()[0])
+		if len(ldapResponse.Warnings) > 0 {
+			errStr = fmt.Sprintf("%s; additionally, %s", errStr, ldapResponse.Warnings[0])
 		}
 
 		ldapResponse.Data["error"] = errStr
-		return nil, ldapResponse, nil
+		return nil, ldapResponse, nil, nil
 	}
 
-	return policies, ldapResponse, nil
+	return policies, ldapResponse, allGroups, nil
 }
 
 /*
@@ -205,10 +245,16 @@ func (b *backend) getCN(dn string) string {
  * 2. If upndomain is set, the user dn is constructed as 'username@upndomain'. See https://msdn.microsoft.com/en-us/library/cc223499.aspx
  *
  */
-func (b *backend) getBindDN(cfg *ConfigEntry, c *ldap.Conn, username string) (string, error) {
+func (b *backend) getUserBindDN(cfg *ConfigEntry, c *ldap.Conn, username string) (string, error) {
 	bindDN := ""
 	if cfg.DiscoverDN || (cfg.BindDN != "" && cfg.BindPassword != "") {
-		if err := c.Bind(cfg.BindDN, cfg.BindPassword); err != nil {
+		var err error
+		if cfg.BindPassword != "" {
+			err = c.Bind(cfg.BindDN, cfg.BindPassword)
+		} else {
+			err = c.UnauthenticatedBind(cfg.BindDN)
+		}
+		if err != nil {
 			return bindDN, fmt.Errorf("LDAP bind (service) failed: %v", err)
 		}
 
@@ -217,9 +263,10 @@ func (b *backend) getBindDN(cfg *ConfigEntry, c *ldap.Conn, username string) (st
 			b.Logger().Debug("auth/ldap: Discovering user", "userdn", cfg.UserDN, "filter", filter)
 		}
 		result, err := c.Search(&ldap.SearchRequest{
-			BaseDN: cfg.UserDN,
-			Scope:  2, // subtree
-			Filter: filter,
+			BaseDN:    cfg.UserDN,
+			Scope:     2, // subtree
+			Filter:    filter,
+			SizeLimit: math.MaxInt32,
 		})
 		if err != nil {
 			return bindDN, fmt.Errorf("LDAP search for binddn failed: %v", err)
@@ -251,9 +298,10 @@ func (b *backend) getUserDN(cfg *ConfigEntry, c *ldap.Conn, bindDN string) (stri
 			b.Logger().Debug("auth/ldap: Searching UPN", "userdn", cfg.UserDN, "filter", filter)
 		}
 		result, err := c.Search(&ldap.SearchRequest{
-			BaseDN: cfg.UserDN,
-			Scope:  2, // subtree
-			Filter: filter,
+			BaseDN:    cfg.UserDN,
+			Scope:     2, // subtree
+			Filter:    filter,
+			SizeLimit: math.MaxInt32,
 		})
 		if err != nil {
 			return userDN, fmt.Errorf("LDAP search failed for detecting user: %v", err)
@@ -336,6 +384,7 @@ func (b *backend) getLdapGroups(cfg *ConfigEntry, c *ldap.Conn, userDN string, u
 		Attributes: []string{
 			cfg.GroupAttr,
 		},
+		SizeLimit: math.MaxInt32,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("LDAP search failed: %v", err)
@@ -376,5 +425,5 @@ to set of policies.
 
 Configuration of the server is done through the "config" and "groups"
 endpoints by a user with root access. Authentication is then done
-by suppying the two fields for "login".
+by supplying the two fields for "login".
 `

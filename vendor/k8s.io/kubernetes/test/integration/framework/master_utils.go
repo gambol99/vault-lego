@@ -17,87 +17,50 @@ limitations under the License.
 package framework
 
 import (
-	"io/ioutil"
 	"net"
 	"net/http"
 	"net/http/httptest"
-	goruntime "runtime"
-	"sync"
-	"testing"
+	"path"
 	"time"
 
+	"github.com/go-openapi/spec"
 	"github.com/golang/glog"
-	"k8s.io/kubernetes/pkg/api"
+	"github.com/pborman/uuid"
+
+	apps "k8s.io/api/apps/v1beta1"
+	autoscaling "k8s.io/api/autoscaling/v1"
+	certificates "k8s.io/api/certificates/v1beta1"
+	"k8s.io/api/core/v1"
+	extensions "k8s.io/api/extensions/v1beta1"
+	rbac "k8s.io/api/rbac/v1alpha1"
+	storage "k8s.io/api/storage/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/wait"
+	authauthenticator "k8s.io/apiserver/pkg/authentication/authenticator"
+	"k8s.io/apiserver/pkg/authentication/authenticatorfactory"
+	authenticatorunion "k8s.io/apiserver/pkg/authentication/request/union"
+	"k8s.io/apiserver/pkg/authentication/user"
+	"k8s.io/apiserver/pkg/authorization/authorizer"
+	"k8s.io/apiserver/pkg/authorization/authorizerfactory"
+	authorizerunion "k8s.io/apiserver/pkg/authorization/union"
+	openapinamer "k8s.io/apiserver/pkg/endpoints/openapi"
+	genericapiserver "k8s.io/apiserver/pkg/server"
+	"k8s.io/apiserver/pkg/server/options"
+	serverstorage "k8s.io/apiserver/pkg/server/storage"
+	"k8s.io/apiserver/pkg/storage/storagebackend"
+	"k8s.io/client-go/informers"
+	clientset "k8s.io/client-go/kubernetes"
+	restclient "k8s.io/client-go/rest"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	"k8s.io/kubernetes/pkg/api/testapi"
-	"k8s.io/kubernetes/pkg/api/unversioned"
-	"k8s.io/kubernetes/pkg/api/v1"
-	"k8s.io/kubernetes/pkg/apimachinery/registered"
-	"k8s.io/kubernetes/pkg/apis/apps"
-	"k8s.io/kubernetes/pkg/apis/autoscaling"
 	"k8s.io/kubernetes/pkg/apis/batch"
-	"k8s.io/kubernetes/pkg/apis/certificates"
-	"k8s.io/kubernetes/pkg/apis/extensions"
-	"k8s.io/kubernetes/pkg/apis/policy"
-	"k8s.io/kubernetes/pkg/apis/rbac"
-	"k8s.io/kubernetes/pkg/apis/storage"
-	"k8s.io/kubernetes/pkg/apiserver/authenticator"
-	authauthenticator "k8s.io/kubernetes/pkg/auth/authenticator"
-	authauthorizer "k8s.io/kubernetes/pkg/auth/authorizer"
-	authorizerunion "k8s.io/kubernetes/pkg/auth/authorizer/union"
-	"k8s.io/kubernetes/pkg/auth/user"
-	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
-	coreclient "k8s.io/kubernetes/pkg/client/clientset_generated/release_1_5/typed/core/v1"
-	"k8s.io/kubernetes/pkg/client/record"
-	"k8s.io/kubernetes/pkg/client/restclient"
-	client "k8s.io/kubernetes/pkg/client/unversioned"
-	"k8s.io/kubernetes/pkg/controller"
-	replicationcontroller "k8s.io/kubernetes/pkg/controller/replication"
+	policy "k8s.io/kubernetes/pkg/apis/policy/v1beta1"
 	"k8s.io/kubernetes/pkg/generated/openapi"
-	"k8s.io/kubernetes/pkg/genericapiserver"
-	"k8s.io/kubernetes/pkg/genericapiserver/authorizer"
-	"k8s.io/kubernetes/pkg/kubectl"
 	kubeletclient "k8s.io/kubernetes/pkg/kubelet/client"
 	"k8s.io/kubernetes/pkg/master"
-	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/storage/storagebackend"
-	utilnet "k8s.io/kubernetes/pkg/util/net"
-	"k8s.io/kubernetes/pkg/util/wait"
-	"k8s.io/kubernetes/pkg/watch"
-	"k8s.io/kubernetes/plugin/pkg/admission/admit"
-	authenticatorunion "k8s.io/kubernetes/plugin/pkg/auth/authenticator/request/union"
-
-	"github.com/go-openapi/spec"
-	"github.com/pborman/uuid"
+	"k8s.io/kubernetes/pkg/version"
 )
-
-const (
-	// Timeout used in benchmarks, to eg: scale an rc
-	DefaultTimeout = 30 * time.Minute
-
-	// Rc manifest used to create pods for benchmarks.
-	// TODO: Convert this to a full path?
-	TestRCManifest = "benchmark-controller.json"
-)
-
-// MasterComponents is a control struct for all master components started via NewMasterComponents.
-// TODO: Include all master components (scheduler, nodecontroller).
-// TODO: Reconcile with integration.go, currently the master used there doesn't understand
-// how to restart cleanly, which is required for each iteration of a benchmark. The integration
-// tests also don't make it easy to isolate and turn off components at will.
-type MasterComponents struct {
-	// Raw http server in front of the master
-	ApiServer *httptest.Server
-	// Kubernetes master, contains an embedded etcd storage
-	KubeMaster *master.Master
-	// Restclient used to talk to the kubernetes master
-	RestClient *client.Client
-	// Replication controller manager
-	ControllerManager *replicationcontroller.ReplicationManager
-	// Channel for stop signals to rc manager
-	rcStopCh chan struct{}
-	// Used to stop master components individually, and via MasterComponents.Stop
-	once sync.Once
-}
 
 // Config is a struct of configuration directives for NewMasterComponents.
 type Config struct {
@@ -111,36 +74,11 @@ type Config struct {
 	// TODO: Add configs for endpoints controller, scheduler etc
 }
 
-// NewMasterComponents creates, initializes and starts master components based on the given config.
-func NewMasterComponents(c *Config) *MasterComponents {
-	m, s := startMasterOrDie(c.MasterConfig, nil, nil)
-	// TODO: Allow callers to pipe through a different master url and create a client/start components using it.
-	glog.Infof("Master %+v", s.URL)
-	// TODO: caesarxuchao: remove this client when the refactoring of client libraray is done.
-	restClient := client.NewOrDie(&restclient.Config{Host: s.URL, ContentConfig: restclient.ContentConfig{GroupVersion: &registered.GroupOrDie(api.GroupName).GroupVersion}, QPS: c.QPS, Burst: c.Burst})
-	clientset := clientset.NewForConfigOrDie(&restclient.Config{Host: s.URL, ContentConfig: restclient.ContentConfig{GroupVersion: &registered.GroupOrDie(api.GroupName).GroupVersion}, QPS: c.QPS, Burst: c.Burst})
-	rcStopCh := make(chan struct{})
-	controllerManager := replicationcontroller.NewReplicationManagerFromClient(clientset, controller.NoResyncPeriodFunc, c.Burst, 4096)
-
-	// TODO: Support events once we can cleanly shutdown an event recorder.
-	controllerManager.SetEventRecorder(&record.FakeRecorder{})
-	if c.StartReplicationManager {
-		go controllerManager.Run(goruntime.NumCPU(), rcStopCh)
-	}
-	return &MasterComponents{
-		ApiServer:         s,
-		KubeMaster:        m,
-		RestClient:        restClient,
-		ControllerManager: controllerManager,
-		rcStopCh:          rcStopCh,
-	}
-}
-
 // alwaysAllow always allows an action
 type alwaysAllow struct{}
 
-func (alwaysAllow) Authorize(requestAttributes authauthorizer.Attributes) (bool, string, error) {
-	return true, "always allow", nil
+func (alwaysAllow) Authorize(requestAttributes authorizer.Attributes) (authorizer.Decision, string, error) {
+	return authorizer.DecisionAllow, "always allow", nil
 }
 
 // alwaysEmpty simulates "no authentication" for old tests
@@ -167,7 +105,7 @@ func (h *MasterHolder) SetMaster(m *master.Master) {
 }
 
 // startMasterOrDie starts a kubernetes master and an httpserver to handle api requests
-func startMasterOrDie(masterConfig *master.Config, incomingServer *httptest.Server, masterReceiver MasterReceiver) (*master.Master, *httptest.Server) {
+func startMasterOrDie(masterConfig *master.Config, incomingServer *httptest.Server, masterReceiver MasterReceiver) (*master.Master, *httptest.Server, CloseFunc) {
 	var m *master.Master
 	var s *httptest.Server
 
@@ -175,31 +113,38 @@ func startMasterOrDie(masterConfig *master.Config, incomingServer *httptest.Serv
 		s = incomingServer
 	} else {
 		s = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-			m.Handler.ServeHTTP(w, req)
+			m.GenericAPIServer.Handler.ServeHTTP(w, req)
 		}))
+	}
+
+	stopCh := make(chan struct{})
+	closeFn := func() {
+		m.GenericAPIServer.RunPreShutdownHooks()
+		close(stopCh)
+		s.Close()
 	}
 
 	if masterConfig == nil {
 		masterConfig = NewMasterConfig()
-		masterConfig.GenericConfig.EnableProfiling = true
-		masterConfig.GenericConfig.EnableSwaggerSupport = true
-		masterConfig.GenericConfig.EnableOpenAPISupport = true
-		masterConfig.GenericConfig.OpenAPIInfo = spec.Info{
+		masterConfig.GenericConfig.OpenAPIConfig = genericapiserver.DefaultOpenAPIConfig(openapi.GetOpenAPIDefinitions, openapinamer.NewDefinitionNamer(legacyscheme.Scheme))
+		masterConfig.GenericConfig.OpenAPIConfig.Info = &spec.Info{
 			InfoProps: spec.InfoProps{
 				Title:   "Kubernetes",
 				Version: "unversioned",
 			},
 		}
-		masterConfig.GenericConfig.OpenAPIDefaultResponse = spec.Response{
+		masterConfig.GenericConfig.OpenAPIConfig.DefaultResponse = &spec.Response{
 			ResponseProps: spec.ResponseProps{
 				Description: "Default Response.",
 			},
 		}
+		masterConfig.GenericConfig.OpenAPIConfig.GetDefinitions = openapi.GetOpenAPIDefinitions
+		masterConfig.GenericConfig.SwaggerConfig = genericapiserver.DefaultSwaggerConfig()
 	}
 
 	// set the loopback client config
 	if masterConfig.GenericConfig.LoopbackClientConfig == nil {
-		masterConfig.GenericConfig.LoopbackClientConfig = &restclient.Config{QPS: 50, Burst: 100, ContentConfig: restclient.ContentConfig{NegotiatedSerializer: api.Codecs}}
+		masterConfig.GenericConfig.LoopbackClientConfig = &restclient.Config{QPS: 50, Burst: 100, ContentConfig: restclient.ContentConfig{NegotiatedSerializer: legacyscheme.Codecs}}
 	}
 	masterConfig.GenericConfig.LoopbackClientConfig.Host = s.URL
 
@@ -212,36 +157,51 @@ func startMasterOrDie(masterConfig *master.Config, incomingServer *httptest.Serv
 		Groups: []string{user.SystemPrivilegedGroup},
 	}
 
-	tokenAuthenticator := authenticator.NewAuthenticatorFromTokens(tokens)
-	if masterConfig.GenericConfig.Authenticator == nil {
-		masterConfig.GenericConfig.Authenticator = authenticatorunion.New(tokenAuthenticator, authauthenticator.RequestFunc(alwaysEmpty))
+	tokenAuthenticator := authenticatorfactory.NewFromTokens(tokens)
+	if masterConfig.GenericConfig.Authentication.Authenticator == nil {
+		masterConfig.GenericConfig.Authentication.Authenticator = authenticatorunion.New(tokenAuthenticator, authauthenticator.RequestFunc(alwaysEmpty))
 	} else {
-		masterConfig.GenericConfig.Authenticator = authenticatorunion.New(tokenAuthenticator, masterConfig.GenericConfig.Authenticator)
+		masterConfig.GenericConfig.Authentication.Authenticator = authenticatorunion.New(tokenAuthenticator, masterConfig.GenericConfig.Authentication.Authenticator)
 	}
 
-	if masterConfig.GenericConfig.Authorizer != nil {
-		tokenAuthorizer := authorizer.NewPrivilegedGroups(user.SystemPrivilegedGroup)
-		masterConfig.GenericConfig.Authorizer = authorizerunion.New(tokenAuthorizer, masterConfig.GenericConfig.Authorizer)
+	if masterConfig.GenericConfig.Authorization.Authorizer != nil {
+		tokenAuthorizer := authorizerfactory.NewPrivilegedGroups(user.SystemPrivilegedGroup)
+		masterConfig.GenericConfig.Authorization.Authorizer = authorizerunion.New(tokenAuthorizer, masterConfig.GenericConfig.Authorization.Authorizer)
 	} else {
-		masterConfig.GenericConfig.Authorizer = alwaysAllow{}
+		masterConfig.GenericConfig.Authorization.Authorizer = alwaysAllow{}
 	}
 
 	masterConfig.GenericConfig.LoopbackClientConfig.BearerToken = privilegedLoopbackToken
 
-	m, err := masterConfig.Complete().New()
+	clientset, err := clientset.NewForConfig(masterConfig.GenericConfig.LoopbackClientConfig)
 	if err != nil {
+		glog.Fatal(err)
+	}
+
+	masterConfig.ExtraConfig.VersionedInformers = informers.NewSharedInformerFactory(clientset, masterConfig.GenericConfig.LoopbackClientConfig.Timeout)
+	m, err = masterConfig.Complete().New(genericapiserver.NewEmptyDelegate())
+	if err != nil {
+		closeFn()
 		glog.Fatalf("error in bringing up the master: %v", err)
 	}
 	if masterReceiver != nil {
 		masterReceiver.SetMaster(m)
 	}
 
+	// TODO have this start method actually use the normal start sequence for the API server
+	// this method never actually calls the `Run` method for the API server
+	// fire the post hooks ourselves
+	m.GenericAPIServer.PrepareRun()
+	m.GenericAPIServer.RunPostStartHooks(stopCh)
+
 	cfg := *masterConfig.GenericConfig.LoopbackClientConfig
-	cfg.ContentConfig.GroupVersion = &unversioned.GroupVersion{}
+	cfg.ContentConfig.GroupVersion = &schema.GroupVersion{}
 	privilegedClient, err := restclient.RESTClientFor(&cfg)
 	if err != nil {
+		closeFn()
 		glog.Fatal(err)
 	}
+	var lastHealthContent []byte
 	err = wait.PollImmediate(100*time.Millisecond, 30*time.Second, func() (bool, error) {
 		result := privilegedClient.Get().AbsPath("/healthz").Do()
 		status := 0
@@ -249,211 +209,117 @@ func startMasterOrDie(masterConfig *master.Config, incomingServer *httptest.Serv
 		if status == 200 {
 			return true, nil
 		}
+		lastHealthContent, _ = result.Raw()
 		return false, nil
 	})
 	if err != nil {
+		closeFn()
+		glog.Errorf("last health content: %q", string(lastHealthContent))
 		glog.Fatal(err)
 	}
 
-	// TODO have this start method actually use the normal start sequence for the API server
-	// this method never actually calls the `Run` method for the API server
-	// fire the post hooks ourselves
-	m.GenericAPIServer.RunPostStartHooks()
-
-	// wait for services to be ready
-	if masterConfig.EnableCoreControllers {
-		// TODO Once /healthz is updated for posthooks, we'll wait for good health
-		coreClient := coreclient.NewForConfigOrDie(&cfg)
-		svcWatch, err := coreClient.Services(api.NamespaceDefault).Watch(v1.ListOptions{})
-		if err != nil {
-			glog.Fatal(err)
-		}
-		_, err = watch.Until(30*time.Second, svcWatch, func(event watch.Event) (bool, error) {
-			if event.Type != watch.Added {
-				return false, nil
-			}
-			if event.Object.(*v1.Service).Name == "kubernetes" {
-				return true, nil
-			}
-			return false, nil
-		})
-		if err != nil {
-			glog.Fatal(err)
-		}
-	}
-
-	return m, s
-}
-
-func parseCIDROrDie(cidr string) *net.IPNet {
-	_, parsed, err := net.ParseCIDR(cidr)
-	if err != nil {
-		glog.Fatalf("error while parsing CIDR: %s", cidr)
-	}
-	return parsed
-}
-
-// Returns a basic master config.
-func NewMasterConfig() *master.Config {
-	config := storagebackend.Config{
-		ServerList: []string{GetEtcdURLFromEnv()},
-		// This causes the integration tests to exercise the etcd
-		// prefix code, so please don't change without ensuring
-		// sufficient coverage in other ways.
-		Prefix: uuid.New(),
-	}
-
-	negotiatedSerializer := NewSingleContentTypeSerializer(api.Scheme, testapi.Default.Codec(), runtime.ContentTypeJSON)
-
-	storageFactory := genericapiserver.NewDefaultStorageFactory(config, runtime.ContentTypeJSON, negotiatedSerializer, genericapiserver.NewDefaultResourceEncodingConfig(), master.DefaultAPIResourceConfigSource())
-	storageFactory.SetSerializer(
-		unversioned.GroupResource{Group: api.GroupName, Resource: genericapiserver.AllResources},
-		"",
-		NewSingleContentTypeSerializer(api.Scheme, testapi.Default.Codec(), runtime.ContentTypeJSON))
-	storageFactory.SetSerializer(
-		unversioned.GroupResource{Group: autoscaling.GroupName, Resource: genericapiserver.AllResources},
-		"",
-		NewSingleContentTypeSerializer(api.Scheme, testapi.Autoscaling.Codec(), runtime.ContentTypeJSON))
-	storageFactory.SetSerializer(
-		unversioned.GroupResource{Group: batch.GroupName, Resource: genericapiserver.AllResources},
-		"",
-		NewSingleContentTypeSerializer(api.Scheme, testapi.Batch.Codec(), runtime.ContentTypeJSON))
-	storageFactory.SetSerializer(
-		unversioned.GroupResource{Group: apps.GroupName, Resource: genericapiserver.AllResources},
-		"",
-		NewSingleContentTypeSerializer(api.Scheme, testapi.Apps.Codec(), runtime.ContentTypeJSON))
-	storageFactory.SetSerializer(
-		unversioned.GroupResource{Group: extensions.GroupName, Resource: genericapiserver.AllResources},
-		"",
-		NewSingleContentTypeSerializer(api.Scheme, testapi.Extensions.Codec(), runtime.ContentTypeJSON))
-	storageFactory.SetSerializer(
-		unversioned.GroupResource{Group: policy.GroupName, Resource: genericapiserver.AllResources},
-		"",
-		NewSingleContentTypeSerializer(api.Scheme, testapi.Policy.Codec(), runtime.ContentTypeJSON))
-	storageFactory.SetSerializer(
-		unversioned.GroupResource{Group: rbac.GroupName, Resource: genericapiserver.AllResources},
-		"",
-		NewSingleContentTypeSerializer(api.Scheme, testapi.Rbac.Codec(), runtime.ContentTypeJSON))
-	storageFactory.SetSerializer(
-		unversioned.GroupResource{Group: certificates.GroupName, Resource: genericapiserver.AllResources},
-		"",
-		NewSingleContentTypeSerializer(api.Scheme, testapi.Certificates.Codec(), runtime.ContentTypeJSON))
-	storageFactory.SetSerializer(
-		unversioned.GroupResource{Group: storage.GroupName, Resource: genericapiserver.AllResources},
-		"",
-		NewSingleContentTypeSerializer(api.Scheme, testapi.Storage.Codec(), runtime.ContentTypeJSON))
-
-	return &master.Config{
-		GenericConfig: &genericapiserver.Config{
-			APIResourceConfigSource: master.DefaultAPIResourceConfigSource(),
-			APIPrefix:               "/api",
-			APIGroupPrefix:          "/apis",
-			Authorizer:              authorizer.NewAlwaysAllowAuthorizer(),
-			AdmissionControl:        admit.NewAlwaysAdmit(),
-			Serializer:              api.Codecs,
-			// Set those values to avoid annoying warnings in logs.
-			ServiceClusterIPRange: parseCIDROrDie("10.0.0.0/24"),
-			ServiceNodePortRange:  utilnet.PortRange{Base: 30000, Size: 2768},
-			EnableVersion:         true,
-			OpenAPIDefinitions:    openapi.OpenAPIDefinitions,
-			EnableOpenAPISupport:  true,
-		},
-		StorageFactory:        storageFactory,
-		EnableCoreControllers: true,
-		EnableWatchCache:      true,
-		KubeletClient:         kubeletclient.FakeKubeletClient{},
-	}
+	return m, s, closeFn
 }
 
 // Returns the master config appropriate for most integration tests.
 func NewIntegrationTestMasterConfig() *master.Config {
 	masterConfig := NewMasterConfig()
-	masterConfig.EnableCoreControllers = true
-	masterConfig.GenericConfig.EnableIndex = true
-	masterConfig.GenericConfig.EnableVersion = true
 	masterConfig.GenericConfig.PublicAddress = net.ParseIP("192.168.10.4")
-	masterConfig.GenericConfig.APIResourceConfigSource = master.DefaultAPIResourceConfigSource()
+	masterConfig.ExtraConfig.APIResourceConfigSource = master.DefaultAPIResourceConfigSource()
+
+	// TODO: get rid of these tests or port them to secure serving
+	masterConfig.GenericConfig.SecureServing = &genericapiserver.SecureServingInfo{Listener: fakeLocalhost443Listener{}}
+
 	return masterConfig
 }
 
-func (m *MasterComponents) stopRCManager() {
-	close(m.rcStopCh)
-}
+// Returns a basic master config.
+func NewMasterConfig() *master.Config {
+	// This causes the integration tests to exercise the etcd
+	// prefix code, so please don't change without ensuring
+	// sufficient coverage in other ways.
+	etcdOptions := options.NewEtcdOptions(storagebackend.NewDefaultConfig(uuid.New(), nil))
+	etcdOptions.StorageConfig.ServerList = []string{GetEtcdURL()}
 
-func (m *MasterComponents) Stop(apiServer, rcManager bool) {
-	glog.Infof("Stopping master components")
-	if rcManager {
-		// Ordering matters because the apiServer will only shutdown when pending
-		// requests are done
-		m.once.Do(m.stopRCManager)
-	}
-	if apiServer {
-		m.ApiServer.Close()
-	}
-}
+	info, _ := runtime.SerializerInfoForMediaType(legacyscheme.Codecs.SupportedMediaTypes(), runtime.ContentTypeJSON)
+	ns := NewSingleContentTypeSerializer(legacyscheme.Scheme, info)
 
-func CreateTestingNamespace(baseName string, apiserver *httptest.Server, t *testing.T) *api.Namespace {
-	// TODO: Create a namespace with a given basename.
-	// Currently we neither create the namespace nor delete all its contents at the end.
-	// But as long as tests are not using the same namespaces, this should work fine.
-	return &api.Namespace{
-		ObjectMeta: api.ObjectMeta{
-			// TODO: Once we start creating namespaces, switch to GenerateName.
-			Name: baseName,
+	resourceEncoding := serverstorage.NewDefaultResourceEncodingConfig(legacyscheme.Scheme)
+	// FIXME (soltysh): this GroupVersionResource override should be configurable
+	// we need to set both for the whole group and for cronjobs, separately
+	resourceEncoding.SetVersionEncoding(batch.GroupName, *testapi.Batch.GroupVersion(), schema.GroupVersion{Group: batch.GroupName, Version: runtime.APIVersionInternal})
+	resourceEncoding.SetResourceEncoding(schema.GroupResource{Group: batch.GroupName, Resource: "cronjobs"}, schema.GroupVersion{Group: batch.GroupName, Version: "v1beta1"}, schema.GroupVersion{Group: batch.GroupName, Version: runtime.APIVersionInternal})
+	// we also need to set both for the storage group and for volumeattachments, separately
+	resourceEncoding.SetVersionEncoding(storage.GroupName, *testapi.Storage.GroupVersion(), schema.GroupVersion{Group: storage.GroupName, Version: runtime.APIVersionInternal})
+	resourceEncoding.SetResourceEncoding(schema.GroupResource{Group: storage.GroupName, Resource: "volumeattachments"}, schema.GroupVersion{Group: storage.GroupName, Version: "v1beta1"}, schema.GroupVersion{Group: storage.GroupName, Version: runtime.APIVersionInternal})
+
+	storageFactory := serverstorage.NewDefaultStorageFactory(etcdOptions.StorageConfig, runtime.ContentTypeJSON, ns, resourceEncoding, master.DefaultAPIResourceConfigSource(), nil)
+	storageFactory.SetSerializer(
+		schema.GroupResource{Group: v1.GroupName, Resource: serverstorage.AllResources},
+		"",
+		ns)
+	storageFactory.SetSerializer(
+		schema.GroupResource{Group: autoscaling.GroupName, Resource: serverstorage.AllResources},
+		"",
+		ns)
+	storageFactory.SetSerializer(
+		schema.GroupResource{Group: batch.GroupName, Resource: serverstorage.AllResources},
+		"",
+		ns)
+	storageFactory.SetSerializer(
+		schema.GroupResource{Group: apps.GroupName, Resource: serverstorage.AllResources},
+		"",
+		ns)
+	storageFactory.SetSerializer(
+		schema.GroupResource{Group: extensions.GroupName, Resource: serverstorage.AllResources},
+		"",
+		ns)
+	storageFactory.SetSerializer(
+		schema.GroupResource{Group: policy.GroupName, Resource: serverstorage.AllResources},
+		"",
+		ns)
+	storageFactory.SetSerializer(
+		schema.GroupResource{Group: rbac.GroupName, Resource: serverstorage.AllResources},
+		"",
+		ns)
+	storageFactory.SetSerializer(
+		schema.GroupResource{Group: certificates.GroupName, Resource: serverstorage.AllResources},
+		"",
+		ns)
+	storageFactory.SetSerializer(
+		schema.GroupResource{Group: storage.GroupName, Resource: serverstorage.AllResources},
+		"",
+		ns)
+
+	genericConfig := genericapiserver.NewConfig(legacyscheme.Codecs)
+	kubeVersion := version.Get()
+	genericConfig.Version = &kubeVersion
+	genericConfig.Authorization.Authorizer = authorizerfactory.NewAlwaysAllowAuthorizer()
+
+	// TODO: get rid of these tests or port them to secure serving
+	genericConfig.SecureServing = &genericapiserver.SecureServingInfo{Listener: fakeLocalhost443Listener{}}
+
+	err := etcdOptions.ApplyWithStorageFactoryTo(storageFactory, genericConfig)
+	if err != nil {
+		panic(err)
+	}
+
+	return &master.Config{
+		GenericConfig: genericConfig,
+		ExtraConfig: master.ExtraConfig{
+			APIResourceConfigSource: master.DefaultAPIResourceConfigSource(),
+			StorageFactory:          storageFactory,
+			KubeletClientConfig:     kubeletclient.KubeletClientConfig{Port: 10250},
+			APIServerServicePort:    443,
+			MasterCount:             1,
 		},
 	}
 }
 
-func DeleteTestingNamespace(ns *api.Namespace, apiserver *httptest.Server, t *testing.T) {
-	// TODO: Remove all resources from a given namespace once we implement CreateTestingNamespace.
-}
+// CloseFunc can be called to cleanup the master
+type CloseFunc func()
 
-// RCFromManifest reads a .json file and returns the rc in it.
-func RCFromManifest(fileName string) *api.ReplicationController {
-	data, err := ioutil.ReadFile(fileName)
-	if err != nil {
-		glog.Fatalf("Unexpected error reading rc manifest %v", err)
-	}
-	var controller api.ReplicationController
-	if err := runtime.DecodeInto(testapi.Default.Codec(), data, &controller); err != nil {
-		glog.Fatalf("Unexpected error reading rc manifest %v", err)
-	}
-	return &controller
-}
-
-// StopRC stops the rc via kubectl's stop library
-func StopRC(rc *api.ReplicationController, clientset clientset.Interface) error {
-	reaper, err := kubectl.ReaperFor(api.Kind("ReplicationController"), clientset)
-	if err != nil || reaper == nil {
-		return err
-	}
-	err = reaper.Stop(rc.Namespace, rc.Name, 0, nil)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-// ScaleRC scales the given rc to the given replicas.
-func ScaleRC(name, ns string, replicas int32, clientset clientset.Interface) (*api.ReplicationController, error) {
-	scaler, err := kubectl.ScalerFor(api.Kind("ReplicationController"), clientset)
-	if err != nil {
-		return nil, err
-	}
-	retry := &kubectl.RetryParams{Interval: 50 * time.Millisecond, Timeout: DefaultTimeout}
-	waitForReplicas := &kubectl.RetryParams{Interval: 50 * time.Millisecond, Timeout: DefaultTimeout}
-	err = scaler.Scale(ns, name, uint(replicas), nil, retry, waitForReplicas)
-	if err != nil {
-		return nil, err
-	}
-	scaled, err := clientset.Core().ReplicationControllers(ns).Get(name)
-	if err != nil {
-		return nil, err
-	}
-	return scaled, nil
-}
-
-func RunAMaster(masterConfig *master.Config) (*master.Master, *httptest.Server) {
+func RunAMaster(masterConfig *master.Config) (*master.Master, *httptest.Server, CloseFunc) {
 	if masterConfig == nil {
 		masterConfig = NewMasterConfig()
 		masterConfig.GenericConfig.EnableProfiling = true
@@ -461,37 +327,30 @@ func RunAMaster(masterConfig *master.Config) (*master.Master, *httptest.Server) 
 	return startMasterOrDie(masterConfig, nil, nil)
 }
 
-func RunAMasterUsingServer(masterConfig *master.Config, s *httptest.Server, masterReceiver MasterReceiver) (*master.Master, *httptest.Server) {
+func RunAMasterUsingServer(masterConfig *master.Config, s *httptest.Server, masterReceiver MasterReceiver) (*master.Master, *httptest.Server, CloseFunc) {
 	return startMasterOrDie(masterConfig, s, masterReceiver)
 }
 
-// Task is a function passed to worker goroutines by RunParallel.
-// The function needs to implement its own thread safety.
-type Task func(id int) error
+// SharedEtcd creates a storage config for a shared etcd instance, with a unique prefix.
+func SharedEtcd() *storagebackend.Config {
+	cfg := storagebackend.NewDefaultConfig(path.Join(uuid.New(), "registry"), nil)
+	cfg.ServerList = []string{GetEtcdURL()}
+	return cfg
+}
 
-// RunParallel spawns a goroutine per task in the given queue
-func RunParallel(task Task, numTasks, numWorkers int) {
-	start := time.Now()
-	if numWorkers <= 0 {
-		numWorkers = numTasks
+type fakeLocalhost443Listener struct{}
+
+func (fakeLocalhost443Listener) Accept() (net.Conn, error) {
+	return nil, nil
+}
+
+func (fakeLocalhost443Listener) Close() error {
+	return nil
+}
+
+func (fakeLocalhost443Listener) Addr() net.Addr {
+	return &net.TCPAddr{
+		IP:   net.IPv4(127, 0, 0, 1),
+		Port: 443,
 	}
-	defer func() {
-		glog.Infof("RunParallel took %v for %d tasks and %d workers", time.Since(start), numTasks, numWorkers)
-	}()
-	var wg sync.WaitGroup
-	semCh := make(chan struct{}, numWorkers)
-	wg.Add(numTasks)
-	for id := 0; id < numTasks; id++ {
-		go func(id int) {
-			semCh <- struct{}{}
-			err := task(id)
-			if err != nil {
-				glog.Fatalf("Worker failed with %v", err)
-			}
-			<-semCh
-			wg.Done()
-		}(id)
-	}
-	wg.Wait()
-	close(semCh)
 }

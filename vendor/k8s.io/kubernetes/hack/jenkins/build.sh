@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Copyright 2015 The Kubernetes Authors.
 #
@@ -35,8 +35,6 @@ export PATH=$PATH:/usr/local/go/bin
 # Skip gcloud update checking
 export CLOUDSDK_COMPONENT_MANAGER_DISABLE_UPDATE_CHECK=true
 
-# FEDERATION?
-: ${FEDERATION:="false"}
 : ${KUBE_RELEASE_RUN_TESTS:="n"}
 export KUBE_RELEASE_RUN_TESTS
 
@@ -65,19 +63,11 @@ else
 
   push_build=${release_infra_clone}/push-build.sh
 
-  if [[ ! -x ${push_build} ]]; then
-    # TODO: Remove/Restore this with the full deprecation PR
-    push_build=${release_infra_clone}/push-ci-build.sh
-    #echo "FATAL: Something went wrong. ${push_build} isn't available." \
-    #     "Exiting..." >&2
-    #exit 1
-  fi
   [[ -n "${KUBE_GCS_RELEASE_BUCKET-}" ]] \
     && bucket_flag="--bucket=${KUBE_GCS_RELEASE_BUCKET-}"
-  ${FEDERATION} && federation_flag="--federation"
   [[ -n "${KUBE_GCS_RELEASE_SUFFIX-}" ]] \
     && gcs_suffix_flag="--gcs-suffix=${KUBE_GCS_RELEASE_SUFFIX-}"
-  ${push_build} ${bucket_flag-} ${federation_flag-} ${gcs_suffix_flag-} \
+  ${push_build} ${bucket_flag-} ${gcs_suffix_flag-} \
     --nomock --verbose --ci
 fi
 

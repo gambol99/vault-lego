@@ -20,10 +20,12 @@ import (
 	"fmt"
 	"time"
 
-	"k8s.io/kubernetes/pkg/util/rand"
-	"k8s.io/kubernetes/pkg/volume"
+	"k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/rand"
 
-	flockerApi "github.com/clusterhq/flocker-go"
+	volutil "k8s.io/kubernetes/pkg/volume/util"
+
+	flockerapi "github.com/clusterhq/flocker-go"
 	"github.com/golang/glog"
 )
 
@@ -47,7 +49,7 @@ func (util *FlockerUtil) DeleteVolume(d *flockerVolumeDeleter) error {
 	return d.flockerClient.DeleteDataset(datasetUUID)
 }
 
-func (util *FlockerUtil) CreateVolume(c *flockerVolumeProvisioner) (datasetUUID string, volumeSizeGB int, labels map[string]string, err error) {
+func (util *FlockerUtil) CreateVolume(c *flockerVolumeProvisioner) (datasetUUID string, volumeSizeGiB int, labels map[string]string, err error) {
 
 	if c.flockerClient == nil {
 		c.flockerClient, err = c.plugin.newFlockerClient("")
@@ -70,14 +72,18 @@ func (util *FlockerUtil) CreateVolume(c *flockerVolumeProvisioner) (datasetUUID 
 	node := nodes[rand.Intn(len(nodes))]
 	glog.V(2).Infof("selected flocker node with UUID '%s' to provision dataset", node.UUID)
 
-	requestBytes := c.options.Capacity.Value()
-	volumeSizeGB = int(volume.RoundUpSize(requestBytes, 1024*1024*1024))
+	capacity := c.options.PVC.Spec.Resources.Requests[v1.ResourceName(v1.ResourceStorage)]
+	requestBytes := capacity.Value()
+	volumeSizeGiB, err = volutil.RoundUpToGiBInt(capacity)
+	if err != nil {
+		return
+	}
 
-	createOptions := &flockerApi.CreateDatasetOptions{
+	createOptions := &flockerapi.CreateDatasetOptions{
 		MaximumSize: requestBytes,
 		Metadata: map[string]string{
 			"type": "k8s-dynamic-prov",
-			"pvc":  c.options.PVCName,
+			"pvc":  c.options.PVC.Name,
 		},
 		Primary: node.UUID,
 	}

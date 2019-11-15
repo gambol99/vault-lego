@@ -1,6 +1,7 @@
 package consul
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"log"
@@ -14,7 +15,7 @@ import (
 	"github.com/hashicorp/vault/logical"
 	logicaltest "github.com/hashicorp/vault/logical/testing"
 	"github.com/mitchellh/mapstructure"
-	"github.com/ory-am/dockertest"
+	dockertest "gopkg.in/ory-am/dockertest.v2"
 )
 
 var (
@@ -82,7 +83,7 @@ func cleanupTestContainer(t *testing.T, cid dockertest.ContainerID) {
 func TestBackend_config_access(t *testing.T) {
 	config := logical.TestBackendConfig()
 	config.StorageView = &logical.InmemStorage{}
-	b, err := Factory(config)
+	b, err := Factory(context.Background(), config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,13 +104,13 @@ func TestBackend_config_access(t *testing.T) {
 		Data:      connData,
 	}
 
-	resp, err := b.HandleRequest(confReq)
+	resp, err := b.HandleRequest(context.Background(), confReq)
 	if err != nil || (resp != nil && resp.IsError()) || resp != nil {
 		t.Fatalf("failed to write configuration: resp:%#v err:%s", resp, err)
 	}
 
 	confReq.Operation = logical.ReadOperation
-	resp, err = b.HandleRequest(confReq)
+	resp, err = b.HandleRequest(context.Background(), confReq)
 	if err != nil || (resp != nil && resp.IsError()) {
 		t.Fatalf("failed to write configuration: resp:%#v err:%s", resp, err)
 	}
@@ -129,7 +130,7 @@ func TestBackend_config_access(t *testing.T) {
 func TestBackend_basic(t *testing.T) {
 	config := logical.TestBackendConfig()
 	config.StorageView = &logical.InmemStorage{}
-	b, err := Factory(config)
+	b, err := Factory(context.Background(), config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +157,7 @@ func TestBackend_basic(t *testing.T) {
 func TestBackend_renew_revoke(t *testing.T) {
 	config := logical.TestBackendConfig()
 	config.StorageView = &logical.InmemStorage{}
-	b, err := Factory(config)
+	b, err := Factory(context.Background(), config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +177,7 @@ func TestBackend_renew_revoke(t *testing.T) {
 		Path:      "config/access",
 		Data:      connData,
 	}
-	resp, err := b.HandleRequest(req)
+	resp, err := b.HandleRequest(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,14 +187,14 @@ func TestBackend_renew_revoke(t *testing.T) {
 		"policy": base64.StdEncoding.EncodeToString([]byte(testPolicy)),
 		"lease":  "6h",
 	}
-	resp, err = b.HandleRequest(req)
+	resp, err = b.HandleRequest(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	req.Operation = logical.ReadOperation
 	req.Path = "creds/test"
-	resp, err = b.HandleRequest(req)
+	resp, err = b.HandleRequest(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,7 +237,7 @@ func TestBackend_renew_revoke(t *testing.T) {
 
 	req.Operation = logical.RenewOperation
 	req.Secret = generatedSecret
-	resp, err = b.HandleRequest(req)
+	resp, err = b.HandleRequest(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +246,7 @@ func TestBackend_renew_revoke(t *testing.T) {
 	}
 
 	req.Operation = logical.RevokeOperation
-	resp, err = b.HandleRequest(req)
+	resp, err = b.HandleRequest(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +264,7 @@ func TestBackend_renew_revoke(t *testing.T) {
 func TestBackend_management(t *testing.T) {
 	config := logical.TestBackendConfig()
 	config.StorageView = &logical.InmemStorage{}
-	b, err := Factory(config)
+	b, err := Factory(context.Background(), config)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -288,19 +289,22 @@ func TestBackend_management(t *testing.T) {
 }
 
 func TestBackend_crud(t *testing.T) {
-	b, _ := Factory(logical.TestBackendConfig())
+	b, _ := Factory(context.Background(), logical.TestBackendConfig())
 	logicaltest.Test(t, logicaltest.TestCase{
 		Backend: b,
 		Steps: []logicaltest.TestStep{
 			testAccStepWritePolicy(t, "test", testPolicy, ""),
+			testAccStepWritePolicy(t, "test2", testPolicy, ""),
+			testAccStepWritePolicy(t, "test3", testPolicy, ""),
 			testAccStepReadPolicy(t, "test", testPolicy, 0),
+			testAccStepListPolicy(t, []string{"test", "test2", "test3"}),
 			testAccStepDeletePolicy(t, "test"),
 		},
 	})
 }
 
 func TestBackend_role_lease(t *testing.T) {
-	b, _ := Factory(logical.TestBackendConfig())
+	b, _ := Factory(context.Background(), logical.TestBackendConfig())
 	logicaltest.Test(t, logicaltest.TestCase{
 		Backend: b,
 		Steps: []logicaltest.TestStep{
@@ -430,13 +434,23 @@ func testAccStepReadPolicy(t *testing.T, name string, policy string, lease time.
 				return fmt.Errorf("mismatch: %s %s", out, policy)
 			}
 
-			leaseRaw := resp.Data["lease"].(string)
-			l, err := time.ParseDuration(leaseRaw)
-			if err != nil {
-				return err
-			}
-			if l != lease {
+			l := resp.Data["lease"].(int64)
+			if lease != time.Second*time.Duration(l) {
 				return fmt.Errorf("mismatch: %v %v", l, lease)
+			}
+			return nil
+		},
+	}
+}
+
+func testAccStepListPolicy(t *testing.T, names []string) logicaltest.TestStep {
+	return logicaltest.TestStep{
+		Operation: logical.ListOperation,
+		Path:      "roles/",
+		Check: func(resp *logical.Response) error {
+			respKeys := resp.Data["keys"].([]string)
+			if !reflect.DeepEqual(respKeys, names) {
+				return fmt.Errorf("mismatch: %#v %#v", respKeys, names)
 			}
 			return nil
 		},

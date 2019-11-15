@@ -4,6 +4,7 @@
 package duo
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 
@@ -31,14 +32,14 @@ func DuoRootPaths() []string {
 // DuoHandler interacts with the Duo Auth API to authenticate a user
 // login request. If successful, the original response from the login
 // backend is returned.
-func DuoHandler(req *logical.Request, d *framework.FieldData, resp *logical.Response) (
+func DuoHandler(ctx context.Context, req *logical.Request, d *framework.FieldData, resp *logical.Response) (
 	*logical.Response, error) {
-	duoConfig, err := GetDuoConfig(req)
+	duoConfig, err := GetDuoConfig(ctx, req)
 	if err != nil || duoConfig == nil {
 		return logical.ErrorResponse("Could not load Duo configuration"), nil
 	}
 
-	duoAuthClient, err := GetDuoAuthClient(req, duoConfig)
+	duoAuthClient, err := GetDuoAuthClient(ctx, req, duoConfig)
 	if err != nil {
 		return logical.ErrorResponse(err.Error()), nil
 	}
@@ -110,6 +111,11 @@ func duoHandler(duoConfig *DuoConfig, duoAuthClient AuthClient, request *duoAuth
 	options := []func(*url.Values){authapi.AuthUsername(duoUser)}
 	if request.method == "" {
 		request.method = "auto"
+	}
+	if request.method == "auto" || request.method == "push" {
+		if duoConfig.PushInfo != "" {
+			options = append(options, authapi.AuthPushinfo(duoConfig.PushInfo))
+		}
 	}
 	if request.passcode != "" {
 		request.method = "passcode"

@@ -19,96 +19,26 @@ package core
 import (
 	"testing"
 
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/resource"
-	"k8s.io/kubernetes/pkg/api/unversioned"
-	"k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/fake"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	api "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/quota"
+	"k8s.io/kubernetes/pkg/quota/generic"
 )
 
 func testVolumeClaim(name string, namespace string, spec api.PersistentVolumeClaimSpec) *api.PersistentVolumeClaim {
 	return &api.PersistentVolumeClaim{
-		ObjectMeta: api.ObjectMeta{Name: name, Namespace: namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Spec:       spec,
 	}
 }
 
-func TestPersistentVolumeClaimsConstraintsFunc(t *testing.T) {
-	validClaim := testVolumeClaim("foo", "ns", api.PersistentVolumeClaimSpec{
-		Selector: &unversioned.LabelSelector{
-			MatchExpressions: []unversioned.LabelSelectorRequirement{
-				{
-					Key:      "key2",
-					Operator: "Exists",
-				},
-			},
-		},
-		AccessModes: []api.PersistentVolumeAccessMode{
-			api.ReadWriteOnce,
-			api.ReadOnlyMany,
-		},
-		Resources: api.ResourceRequirements{
-			Requests: api.ResourceList{
-				api.ResourceName(api.ResourceStorage): resource.MustParse("10G"),
-			},
-		},
-	})
-	missingStorage := testVolumeClaim("foo", "ns", api.PersistentVolumeClaimSpec{
-		Selector: &unversioned.LabelSelector{
-			MatchExpressions: []unversioned.LabelSelectorRequirement{
-				{
-					Key:      "key2",
-					Operator: "Exists",
-				},
-			},
-		},
-		AccessModes: []api.PersistentVolumeAccessMode{
-			api.ReadWriteOnce,
-			api.ReadOnlyMany,
-		},
-		Resources: api.ResourceRequirements{
-			Requests: api.ResourceList{},
-		},
-	})
-
-	testCases := map[string]struct {
-		pvc      *api.PersistentVolumeClaim
-		required []api.ResourceName
-		err      string
-	}{
-		"missing storage": {
-			pvc:      missingStorage,
-			required: []api.ResourceName{api.ResourceRequestsStorage},
-			err:      `must specify requests.storage`,
-		},
-		"valid-claim-quota-storage": {
-			pvc:      validClaim,
-			required: []api.ResourceName{api.ResourceRequestsStorage},
-		},
-		"valid-claim-quota-pvc": {
-			pvc:      validClaim,
-			required: []api.ResourceName{api.ResourcePersistentVolumeClaims},
-		},
-		"valid-claim-quota-storage-and-pvc": {
-			pvc:      validClaim,
-			required: []api.ResourceName{api.ResourceRequestsStorage, api.ResourcePersistentVolumeClaims},
-		},
-	}
-	for testName, test := range testCases {
-		err := PersistentVolumeClaimConstraintsFunc(test.required, test.pvc)
-		switch {
-		case err != nil && len(test.err) == 0,
-			err == nil && len(test.err) != 0,
-			err != nil && test.err != err.Error():
-			t.Errorf("%s unexpected error: %v", testName, err)
-		}
-	}
-}
-
 func TestPersistentVolumeClaimEvaluatorUsage(t *testing.T) {
+	classGold := "gold"
 	validClaim := testVolumeClaim("foo", "ns", api.PersistentVolumeClaimSpec{
-		Selector: &unversioned.LabelSelector{
-			MatchExpressions: []unversioned.LabelSelectorRequirement{
+		Selector: &metav1.LabelSelector{
+			MatchExpressions: []metav1.LabelSelectorRequirement{
 				{
 					Key:      "key2",
 					Operator: "Exists",
@@ -125,9 +55,28 @@ func TestPersistentVolumeClaimEvaluatorUsage(t *testing.T) {
 			},
 		},
 	})
+	validClaimByStorageClass := testVolumeClaim("foo", "ns", api.PersistentVolumeClaimSpec{
+		Selector: &metav1.LabelSelector{
+			MatchExpressions: []metav1.LabelSelectorRequirement{
+				{
+					Key:      "key2",
+					Operator: "Exists",
+				},
+			},
+		},
+		AccessModes: []api.PersistentVolumeAccessMode{
+			api.ReadWriteOnce,
+			api.ReadOnlyMany,
+		},
+		Resources: api.ResourceRequirements{
+			Requests: api.ResourceList{
+				api.ResourceName(api.ResourceStorage): resource.MustParse("10Gi"),
+			},
+		},
+		StorageClassName: &classGold,
+	})
 
-	kubeClient := fake.NewSimpleClientset()
-	evaluator := NewPersistentVolumeClaimEvaluator(kubeClient)
+	evaluator := NewPersistentVolumeClaimEvaluator(nil)
 	testCases := map[string]struct {
 		pvc   *api.PersistentVolumeClaim
 		usage api.ResourceList
@@ -135,13 +84,27 @@ func TestPersistentVolumeClaimEvaluatorUsage(t *testing.T) {
 		"pvc-usage": {
 			pvc: validClaim,
 			usage: api.ResourceList{
-				api.ResourceRequestsStorage:        resource.MustParse("10Gi"),
-				api.ResourcePersistentVolumeClaims: resource.MustParse("1"),
+				api.ResourceRequestsStorage:                                                                       resource.MustParse("10Gi"),
+				api.ResourcePersistentVolumeClaims:                                                                resource.MustParse("1"),
+				generic.ObjectCountQuotaResourceNameFor(schema.GroupResource{Resource: "persistentvolumeclaims"}): resource.MustParse("1"),
+			},
+		},
+		"pvc-usage-by-class": {
+			pvc: validClaimByStorageClass,
+			usage: api.ResourceList{
+				api.ResourceRequestsStorage:                                                                       resource.MustParse("10Gi"),
+				api.ResourcePersistentVolumeClaims:                                                                resource.MustParse("1"),
+				ResourceByStorageClass(classGold, api.ResourceRequestsStorage):                                    resource.MustParse("10Gi"),
+				ResourceByStorageClass(classGold, api.ResourcePersistentVolumeClaims):                             resource.MustParse("1"),
+				generic.ObjectCountQuotaResourceNameFor(schema.GroupResource{Resource: "persistentvolumeclaims"}): resource.MustParse("1"),
 			},
 		},
 	}
 	for testName, testCase := range testCases {
-		actual := evaluator.Usage(testCase.pvc)
+		actual, err := evaluator.Usage(testCase.pvc)
+		if err != nil {
+			t.Errorf("%s unexpected error: %v", testName, err)
+		}
 		if !quota.Equals(testCase.usage, actual) {
 			t.Errorf("%s expected: %v, actual: %v", testName, testCase.usage, actual)
 		}

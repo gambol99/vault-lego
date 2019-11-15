@@ -17,13 +17,20 @@ limitations under the License.
 package quota
 
 import (
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/resource"
-	"k8s.io/kubernetes/pkg/util/sets"
+	"strings"
+
+	"k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/util/sets"
+	api "k8s.io/kubernetes/pkg/apis/core"
 )
 
 // Equals returns true if the two lists are equivalent
 func Equals(a api.ResourceList, b api.ResourceList) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
 	for key, value1 := range a {
 		value2, found := b[key]
 		if !found {
@@ -33,8 +40,18 @@ func Equals(a api.ResourceList, b api.ResourceList) bool {
 			return false
 		}
 	}
-	for key, value1 := range b {
-		value2, found := a[key]
+
+	return true
+}
+
+// V1Equals returns true if the two lists are equivalent
+func V1Equals(a v1.ResourceList, b v1.ResourceList) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
+	for key, value1 := range a {
+		value2, found := b[key]
 		if !found {
 			return false
 		}
@@ -42,6 +59,7 @@ func Equals(a api.ResourceList, b api.ResourceList) bool {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -100,6 +118,32 @@ func Add(a api.ResourceList, b api.ResourceList) api.ResourceList {
 	return result
 }
 
+// SubtractWithNonNegativeResult - subtracts and returns result of a - b but
+// makes sure we don't return negative values to prevent negative resource usage.
+func SubtractWithNonNegativeResult(a api.ResourceList, b api.ResourceList) api.ResourceList {
+	zero := resource.MustParse("0")
+
+	result := api.ResourceList{}
+	for key, value := range a {
+		quantity := *value.Copy()
+		if other, found := b[key]; found {
+			quantity.Sub(other)
+		}
+		if quantity.Cmp(zero) > 0 {
+			result[key] = quantity
+		} else {
+			result[key] = zero
+		}
+	}
+
+	for key := range b {
+		if _, found := result[key]; !found {
+			result[key] = zero
+		}
+	}
+	return result
+}
+
 // Subtract returns the result of a - b for each named resource
 func Subtract(a api.ResourceList, b api.ResourceList) api.ResourceList {
 	result := api.ResourceList{}
@@ -144,6 +188,16 @@ func ResourceNames(resources api.ResourceList) []api.ResourceName {
 // Contains returns true if the specified item is in the list of items
 func Contains(items []api.ResourceName, item api.ResourceName) bool {
 	return ToSet(items).Has(string(item))
+}
+
+// ContainsPrefix returns true if the specified item has a prefix that contained in given prefix Set
+func ContainsPrefix(prefixSet []string, item api.ResourceName) bool {
+	for _, prefix := range prefixSet {
+		if strings.HasPrefix(string(item), prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // Intersection returns the intersection of both list of resources
@@ -191,26 +245,29 @@ func ToSet(resourceNames []api.ResourceName) sets.String {
 }
 
 // CalculateUsage calculates and returns the requested ResourceList usage
-func CalculateUsage(namespaceName string, scopes []api.ResourceQuotaScope, hardLimits api.ResourceList, registry Registry) (api.ResourceList, error) {
+func CalculateUsage(namespaceName string, scopes []api.ResourceQuotaScope, hardLimits api.ResourceList, registry Registry, scopeSelector *api.ScopeSelector) (api.ResourceList, error) {
 	// find the intersection between the hard resources on the quota
 	// and the resources this controller can track to know what we can
 	// look to measure updated usage stats for
 	hardResources := ResourceNames(hardLimits)
 	potentialResources := []api.ResourceName{}
-	evaluators := registry.Evaluators()
+	evaluators := registry.List()
 	for _, evaluator := range evaluators {
-		potentialResources = append(potentialResources, evaluator.MatchesResources()...)
+		potentialResources = append(potentialResources, evaluator.MatchingResources(hardResources)...)
 	}
+	// NOTE: the intersection just removes duplicates since the evaluator match intersects with hard
 	matchedResources := Intersection(hardResources, potentialResources)
 
 	// sum the observed usage from each evaluator
 	newUsage := api.ResourceList{}
-	usageStatsOptions := UsageStatsOptions{Namespace: namespaceName, Scopes: scopes}
 	for _, evaluator := range evaluators {
 		// only trigger the evaluator if it matches a resource in the quota, otherwise, skip calculating anything
-		if intersection := Intersection(evaluator.MatchesResources(), matchedResources); len(intersection) == 0 {
+		intersection := evaluator.MatchingResources(matchedResources)
+		if len(intersection) == 0 {
 			continue
 		}
+
+		usageStatsOptions := UsageStatsOptions{Namespace: namespaceName, Scopes: scopes, Resources: intersection, ScopeSelector: scopeSelector}
 		stats, err := evaluator.UsageStats(usageStatsOptions)
 		if err != nil {
 			return nil, err

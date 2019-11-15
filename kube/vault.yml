@@ -1,0 +1,66 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vault-token
+data:
+  token: cm9vdC10b2tlbg==
+---
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  name: vault
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: vault
+    spec:
+      containers:
+        - name: vault
+          image: "vault:0.10.3"
+          resources:
+            requests:
+              cpu: 300m
+              memory: 1000Mi
+            limits:
+              cpu: 300m
+              memory: 1500Mi
+          ports:
+          - containerPort: 8200
+            name: main-port
+          env:
+          - name: VAULT_DEV_ROOT_TOKEN_ID
+            valueFrom:
+              secretKeyRef:
+                name: vault-token
+                key: token
+          # VAULT_ADDR is provided only for convenience - so don't have to set when logging in.
+          - name: VAULT_ADDR
+            value: http://localhost:8200
+          - name: VAULT_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: vault-token
+                key: token
+          readinessProbe:
+            httpGet:
+              # "leader" returns a 503 for a sealed vault, which is basically what we want
+              path: /v1/sys/leader
+              port: 8200
+            initialDelaySeconds: 10
+            timeoutSeconds: 1
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vault
+  labels:
+    app: vault
+spec:
+  ports:
+  - port: 8200
+    protocol: TCP
+    targetPort: 8200
+  selector:
+    app: vault

@@ -31,30 +31,6 @@ func IPBelongsToCIDR(ipAddr string, cidr string) (bool, error) {
 	return true, nil
 }
 
-// IPBelongsToCIDRBlocksString checks if the given IP is encompassed by any of
-// the given CIDR blocks, when the input is a string composed by joining all
-// the CIDR blocks using a separator. The input is separated based on the given
-// separator and the IP is checked to be belonged by any CIDR block.
-func IPBelongsToCIDRBlocksString(ipAddr string, cidrList, separator string) (bool, error) {
-	if ipAddr == "" {
-		return false, fmt.Errorf("missing IP address")
-	}
-
-	if cidrList == "" {
-		return false, fmt.Errorf("missing CIDR list")
-	}
-
-	if separator == "" {
-		return false, fmt.Errorf("missing separator")
-	}
-
-	if ip := net.ParseIP(ipAddr); ip == nil {
-		return false, fmt.Errorf("invalid IP address")
-	}
-
-	return IPBelongsToCIDRBlocksSlice(ipAddr, strutil.ParseDedupAndSortStrings(cidrList, separator))
-}
-
 // IPBelongsToCIDRBlocksSlice checks if the given IP is encompassed by any of the given
 // CIDR blocks
 func IPBelongsToCIDRBlocksSlice(ipAddr string, cidrs []string) (bool, error) {
@@ -95,7 +71,7 @@ func ValidateCIDRListString(cidrList string, separator string) (bool, error) {
 		return false, fmt.Errorf("missing separator")
 	}
 
-	return ValidateCIDRListSlice(strutil.ParseDedupAndSortStrings(cidrList, separator))
+	return ValidateCIDRListSlice(strutil.ParseDedupLowercaseAndSortStrings(cidrList, separator))
 }
 
 // ValidateCIDRListSlice checks if the given list of CIDR blocks are valid

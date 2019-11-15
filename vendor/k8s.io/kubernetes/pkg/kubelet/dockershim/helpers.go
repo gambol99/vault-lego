@@ -18,47 +18,45 @@ package dockershim
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
-	dockertypes "github.com/docker/engine-api/types"
-	dockerfilters "github.com/docker/engine-api/types/filters"
-	dockerapiversion "github.com/docker/engine-api/types/versions"
+	dockertypes "github.com/docker/docker/api/types"
+	dockercontainer "github.com/docker/docker/api/types/container"
+	dockerfilters "github.com/docker/docker/api/types/filters"
 	dockernat "github.com/docker/go-connections/nat"
 	"github.com/golang/glog"
 
-	runtimeApi "k8s.io/kubernetes/pkg/kubelet/api/v1alpha1/runtime"
-	"k8s.io/kubernetes/pkg/kubelet/dockertools"
+	utilerrors "k8s.io/apimachinery/pkg/util/errors"
+	"k8s.io/kubernetes/pkg/credentialprovider"
+	runtimeapi "k8s.io/kubernetes/pkg/kubelet/apis/cri/runtime/v1alpha2"
+	"k8s.io/kubernetes/pkg/kubelet/dockershim/libdocker"
 	"k8s.io/kubernetes/pkg/kubelet/types"
+	"k8s.io/kubernetes/pkg/security/apparmor"
+	"k8s.io/kubernetes/pkg/util/parsers"
 )
 
 const (
-	annotationPrefix = "annotation."
+	annotationPrefix     = "annotation."
+	securityOptSeparator = '='
 )
 
-// apiVersion implements kubecontainer.Version interface by implementing
-// Compare() and String(). It uses the compare function of engine-api to
-// compare docker apiversions.
-type apiVersion string
+var (
+	conflictRE = regexp.MustCompile(`Conflict. (?:.)+ is already in use by container ([0-9a-z]+)`)
 
-func (v apiVersion) String() string {
-	return string(v)
-}
+	// this is hacky, but extremely common.
+	// if a container starts but the executable file is not found, runc gives a message that matches
+	startRE = regexp.MustCompile(`\\\\\\\"(.*)\\\\\\\": executable file not found`)
 
-func (v apiVersion) Compare(other string) (int, error) {
-	if dockerapiversion.LessThan(string(v), other) {
-		return -1, nil
-	} else if dockerapiversion.GreaterThan(string(v), other) {
-		return 1, nil
-	}
-	return 0, nil
-}
+	defaultSeccompOpt = []dockerOpt{{"seccomp", "unconfined", ""}}
+)
 
 // generateEnvList converts KeyValue list to a list of strings, in the form of
 // '<key>=<value>', which can be understood by docker.
-func generateEnvList(envs []*runtimeApi.KeyValue) (result []string) {
+func generateEnvList(envs []*runtimeapi.KeyValue) (result []string) {
 	for _, env := range envs {
-		result = append(result, fmt.Sprintf("%s=%s", env.GetKey(), env.GetValue()))
+		result = append(result, fmt.Sprintf("%s=%s", env.Key, env.Value))
 	}
 	return
 }
@@ -116,49 +114,66 @@ func extractLabels(input map[string]string) (map[string]string, map[string]strin
 
 // generateMountBindings converts the mount list to a list of strings that
 // can be understood by docker.
-// Each element in the string is in the form of:
-// '<HostPath>:<ContainerPath>', or
-// '<HostPath>:<ContainerPath>:ro', if the path is read only, or
-// '<HostPath>:<ContainerPath>:Z', if the volume requires SELinux
-// relabeling and the pod provides an SELinux label
-func generateMountBindings(mounts []*runtimeApi.Mount) (result []string) {
-	// TODO: resolve podHasSELinuxLabel
+// '<HostPath>:<ContainerPath>[:options]', where 'options'
+// is a comma-separated list of the following strings:
+// 'ro', if the path is read only
+// 'Z', if the volume requires SELinux relabeling
+// propagation mode such as 'rslave'
+func generateMountBindings(mounts []*runtimeapi.Mount) []string {
+	result := make([]string, 0, len(mounts))
 	for _, m := range mounts {
-		bind := fmt.Sprintf("%s:%s", m.GetHostPath(), m.GetContainerPath())
-		readOnly := m.GetReadonly()
-		if readOnly {
-			bind += ":ro"
+		bind := fmt.Sprintf("%s:%s", m.HostPath, m.ContainerPath)
+		var attrs []string
+		if m.Readonly {
+			attrs = append(attrs, "ro")
 		}
-		if m.GetSelinuxRelabel() {
-			if readOnly {
-				bind += ",Z"
-			} else {
-				bind += ":Z"
-			}
+		// Only request relabeling if the pod provides an SELinux context. If the pod
+		// does not provide an SELinux context relabeling will label the volume with
+		// the container's randomly allocated MCS label. This would restrict access
+		// to the volume to the container which mounts it first.
+		if m.SelinuxRelabel {
+			attrs = append(attrs, "Z")
+		}
+		switch m.Propagation {
+		case runtimeapi.MountPropagation_PROPAGATION_PRIVATE:
+			// noop, private is default
+		case runtimeapi.MountPropagation_PROPAGATION_BIDIRECTIONAL:
+			attrs = append(attrs, "rshared")
+		case runtimeapi.MountPropagation_PROPAGATION_HOST_TO_CONTAINER:
+			attrs = append(attrs, "rslave")
+		default:
+			glog.Warningf("unknown propagation mode for hostPath %q", m.HostPath)
+			// Falls back to "private"
+		}
+
+		if len(attrs) > 0 {
+			bind = fmt.Sprintf("%s:%s", bind, strings.Join(attrs, ","))
 		}
 		result = append(result, bind)
 	}
-	return
+	return result
 }
 
-func makePortsAndBindings(pm []*runtimeApi.PortMapping) (map[dockernat.Port]struct{}, map[dockernat.Port][]dockernat.PortBinding) {
-	exposedPorts := map[dockernat.Port]struct{}{}
+func makePortsAndBindings(pm []*runtimeapi.PortMapping) (dockernat.PortSet, map[dockernat.Port][]dockernat.PortBinding) {
+	exposedPorts := dockernat.PortSet{}
 	portBindings := map[dockernat.Port][]dockernat.PortBinding{}
 	for _, port := range pm {
-		exteriorPort := port.GetHostPort()
+		exteriorPort := port.HostPort
 		if exteriorPort == 0 {
 			// No need to do port binding when HostPort is not specified
 			continue
 		}
-		interiorPort := port.GetContainerPort()
+		interiorPort := port.ContainerPort
 		// Some of this port stuff is under-documented voodoo.
 		// See http://stackoverflow.com/questions/20428302/binding-a-port-to-a-host-interface-using-the-rest-api
 		var protocol string
-		switch strings.ToUpper(string(port.GetProtocol())) {
-		case "UDP":
+		switch port.Protocol {
+		case runtimeapi.Protocol_UDP:
 			protocol = "/udp"
-		case "TCP":
+		case runtimeapi.Protocol_TCP:
 			protocol = "/tcp"
+		case runtimeapi.Protocol_SCTP:
+			protocol = "/sctp"
 		default:
 			glog.Warningf("Unknown protocol %q: defaulting to TCP", port.Protocol)
 			protocol = "/tcp"
@@ -169,7 +184,7 @@ func makePortsAndBindings(pm []*runtimeApi.PortMapping) (map[dockernat.Port]stru
 
 		hostBinding := dockernat.PortBinding{
 			HostPort: strconv.Itoa(int(exteriorPort)),
-			HostIP:   port.GetHostIp(),
+			HostIP:   port.HostIp,
 		}
 
 		// Allow multiple host ports bind to same docker port
@@ -186,34 +201,19 @@ func makePortsAndBindings(pm []*runtimeApi.PortMapping) (map[dockernat.Port]stru
 	return exposedPorts, portBindings
 }
 
-// getContainerSecurityOpt gets container security options from container and sandbox config, currently from sandbox
-// annotations.
-// It is an experimental feature and may be promoted to official runtime api in the future.
-func getContainerSecurityOpts(containerName string, sandboxConfig *runtimeApi.PodSandboxConfig, seccompProfileRoot string) ([]string, error) {
-	appArmorOpts, err := dockertools.GetAppArmorOpts(sandboxConfig.GetAnnotations(), containerName)
+// getApparmorSecurityOpts gets apparmor options from container config.
+func getApparmorSecurityOpts(sc *runtimeapi.LinuxContainerSecurityContext, separator rune) ([]string, error) {
+	if sc == nil || sc.ApparmorProfile == "" {
+		return nil, nil
+	}
+
+	appArmorOpts, err := getAppArmorOpts(sc.ApparmorProfile)
 	if err != nil {
 		return nil, err
 	}
-	seccompOpts, err := dockertools.GetSeccompOpts(sandboxConfig.GetAnnotations(), containerName, seccompProfileRoot)
-	if err != nil {
-		return nil, err
-	}
-	securityOpts := append(appArmorOpts, seccompOpts...)
-	var opts []string
-	for _, securityOpt := range securityOpts {
-		k, v := securityOpt.GetKV()
-		opts = append(opts, fmt.Sprintf("%s=%s", k, v))
-	}
-	return opts, nil
-}
 
-func getSandboxSecurityOpts(sandboxConfig *runtimeApi.PodSandboxConfig, seccompProfileRoot string) ([]string, error) {
-	// sandboxContainerName doesn't exist in the pod, so pod security options will be returned by default.
-	return getContainerSecurityOpts(sandboxContainerName, sandboxConfig, seccompProfileRoot)
-}
-
-func getNetworkNamespace(c *dockertypes.ContainerJSON) string {
-	return fmt.Sprintf(dockerNetNSFmt, c.State.Pid)
+	fmtOpts := fmtDockerOpts(appArmorOpts, separator)
+	return fmtOpts, nil
 }
 
 // dockerFilter wraps around dockerfilters.Args and provides methods to modify
@@ -232,4 +232,164 @@ func (f *dockerFilter) Add(key, value string) {
 
 func (f *dockerFilter) AddLabel(key, value string) {
 	f.Add("label", fmt.Sprintf("%s=%s", key, value))
+}
+
+// parseUserFromImageUser splits the user out of an user:group string.
+func parseUserFromImageUser(id string) string {
+	if id == "" {
+		return id
+	}
+	// split instances where the id may contain user:group
+	if strings.Contains(id, ":") {
+		return strings.Split(id, ":")[0]
+	}
+	// no group, just return the id
+	return id
+}
+
+// getUserFromImageUser gets uid or user name of the image user.
+// If user is numeric, it will be treated as uid; or else, it is treated as user name.
+func getUserFromImageUser(imageUser string) (*int64, string) {
+	user := parseUserFromImageUser(imageUser)
+	// return both nil if user is not specified in the image.
+	if user == "" {
+		return nil, ""
+	}
+	// user could be either uid or user name. Try to interpret as numeric uid.
+	uid, err := strconv.ParseInt(user, 10, 64)
+	if err != nil {
+		// If user is non numeric, assume it's user name.
+		return nil, user
+	}
+	// If user is a numeric uid.
+	return &uid, ""
+}
+
+// See #33189. If the previous attempt to create a sandbox container name FOO
+// failed due to "device or resource busy", it is possible that docker did
+// not clean up properly and has inconsistent internal state. Docker would
+// not report the existence of FOO, but would complain if user wants to
+// create a new container named FOO. To work around this, we parse the error
+// message to identify failure caused by naming conflict, and try to remove
+// the old container FOO.
+// See #40443. Sometimes even removal may fail with "no such container" error.
+// In that case we have to create the container with a randomized name.
+// TODO(random-liu): Remove this work around after docker 1.11 is deprecated.
+// TODO(#33189): Monitor the tests to see if the fix is sufficient.
+func recoverFromCreationConflictIfNeeded(client libdocker.Interface, createConfig dockertypes.ContainerCreateConfig, err error) (*dockercontainer.ContainerCreateCreatedBody, error) {
+	matches := conflictRE.FindStringSubmatch(err.Error())
+	if len(matches) != 2 {
+		return nil, err
+	}
+
+	id := matches[1]
+	glog.Warningf("Unable to create pod sandbox due to conflict. Attempting to remove sandbox %q", id)
+	if rmErr := client.RemoveContainer(id, dockertypes.ContainerRemoveOptions{RemoveVolumes: true}); rmErr == nil {
+		glog.V(2).Infof("Successfully removed conflicting container %q", id)
+		return nil, err
+	} else {
+		glog.Errorf("Failed to remove the conflicting container %q: %v", id, rmErr)
+		// Return if the error is not container not found error.
+		if !libdocker.IsContainerNotFoundError(rmErr) {
+			return nil, err
+		}
+	}
+
+	// randomize the name to avoid conflict.
+	createConfig.Name = randomizeName(createConfig.Name)
+	glog.V(2).Infof("Create the container with randomized name %s", createConfig.Name)
+	return client.CreateContainer(createConfig)
+}
+
+// transformStartContainerError does regex parsing on returned error
+// for where container runtimes are giving less than ideal error messages.
+func transformStartContainerError(err error) error {
+	if err == nil {
+		return nil
+	}
+	matches := startRE.FindStringSubmatch(err.Error())
+	if len(matches) > 0 {
+		return fmt.Errorf("executable not found in $PATH")
+	}
+	return err
+}
+
+// ensureSandboxImageExists pulls the sandbox image when it's not present.
+func ensureSandboxImageExists(client libdocker.Interface, image string) error {
+	_, err := client.InspectImageByRef(image)
+	if err == nil {
+		return nil
+	}
+	if !libdocker.IsImageNotFoundError(err) {
+		return fmt.Errorf("failed to inspect sandbox image %q: %v", image, err)
+	}
+
+	repoToPull, _, _, err := parsers.ParseImageName(image)
+	if err != nil {
+		return err
+	}
+
+	keyring := credentialprovider.NewDockerKeyring()
+	creds, withCredentials := keyring.Lookup(repoToPull)
+	if !withCredentials {
+		glog.V(3).Infof("Pulling image %q without credentials", image)
+
+		err := client.PullImage(image, dockertypes.AuthConfig{}, dockertypes.ImagePullOptions{})
+		if err != nil {
+			return fmt.Errorf("failed pulling image %q: %v", image, err)
+		}
+
+		return nil
+	}
+
+	var pullErrs []error
+	for _, currentCreds := range creds {
+		authConfig := credentialprovider.LazyProvide(currentCreds)
+		err := client.PullImage(image, authConfig, dockertypes.ImagePullOptions{})
+		// If there was no error, return success
+		if err == nil {
+			return nil
+		}
+
+		pullErrs = append(pullErrs, err)
+	}
+
+	return utilerrors.NewAggregate(pullErrs)
+}
+
+func getAppArmorOpts(profile string) ([]dockerOpt, error) {
+	if profile == "" || profile == apparmor.ProfileRuntimeDefault {
+		// The docker applies the default profile by default.
+		return nil, nil
+	}
+
+	// Return unconfined profile explicitly
+	if profile == apparmor.ProfileNameUnconfined {
+		return []dockerOpt{{"apparmor", apparmor.ProfileNameUnconfined, ""}}, nil
+	}
+
+	// Assume validation has already happened.
+	profileName := strings.TrimPrefix(profile, apparmor.ProfileNamePrefix)
+	return []dockerOpt{{"apparmor", profileName, ""}}, nil
+}
+
+// fmtDockerOpts formats the docker security options using the given separator.
+func fmtDockerOpts(opts []dockerOpt, sep rune) []string {
+	fmtOpts := make([]string, len(opts))
+	for i, opt := range opts {
+		fmtOpts[i] = fmt.Sprintf("%s%c%s", opt.key, sep, opt.value)
+	}
+	return fmtOpts
+}
+
+type dockerOpt struct {
+	// The key-value pair passed to docker.
+	key, value string
+	// The alternative value to use in log/event messages.
+	msg string
+}
+
+// Expose key/value from  dockerOpt.
+func (d dockerOpt) GetKV() (string, string) {
+	return d.key, d.value
 }

@@ -19,18 +19,18 @@ package main
 import (
 	"time"
 
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/apis/extensions"
-	"k8s.io/kubernetes/pkg/client/cache"
-	client "k8s.io/kubernetes/pkg/client/unversioned"
-	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/watch"
+	extensions_v1beta1 "k8s.io/api/extensions/v1beta1"
+	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/cache"
 )
 
 // createIngressWatcher is responsible for creating a watcher on ingress resources
-func (c *controller) createIngressWatcher() (chan struct{}, chan struct{}) {
+func (c *controller) createIngressWatcher(reconcileTTL time.Duration) (chan struct{}, chan struct{}) {
 	// step: the reconcile period
-	resyncPeriod := time.Duration(60 * time.Second)
+	resyncPeriod := time.Duration(reconcileTTL)
 	// step: create the update channel
 	updateCh := make(chan struct{}, 10)
 	// the stop channel
@@ -53,7 +53,7 @@ func (c *controller) createIngressWatcher() (chan struct{}, chan struct{}) {
 		&cache.ListWatch{
 			ListFunc:  ingressListFunc(c.kc, c.config.namespace),
 			WatchFunc: ingressWatchFunc(c.kc, c.config.namespace),
-		}, &extensions.Ingress{}, resyncPeriod, handler,
+		}, &extensions_v1beta1.Ingress{}, resyncPeriod, handler,
 	)
 
 	// step: start the controller
@@ -63,20 +63,20 @@ func (c *controller) createIngressWatcher() (chan struct{}, chan struct{}) {
 }
 
 // ingressList returns a list of ingress resources
-func (c *controller) ingressList() (*extensions.IngressList, error) {
-	return c.kc.Extensions().Ingress(c.config.namespace).List(api.ListOptions{})
+func (c *controller) ingressList() (*extensions_v1beta1.IngressList, error) {
+	return c.kc.Extensions().Ingresses(c.config.namespace).List(meta_v1.ListOptions{})
 }
 
 // ingressListFunc is responsible for listing ingress resources
-func ingressListFunc(c *client.Client, ns string) func(api.ListOptions) (runtime.Object, error) {
-	return func(opts api.ListOptions) (runtime.Object, error) {
-		return c.Extensions().Ingress(ns).List(opts)
+func ingressListFunc(c *kubernetes.Clientset, ns string) func(meta_v1.ListOptions) (runtime.Object, error) {
+	return func(opts meta_v1.ListOptions) (runtime.Object, error) {
+		return c.Extensions().Ingresses(ns).List(opts)
 	}
 }
 
 // ingressWatchFunc is responsible for watching ingress resources
-func ingressWatchFunc(c *client.Client, ns string) func(options api.ListOptions) (watch.Interface, error) {
-	return func(options api.ListOptions) (watch.Interface, error) {
-		return c.Extensions().Ingress(ns).Watch(options)
+func ingressWatchFunc(c *kubernetes.Clientset, ns string) func(options meta_v1.ListOptions) (watch.Interface, error) {
+	return func(options meta_v1.ListOptions) (watch.Interface, error) {
+		return c.Extensions().Ingresses(ns).Watch(options)
 	}
 }

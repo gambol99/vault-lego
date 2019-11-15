@@ -20,14 +20,18 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
+	"reflect"
 	"testing"
 
 	"github.com/spf13/cobra"
 
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/apimachinery/registered"
-	"k8s.io/kubernetes/pkg/client/unversioned/fake"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/cli-runtime/pkg/genericclioptions"
+	"k8s.io/client-go/rest/fake"
+	cmdtesting "k8s.io/kubernetes/pkg/kubectl/cmd/testing"
+	"k8s.io/kubernetes/pkg/kubectl/scheme"
 )
 
 type fakePortForwarder struct {
@@ -42,14 +46,14 @@ func (f *fakePortForwarder) ForwardPorts(method string, url *url.URL, opts PortF
 	return f.pfErr
 }
 
-func TestPortForward(t *testing.T) {
-	version := registered.GroupOrDie(api.GroupName).GroupVersion.Version
+func testPortForward(t *testing.T, flags map[string]string, args []string) {
+	version := "v1"
 
 	tests := []struct {
-		name                       string
-		podPath, pfPath, container string
-		pod                        *api.Pod
-		pfErr                      bool
+		name            string
+		podPath, pfPath string
+		pod             *corev1.Pod
+		pfErr           bool
 	}{
 		{
 			name:    "pod portforward",
@@ -66,140 +70,287 @@ func TestPortForward(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
-		var err error
-		f, tf, codec, ns := NewAPIFactory()
-		tf.Client = &fake.RESTClient{
-			NegotiatedSerializer: ns,
-			Client: fake.CreateHTTPClient(func(req *http.Request) (*http.Response, error) {
-				switch p, m := req.URL.Path, req.Method; {
-				case p == test.podPath && m == "GET":
-					body := objBody(codec, test.pod)
-					return &http.Response{StatusCode: 200, Header: defaultHeader(), Body: body}, nil
-				default:
-					// Ensures no GET is performed when deleting by name
-					t.Errorf("%s: unexpected request: %#v\n%#v", test.name, req.URL, req)
-					return nil, nil
+		t.Run(test.name, func(t *testing.T) {
+			var err error
+			tf := cmdtesting.NewTestFactory().WithNamespace("test")
+			defer tf.Cleanup()
+
+			codec := scheme.Codecs.LegacyCodec(scheme.Scheme.PrioritizedVersionsAllGroups()...)
+			ns := scheme.Codecs
+
+			tf.Client = &fake.RESTClient{
+				VersionedAPIPath:     "/api/v1",
+				GroupVersion:         schema.GroupVersion{Group: "", Version: "v1"},
+				NegotiatedSerializer: ns,
+				Client: fake.CreateHTTPClient(func(req *http.Request) (*http.Response, error) {
+					switch p, m := req.URL.Path, req.Method; {
+					case p == test.podPath && m == "GET":
+						body := objBody(codec, test.pod)
+						return &http.Response{StatusCode: 200, Header: defaultHeader(), Body: body}, nil
+					default:
+						t.Errorf("%s: unexpected request: %#v\n%#v", test.name, req.URL, req)
+						return nil, nil
+					}
+				}),
+			}
+			tf.ClientConfigVal = defaultClientConfig()
+			ff := &fakePortForwarder{}
+			if test.pfErr {
+				ff.pfErr = fmt.Errorf("pf error")
+			}
+
+			opts := &PortForwardOptions{}
+			cmd := NewCmdPortForward(tf, genericclioptions.NewTestIOStreamsDiscard())
+			cmd.Run = func(cmd *cobra.Command, args []string) {
+				if err = opts.Complete(tf, cmd, args); err != nil {
+					return
 				}
-			}),
-		}
-		tf.Namespace = "test"
-		tf.ClientConfig = defaultClientConfig()
-		ff := &fakePortForwarder{}
-		if test.pfErr {
-			ff.pfErr = fmt.Errorf("pf error")
-		}
+				opts.PortForwarder = ff
+				if err = opts.Validate(); err != nil {
+					return
+				}
+				err = opts.RunPortForward()
+			}
 
-		opts := &PortForwardOptions{}
-		cmd := NewCmdPortForward(f, os.Stdout, os.Stderr)
-		cmd.Run = func(cmd *cobra.Command, args []string) {
-			if err = opts.Complete(f, cmd, args, os.Stdout, os.Stderr); err != nil {
+			for name, value := range flags {
+				cmd.Flags().Set(name, value)
+			}
+			cmd.Run(cmd, args)
+
+			if test.pfErr && err != ff.pfErr {
+				t.Errorf("%s: Unexpected port-forward error: %v", test.name, err)
+			}
+			if !test.pfErr && err != nil {
+				t.Errorf("%s: Unexpected error: %v", test.name, err)
+			}
+			if test.pfErr {
 				return
 			}
-			opts.PortForwarder = ff
-			if err = opts.Validate(); err != nil {
-				return
+
+			if ff.url == nil || ff.url.Path != test.pfPath {
+				t.Errorf("%s: Did not get expected path for portforward request", test.name)
 			}
-			err = opts.RunPortForward()
-		}
-
-		cmd.Run(cmd, []string{"foo", ":5000", ":1000"})
-
-		if test.pfErr && err != ff.pfErr {
-			t.Errorf("%s: Unexpected port-forward error: %v", test.name, err)
-		}
-		if !test.pfErr && err != nil {
-			t.Errorf("%s: Unexpected error: %v", test.name, err)
-		}
-		if test.pfErr {
-			continue
-		}
-
-		if ff.url.Path != test.pfPath {
-			t.Errorf("%s: Did not get expected path for portforward request", test.name)
-		}
-		if ff.method != "POST" {
-			t.Errorf("%s: Did not get method for attach request: %s", test.name, ff.method)
-		}
+			if ff.method != "POST" {
+				t.Errorf("%s: Did not get method for attach request: %s", test.name, ff.method)
+			}
+		})
 	}
 }
 
-func TestPortForwardWithPFlag(t *testing.T) {
-	version := registered.GroupOrDie(api.GroupName).GroupVersion.Version
+func TestPortForward(t *testing.T) {
+	testPortForward(t, nil, []string{"foo", ":5000", ":1000"})
+}
 
-	tests := []struct {
-		name, podPath, pfPath, container string
-		pod                              *api.Pod
-		pfErr                            bool
+func TestTranslateServicePortToTargetPort(t *testing.T) {
+	cases := []struct {
+		name       string
+		svc        corev1.Service
+		pod        corev1.Pod
+		ports      []string
+		translated []string
+		err        bool
 	}{
 		{
-			name:    "pod portforward",
-			podPath: "/api/" + version + "/namespaces/test/pods/foo",
-			pfPath:  "/api/" + version + "/namespaces/test/pods/foo/portforward",
-			pod:     execPod(),
+			name: "test success 1 (int port)",
+			svc: corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Ports: []corev1.ServicePort{
+						{
+							Port:       80,
+							TargetPort: intstr.FromInt(8080),
+						},
+					},
+				},
+			},
+			pod: corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Ports: []corev1.ContainerPort{
+								{
+									Name:          "http",
+									ContainerPort: int32(8080)},
+							},
+						},
+					},
+				},
+			},
+			ports:      []string{"80"},
+			translated: []string{"80:8080"},
+			err:        false,
 		},
 		{
-			name:    "pod portforward error",
-			podPath: "/api/" + version + "/namespaces/test/pods/foo",
-			pfPath:  "/api/" + version + "/namespaces/test/pods/foo/portforward",
-			pod:     execPod(),
-			pfErr:   true,
+			name: "test success 2 (clusterIP: None)",
+			svc: corev1.Service{
+				Spec: corev1.ServiceSpec{
+					ClusterIP: "None",
+					Ports: []corev1.ServicePort{
+						{
+							Port:       80,
+							TargetPort: intstr.FromInt(8080),
+						},
+					},
+				},
+			},
+			pod: corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Ports: []corev1.ContainerPort{
+								{
+									Name:          "http",
+									ContainerPort: int32(8080)},
+							},
+						},
+					},
+				},
+			},
+			ports:      []string{"80"},
+			translated: []string{"80"},
+			err:        false,
+		},
+		{
+			name: "test success 3 (named port)",
+			svc: corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Ports: []corev1.ServicePort{
+						{
+							Port:       80,
+							TargetPort: intstr.FromString("http"),
+						},
+						{
+							Port:       443,
+							TargetPort: intstr.FromString("https"),
+						},
+					},
+				},
+			},
+			pod: corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Ports: []corev1.ContainerPort{
+								{
+									Name:          "http",
+									ContainerPort: int32(8080)},
+								{
+									Name:          "https",
+									ContainerPort: int32(8443)},
+							},
+						},
+					},
+				},
+			},
+			ports:      []string{"80", "443"},
+			translated: []string{"80:8080", "443:8443"},
+			err:        false,
+		},
+		{
+			name: "test success (targetPort omitted)",
+			svc: corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Ports: []corev1.ServicePort{
+						{
+							Port: 80,
+						},
+					},
+				},
+			},
+			pod: corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Ports: []corev1.ContainerPort{
+								{
+									Name:          "http",
+									ContainerPort: int32(80)},
+							},
+						},
+					},
+				},
+			},
+			ports:      []string{"80"},
+			translated: []string{"80"},
+			err:        false,
+		},
+		{
+			name: "test failure 1 (named port lookup failure)",
+			svc: corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Ports: []corev1.ServicePort{
+						{
+							Port:       80,
+							TargetPort: intstr.FromString("http"),
+						},
+					},
+				},
+			},
+			pod: corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Ports: []corev1.ContainerPort{
+								{
+									Name:          "https",
+									ContainerPort: int32(443)},
+							},
+						},
+					},
+				},
+			},
+			ports:      []string{"80"},
+			translated: []string{},
+			err:        true,
+		},
+		{
+			name: "test failure 2 (service port not declared)",
+			svc: corev1.Service{
+				Spec: corev1.ServiceSpec{
+					Ports: []corev1.ServicePort{
+						{
+							Port:       80,
+							TargetPort: intstr.FromString("http"),
+						},
+					},
+				},
+			},
+			pod: corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Ports: []corev1.ContainerPort{
+								{
+									Name:          "https",
+									ContainerPort: int32(443)},
+							},
+						},
+					},
+				},
+			},
+			ports:      []string{"443"},
+			translated: []string{},
+			err:        true,
 		},
 	}
-	for _, test := range tests {
-		var err error
-		f, tf, codec, ns := NewAPIFactory()
-		tf.Client = &fake.RESTClient{
-			NegotiatedSerializer: ns,
-			Client: fake.CreateHTTPClient(func(req *http.Request) (*http.Response, error) {
-				switch p, m := req.URL.Path, req.Method; {
-				case p == test.podPath && m == "GET":
-					body := objBody(codec, test.pod)
-					return &http.Response{StatusCode: 200, Header: defaultHeader(), Body: body}, nil
-				default:
-					// Ensures no GET is performed when deleting by name
-					t.Errorf("%s: unexpected request: %#v\n%#v", test.name, req.URL, req)
-					return nil, nil
-				}
-			}),
-		}
-		tf.Namespace = "test"
-		tf.ClientConfig = defaultClientConfig()
-		ff := &fakePortForwarder{}
-		if test.pfErr {
-			ff.pfErr = fmt.Errorf("pf error")
-		}
 
-		opts := &PortForwardOptions{}
-		cmd := NewCmdPortForward(f, os.Stdout, os.Stderr)
-		cmd.Run = func(cmd *cobra.Command, args []string) {
-			if err = opts.Complete(f, cmd, args, os.Stdout, os.Stderr); err != nil {
-				return
+	for _, tc := range cases {
+		translated, err := translateServicePortToTargetPort(tc.ports, tc.svc, tc.pod)
+		if err != nil {
+			if tc.err {
+				continue
 			}
-			opts.PortForwarder = ff
-			if err = opts.Validate(); err != nil {
-				return
-			}
-			err = opts.RunPortForward()
-		}
-		cmd.Flags().Set("pod", "foo")
 
-		cmd.Run(cmd, []string{":5000", ":1000"})
-
-		if test.pfErr && err != ff.pfErr {
-			t.Errorf("%s: Unexpected port-forward error: %v", test.name, err)
-		}
-		if !test.pfErr && err != nil {
-			t.Errorf("%s: Unexpected error: %v", test.name, err)
-		}
-		if test.pfErr {
+			t.Errorf("%v: unexpected error: %v", tc.name, err)
 			continue
 		}
 
-		if ff.url.Path != test.pfPath {
-			t.Errorf("%s: Did not get expected path for portforward request", test.name)
+		if tc.err {
+			t.Errorf("%v: unexpected success", tc.name)
+			continue
 		}
-		if ff.method != "POST" {
-			t.Errorf("%s: Did not get method for attach request: %s", test.name, ff.method)
+
+		if !reflect.DeepEqual(translated, tc.translated) {
+			t.Errorf("%v: expected %v; got %v", tc.name, tc.translated, translated)
 		}
 	}
 }

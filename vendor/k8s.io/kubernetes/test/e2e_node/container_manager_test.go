@@ -26,13 +26,17 @@ import (
 	"strings"
 	"time"
 
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/resource"
-	"k8s.io/kubernetes/pkg/util/uuid"
+	"k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/uuid"
+	runtimeapi "k8s.io/kubernetes/pkg/kubelet/apis/cri/runtime/v1alpha2"
 	"k8s.io/kubernetes/test/e2e/framework"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
+	imageutils "k8s.io/kubernetes/test/utils/image"
 )
 
 func getOOMScoreForPid(pid int) (int, error) {
@@ -69,15 +73,14 @@ func validateOOMScoreAdjSettingIsInRange(pid int, expectedMinOOMScoreAdj, expect
 	return nil
 }
 
-var _ = framework.KubeDescribe("Kubelet Container Manager [Serial]", func() {
+var _ = framework.KubeDescribe("Container Manager Misc [Serial]", func() {
 	f := framework.NewDefaultFramework("kubelet-container-manager")
-
-	Describe("Validate OOM score adjustments", func() {
+	Describe("Validate OOM score adjustments [NodeFeature:OOMScoreAdj]", func() {
 		Context("once the node is setup", func() {
-			It("docker daemon's oom-score-adj should be -999", func() {
-				dockerPids, err := getPidsForProcess(dockerProcessName, dockerPidFile)
-				Expect(err).To(BeNil(), "failed to get list of docker daemon pids")
-				for _, pid := range dockerPids {
+			It("container runtime's oom-score-adj should be -999", func() {
+				runtimePids, err := getPidsForProcess(framework.TestContext.ContainerRuntimeProcessName, framework.TestContext.ContainerRuntimePidFile)
+				Expect(err).To(BeNil(), "failed to get list of container runtime pids")
+				for _, pid := range runtimePids {
 					Eventually(func() error {
 						return validateOOMScoreAdjSetting(pid, -999)
 					}, 5*time.Minute, 30*time.Second).Should(BeNil())
@@ -91,67 +94,96 @@ var _ = framework.KubeDescribe("Kubelet Container Manager [Serial]", func() {
 					return validateOOMScoreAdjSetting(kubeletPids[0], -999)
 				}, 5*time.Minute, 30*time.Second).Should(BeNil())
 			})
-			It("pod infra containers oom-score-adj should be -998 and best effort container's should be 1000", func() {
-				var err error
-				podClient := f.PodClient()
-				podName := "besteffort" + string(uuid.NewUUID())
-				podClient.Create(&api.Pod{
-					ObjectMeta: api.ObjectMeta{
-						Name: podName,
-					},
-					Spec: api.PodSpec{
-						Containers: []api.Container{
-							{
-								Image: "gcr.io/google_containers/serve_hostname:v1.4",
-								Name:  podName,
+			Context("", func() {
+				It("pod infra containers oom-score-adj should be -998 and best effort container's should be 1000", func() {
+					// Take a snapshot of existing pause processes. These were
+					// created before this test, and may not be infra
+					// containers. They should be excluded from the test.
+					existingPausePIDs, err := getPidsForProcess("pause", "")
+					Expect(err).To(BeNil(), "failed to list all pause processes on the node")
+					existingPausePIDSet := sets.NewInt(existingPausePIDs...)
+
+					podClient := f.PodClient()
+					podName := "besteffort" + string(uuid.NewUUID())
+					podClient.Create(&v1.Pod{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: podName,
+						},
+						Spec: v1.PodSpec{
+							Containers: []v1.Container{
+								{
+									Image: framework.ServeHostnameImage,
+									Name:  podName,
+								},
 							},
 						},
-					},
+					})
+					var pausePids []int
+					By("checking infra container's oom-score-adj")
+					Eventually(func() error {
+						pausePids, err = getPidsForProcess("pause", "")
+						if err != nil {
+							return fmt.Errorf("failed to get list of pause pids: %v", err)
+						}
+						for _, pid := range pausePids {
+							if existingPausePIDSet.Has(pid) {
+								// Not created by this test. Ignore it.
+								continue
+							}
+							if err := validateOOMScoreAdjSetting(pid, -998); err != nil {
+								return err
+							}
+						}
+						return nil
+					}, 2*time.Minute, time.Second*4).Should(BeNil())
+					var shPids []int
+					By("checking besteffort container's oom-score-adj")
+					Eventually(func() error {
+						shPids, err = getPidsForProcess("serve_hostname", "")
+						if err != nil {
+							return fmt.Errorf("failed to get list of serve hostname process pids: %v", err)
+						}
+						if len(shPids) != 1 {
+							return fmt.Errorf("expected only one serve_hostname process; found %d", len(shPids))
+						}
+						return validateOOMScoreAdjSetting(shPids[0], 1000)
+					}, 2*time.Minute, time.Second*4).Should(BeNil())
 				})
-				var pausePids []int
-				By("checking infra container's oom-score-adj")
-				Eventually(func() error {
-					pausePids, err = getPidsForProcess("pause", "")
-					if err != nil {
-						return fmt.Errorf("failed to get list of pause pids: %v", err)
-					}
-					for _, pid := range pausePids {
-						if err := validateOOMScoreAdjSetting(pid, -998); err != nil {
-							return err
+				// Log the running containers here to help debugging.
+				AfterEach(func() {
+					if CurrentGinkgoTestDescription().Failed {
+						By("Dump all running containers")
+						runtime, _, err := getCRIClient()
+						Expect(err).NotTo(HaveOccurred())
+						containers, err := runtime.ListContainers(&runtimeapi.ContainerFilter{
+							State: &runtimeapi.ContainerStateValue{
+								State: runtimeapi.ContainerState_CONTAINER_RUNNING,
+							},
+						})
+						Expect(err).NotTo(HaveOccurred())
+						framework.Logf("Running containers:")
+						for _, c := range containers {
+							framework.Logf("%+v", c)
 						}
 					}
-					return nil
-				}, 2*time.Minute, time.Second*4).Should(BeNil())
-				var shPids []int
-				By("checking besteffort container's oom-score-adj")
-				Eventually(func() error {
-					shPids, err = getPidsForProcess("serve_hostname", "")
-					if err != nil {
-						return fmt.Errorf("failed to get list of serve hostname process pids: %v", err)
-					}
-					if len(shPids) != 1 {
-						return fmt.Errorf("expected only one serve_hostname process; found %d", len(shPids))
-					}
-					return validateOOMScoreAdjSetting(shPids[0], 1000)
-				}, 2*time.Minute, time.Second*4).Should(BeNil())
-
+				})
 			})
 			It("guaranteed container's oom-score-adj should be -998", func() {
 				podClient := f.PodClient()
 				podName := "guaranteed" + string(uuid.NewUUID())
-				podClient.Create(&api.Pod{
-					ObjectMeta: api.ObjectMeta{
+				podClient.Create(&v1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
 						Name: podName,
 					},
-					Spec: api.PodSpec{
-						Containers: []api.Container{
+					Spec: v1.PodSpec{
+						Containers: []v1.Container{
 							{
-								Image: "gcr.io/google_containers/nginx-slim:0.7",
+								Image: imageutils.GetE2EImage(imageutils.Nginx),
 								Name:  podName,
-								Resources: api.ResourceRequirements{
-									Limits: api.ResourceList{
-										"cpu":    resource.MustParse("100m"),
-										"memory": resource.MustParse("50Mi"),
+								Resources: v1.ResourceRequirements{
+									Limits: v1.ResourceList{
+										v1.ResourceCPU:    resource.MustParse("100m"),
+										v1.ResourceMemory: resource.MustParse("50Mi"),
 									},
 								},
 							},
@@ -180,19 +212,19 @@ var _ = framework.KubeDescribe("Kubelet Container Manager [Serial]", func() {
 			It("burstable container's oom-score-adj should be between [2, 1000)", func() {
 				podClient := f.PodClient()
 				podName := "burstable" + string(uuid.NewUUID())
-				podClient.Create(&api.Pod{
-					ObjectMeta: api.ObjectMeta{
+				podClient.Create(&v1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
 						Name: podName,
 					},
-					Spec: api.PodSpec{
-						Containers: []api.Container{
+					Spec: v1.PodSpec{
+						Containers: []v1.Container{
 							{
-								Image: "gcr.io/google_containers/test-webserver:e2e",
+								Image: imageutils.GetE2EImage(imageutils.TestWebserver),
 								Name:  podName,
-								Resources: api.ResourceRequirements{
-									Requests: api.ResourceList{
-										"cpu":    resource.MustParse("100m"),
-										"memory": resource.MustParse("50Mi"),
+								Resources: v1.ResourceRequirements{
+									Requests: v1.ResourceList{
+										v1.ResourceCPU:    resource.MustParse("100m"),
+										v1.ResourceMemory: resource.MustParse("50Mi"),
 									},
 								},
 							},

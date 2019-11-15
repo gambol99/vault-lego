@@ -14,7 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// +k8s:deepcopy-gen=package,register
+// +k8s:deepcopy-gen=package
 // +groupName=storage.k8s.io
-// +g8k:openapi-gen=true
 package storage // import "k8s.io/kubernetes/pkg/apis/storage"

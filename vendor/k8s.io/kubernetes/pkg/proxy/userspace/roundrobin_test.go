@@ -20,9 +20,10 @@ import (
 	"net"
 	"testing"
 
-	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/kubernetes/pkg/proxy"
-	"k8s.io/kubernetes/pkg/types"
 )
 
 func TestValidateWorks(t *testing.T) {
@@ -66,8 +67,6 @@ func TestFilterWorks(t *testing.T) {
 
 func TestLoadBalanceFailsWithNoEndpoints(t *testing.T) {
 	loadBalancer := NewLoadBalancerRR()
-	var endpoints []api.Endpoints
-	loadBalancer.OnEndpointsUpdate(endpoints)
 	service := proxy.ServicePortName{NamespacedName: types.NamespacedName{Namespace: "testnamespace", Name: "foo"}, Port: "does-not-exist"}
 	endpoint, err := loadBalancer.NextEndpoint(service, nil, false)
 	if err == nil {
@@ -105,15 +104,14 @@ func TestLoadBalanceWorksWithSingleEndpoint(t *testing.T) {
 	if err == nil || len(endpoint) != 0 {
 		t.Errorf("Didn't fail with non-existent service")
 	}
-	endpoints := make([]api.Endpoints, 1)
-	endpoints[0] = api.Endpoints{
-		ObjectMeta: api.ObjectMeta{Name: service.Name, Namespace: service.Namespace},
-		Subsets: []api.EndpointSubset{{
-			Addresses: []api.EndpointAddress{{IP: "endpoint1"}},
-			Ports:     []api.EndpointPort{{Name: "p", Port: 40}},
+	endpoints := &v1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{Name: service.Name, Namespace: service.Namespace},
+		Subsets: []v1.EndpointSubset{{
+			Addresses: []v1.EndpointAddress{{IP: "endpoint1"}},
+			Ports:     []v1.EndpointPort{{Name: "p", Port: 40}},
 		}},
 	}
-	loadBalancer.OnEndpointsUpdate(endpoints)
+	loadBalancer.OnEndpointsAdd(endpoints)
 	expectEndpoint(t, loadBalancer, service, "endpoint1:40", nil)
 	expectEndpoint(t, loadBalancer, service, "endpoint1:40", nil)
 	expectEndpoint(t, loadBalancer, service, "endpoint1:40", nil)
@@ -143,15 +141,14 @@ func TestLoadBalanceWorksWithMultipleEndpoints(t *testing.T) {
 	if err == nil || len(endpoint) != 0 {
 		t.Errorf("Didn't fail with non-existent service")
 	}
-	endpoints := make([]api.Endpoints, 1)
-	endpoints[0] = api.Endpoints{
-		ObjectMeta: api.ObjectMeta{Name: service.Name, Namespace: service.Namespace},
-		Subsets: []api.EndpointSubset{{
-			Addresses: []api.EndpointAddress{{IP: "endpoint"}},
-			Ports:     []api.EndpointPort{{Name: "p", Port: 1}, {Name: "p", Port: 2}, {Name: "p", Port: 3}},
+	endpoints := &v1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{Name: service.Name, Namespace: service.Namespace},
+		Subsets: []v1.EndpointSubset{{
+			Addresses: []v1.EndpointAddress{{IP: "endpoint"}},
+			Ports:     []v1.EndpointPort{{Name: "p", Port: 1}, {Name: "p", Port: 2}, {Name: "p", Port: 3}},
 		}},
 	}
-	loadBalancer.OnEndpointsUpdate(endpoints)
+	loadBalancer.OnEndpointsAdd(endpoints)
 
 	shuffledEndpoints := loadBalancer.services[service].endpoints
 	if !stringsInSlice(shuffledEndpoints, "endpoint:1", "endpoint:2", "endpoint:3") {
@@ -171,21 +168,20 @@ func TestLoadBalanceWorksWithMultipleEndpointsMultiplePorts(t *testing.T) {
 	if err == nil || len(endpoint) != 0 {
 		t.Errorf("Didn't fail with non-existent service")
 	}
-	endpoints := make([]api.Endpoints, 1)
-	endpoints[0] = api.Endpoints{
-		ObjectMeta: api.ObjectMeta{Name: serviceP.Name, Namespace: serviceP.Namespace},
-		Subsets: []api.EndpointSubset{
+	endpoints := &v1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{Name: serviceP.Name, Namespace: serviceP.Namespace},
+		Subsets: []v1.EndpointSubset{
 			{
-				Addresses: []api.EndpointAddress{{IP: "endpoint1"}, {IP: "endpoint2"}},
-				Ports:     []api.EndpointPort{{Name: "p", Port: 1}, {Name: "q", Port: 2}},
+				Addresses: []v1.EndpointAddress{{IP: "endpoint1"}, {IP: "endpoint2"}},
+				Ports:     []v1.EndpointPort{{Name: "p", Port: 1}, {Name: "q", Port: 2}},
 			},
 			{
-				Addresses: []api.EndpointAddress{{IP: "endpoint3"}},
-				Ports:     []api.EndpointPort{{Name: "p", Port: 3}, {Name: "q", Port: 4}},
+				Addresses: []v1.EndpointAddress{{IP: "endpoint3"}},
+				Ports:     []v1.EndpointPort{{Name: "p", Port: 3}, {Name: "q", Port: 4}},
 			},
 		},
 	}
-	loadBalancer.OnEndpointsUpdate(endpoints)
+	loadBalancer.OnEndpointsAdd(endpoints)
 
 	shuffledEndpoints := loadBalancer.services[serviceP].endpoints
 	if !stringsInSlice(shuffledEndpoints, "endpoint1:1", "endpoint2:1", "endpoint3:3") {
@@ -214,25 +210,24 @@ func TestLoadBalanceWorksWithMultipleEndpointsAndUpdates(t *testing.T) {
 	if err == nil || len(endpoint) != 0 {
 		t.Errorf("Didn't fail with non-existent service")
 	}
-	endpoints := make([]api.Endpoints, 1)
-	endpoints[0] = api.Endpoints{
-		ObjectMeta: api.ObjectMeta{Name: serviceP.Name, Namespace: serviceP.Namespace},
-		Subsets: []api.EndpointSubset{
+	endpointsv1 := &v1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{Name: serviceP.Name, Namespace: serviceP.Namespace},
+		Subsets: []v1.EndpointSubset{
 			{
-				Addresses: []api.EndpointAddress{{IP: "endpoint1"}},
-				Ports:     []api.EndpointPort{{Name: "p", Port: 1}, {Name: "q", Port: 10}},
+				Addresses: []v1.EndpointAddress{{IP: "endpoint1"}},
+				Ports:     []v1.EndpointPort{{Name: "p", Port: 1}, {Name: "q", Port: 10}},
 			},
 			{
-				Addresses: []api.EndpointAddress{{IP: "endpoint2"}},
-				Ports:     []api.EndpointPort{{Name: "p", Port: 2}, {Name: "q", Port: 20}},
+				Addresses: []v1.EndpointAddress{{IP: "endpoint2"}},
+				Ports:     []v1.EndpointPort{{Name: "p", Port: 2}, {Name: "q", Port: 20}},
 			},
 			{
-				Addresses: []api.EndpointAddress{{IP: "endpoint3"}},
-				Ports:     []api.EndpointPort{{Name: "p", Port: 3}, {Name: "q", Port: 30}},
+				Addresses: []v1.EndpointAddress{{IP: "endpoint3"}},
+				Ports:     []v1.EndpointPort{{Name: "p", Port: 3}, {Name: "q", Port: 30}},
 			},
 		},
 	}
-	loadBalancer.OnEndpointsUpdate(endpoints)
+	loadBalancer.OnEndpointsAdd(endpointsv1)
 
 	shuffledEndpoints := loadBalancer.services[serviceP].endpoints
 	if !stringsInSlice(shuffledEndpoints, "endpoint1:1", "endpoint2:2", "endpoint3:3") {
@@ -254,20 +249,20 @@ func TestLoadBalanceWorksWithMultipleEndpointsAndUpdates(t *testing.T) {
 
 	// Then update the configuration with one fewer endpoints, make sure
 	// we start in the beginning again
-	endpoints[0] = api.Endpoints{
-		ObjectMeta: api.ObjectMeta{Name: serviceP.Name, Namespace: serviceP.Namespace},
-		Subsets: []api.EndpointSubset{
+	endpointsv2 := &v1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{Name: serviceP.Name, Namespace: serviceP.Namespace},
+		Subsets: []v1.EndpointSubset{
 			{
-				Addresses: []api.EndpointAddress{{IP: "endpoint4"}},
-				Ports:     []api.EndpointPort{{Name: "p", Port: 4}, {Name: "q", Port: 40}},
+				Addresses: []v1.EndpointAddress{{IP: "endpoint4"}},
+				Ports:     []v1.EndpointPort{{Name: "p", Port: 4}, {Name: "q", Port: 40}},
 			},
 			{
-				Addresses: []api.EndpointAddress{{IP: "endpoint5"}},
-				Ports:     []api.EndpointPort{{Name: "p", Port: 5}, {Name: "q", Port: 50}},
+				Addresses: []v1.EndpointAddress{{IP: "endpoint5"}},
+				Ports:     []v1.EndpointPort{{Name: "p", Port: 5}, {Name: "q", Port: 50}},
 			},
 		},
 	}
-	loadBalancer.OnEndpointsUpdate(endpoints)
+	loadBalancer.OnEndpointsUpdate(endpointsv1, endpointsv2)
 
 	shuffledEndpoints = loadBalancer.services[serviceP].endpoints
 	if !stringsInSlice(shuffledEndpoints, "endpoint4:4", "endpoint5:5") {
@@ -288,8 +283,8 @@ func TestLoadBalanceWorksWithMultipleEndpointsAndUpdates(t *testing.T) {
 	expectEndpoint(t, loadBalancer, serviceQ, shuffledEndpoints[1], nil)
 
 	// Clear endpoints
-	endpoints[0] = api.Endpoints{ObjectMeta: api.ObjectMeta{Name: serviceP.Name, Namespace: serviceP.Namespace}, Subsets: nil}
-	loadBalancer.OnEndpointsUpdate(endpoints)
+	endpointsv3 := &v1.Endpoints{ObjectMeta: metav1.ObjectMeta{Name: serviceP.Name, Namespace: serviceP.Namespace}, Subsets: nil}
+	loadBalancer.OnEndpointsUpdate(endpointsv2, endpointsv3)
 
 	endpoint, err = loadBalancer.NextEndpoint(serviceP, nil, false)
 	if err == nil || len(endpoint) != 0 {
@@ -305,26 +300,26 @@ func TestLoadBalanceWorksWithServiceRemoval(t *testing.T) {
 	if err == nil || len(endpoint) != 0 {
 		t.Errorf("Didn't fail with non-existent service")
 	}
-	endpoints := make([]api.Endpoints, 2)
-	endpoints[0] = api.Endpoints{
-		ObjectMeta: api.ObjectMeta{Name: fooServiceP.Name, Namespace: fooServiceP.Namespace},
-		Subsets: []api.EndpointSubset{
+	endpoints1 := &v1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{Name: fooServiceP.Name, Namespace: fooServiceP.Namespace},
+		Subsets: []v1.EndpointSubset{
 			{
-				Addresses: []api.EndpointAddress{{IP: "endpoint1"}, {IP: "endpoint2"}, {IP: "endpoint3"}},
-				Ports:     []api.EndpointPort{{Name: "p", Port: 123}},
+				Addresses: []v1.EndpointAddress{{IP: "endpoint1"}, {IP: "endpoint2"}, {IP: "endpoint3"}},
+				Ports:     []v1.EndpointPort{{Name: "p", Port: 123}},
 			},
 		},
 	}
-	endpoints[1] = api.Endpoints{
-		ObjectMeta: api.ObjectMeta{Name: barServiceP.Name, Namespace: barServiceP.Namespace},
-		Subsets: []api.EndpointSubset{
+	endpoints2 := &v1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{Name: barServiceP.Name, Namespace: barServiceP.Namespace},
+		Subsets: []v1.EndpointSubset{
 			{
-				Addresses: []api.EndpointAddress{{IP: "endpoint4"}, {IP: "endpoint5"}, {IP: "endpoint6"}},
-				Ports:     []api.EndpointPort{{Name: "p", Port: 456}},
+				Addresses: []v1.EndpointAddress{{IP: "endpoint4"}, {IP: "endpoint5"}, {IP: "endpoint6"}},
+				Ports:     []v1.EndpointPort{{Name: "p", Port: 456}},
 			},
 		},
 	}
-	loadBalancer.OnEndpointsUpdate(endpoints)
+	loadBalancer.OnEndpointsAdd(endpoints1)
+	loadBalancer.OnEndpointsAdd(endpoints2)
 	shuffledFooEndpoints := loadBalancer.services[fooServiceP].endpoints
 	expectEndpoint(t, loadBalancer, fooServiceP, shuffledFooEndpoints[0], nil)
 	expectEndpoint(t, loadBalancer, fooServiceP, shuffledFooEndpoints[1], nil)
@@ -340,7 +335,7 @@ func TestLoadBalanceWorksWithServiceRemoval(t *testing.T) {
 	expectEndpoint(t, loadBalancer, barServiceP, shuffledBarEndpoints[1], nil)
 
 	// Then update the configuration by removing foo
-	loadBalancer.OnEndpointsUpdate(endpoints[1:])
+	loadBalancer.OnEndpointsDelete(endpoints1)
 	endpoint, err = loadBalancer.NextEndpoint(fooServiceP, nil, false)
 	if err == nil || len(endpoint) != 0 {
 		t.Errorf("Didn't fail with non-existent service")
@@ -362,17 +357,16 @@ func TestStickyLoadBalanceWorksWithNewServiceCalledFirst(t *testing.T) {
 	}
 
 	// Call NewService() before OnEndpointsUpdate()
-	loadBalancer.NewService(service, api.ServiceAffinityClientIP, 0)
-	endpoints := make([]api.Endpoints, 1)
-	endpoints[0] = api.Endpoints{
-		ObjectMeta: api.ObjectMeta{Name: service.Name, Namespace: service.Namespace},
-		Subsets: []api.EndpointSubset{
-			{Addresses: []api.EndpointAddress{{IP: "endpoint1"}}, Ports: []api.EndpointPort{{Port: 1}}},
-			{Addresses: []api.EndpointAddress{{IP: "endpoint2"}}, Ports: []api.EndpointPort{{Port: 2}}},
-			{Addresses: []api.EndpointAddress{{IP: "endpoint3"}}, Ports: []api.EndpointPort{{Port: 3}}},
+	loadBalancer.NewService(service, v1.ServiceAffinityClientIP, int(v1.DefaultClientIPServiceAffinitySeconds))
+	endpoints := &v1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{Name: service.Name, Namespace: service.Namespace},
+		Subsets: []v1.EndpointSubset{
+			{Addresses: []v1.EndpointAddress{{IP: "endpoint1"}}, Ports: []v1.EndpointPort{{Port: 1}}},
+			{Addresses: []v1.EndpointAddress{{IP: "endpoint2"}}, Ports: []v1.EndpointPort{{Port: 2}}},
+			{Addresses: []v1.EndpointAddress{{IP: "endpoint3"}}, Ports: []v1.EndpointPort{{Port: 3}}},
 		},
 	}
-	loadBalancer.OnEndpointsUpdate(endpoints)
+	loadBalancer.OnEndpointsAdd(endpoints)
 
 	client1 := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0}
 	client2 := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 2), Port: 0}
@@ -419,16 +413,15 @@ func TestStickyLoadBalanceWorksWithNewServiceCalledSecond(t *testing.T) {
 	}
 
 	// Call OnEndpointsUpdate() before NewService()
-	endpoints := make([]api.Endpoints, 1)
-	endpoints[0] = api.Endpoints{
-		ObjectMeta: api.ObjectMeta{Name: service.Name, Namespace: service.Namespace},
-		Subsets: []api.EndpointSubset{
-			{Addresses: []api.EndpointAddress{{IP: "endpoint1"}}, Ports: []api.EndpointPort{{Port: 1}}},
-			{Addresses: []api.EndpointAddress{{IP: "endpoint2"}}, Ports: []api.EndpointPort{{Port: 2}}},
+	endpoints := &v1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{Name: service.Name, Namespace: service.Namespace},
+		Subsets: []v1.EndpointSubset{
+			{Addresses: []v1.EndpointAddress{{IP: "endpoint1"}}, Ports: []v1.EndpointPort{{Port: 1}}},
+			{Addresses: []v1.EndpointAddress{{IP: "endpoint2"}}, Ports: []v1.EndpointPort{{Port: 2}}},
 		},
 	}
-	loadBalancer.OnEndpointsUpdate(endpoints)
-	loadBalancer.NewService(service, api.ServiceAffinityClientIP, 0)
+	loadBalancer.OnEndpointsAdd(endpoints)
+	loadBalancer.NewService(service, v1.ServiceAffinityClientIP, int(v1.DefaultClientIPServiceAffinitySeconds))
 
 	client1 := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0}
 	client2 := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 2), Port: 0}
@@ -480,18 +473,17 @@ func TestStickyLoadBalanaceWorksWithMultipleEndpointsRemoveOne(t *testing.T) {
 		t.Errorf("Didn't fail with non-existent service")
 	}
 
-	loadBalancer.NewService(service, api.ServiceAffinityClientIP, 0)
-	endpoints := make([]api.Endpoints, 1)
-	endpoints[0] = api.Endpoints{
-		ObjectMeta: api.ObjectMeta{Name: service.Name, Namespace: service.Namespace},
-		Subsets: []api.EndpointSubset{
+	loadBalancer.NewService(service, v1.ServiceAffinityClientIP, int(v1.DefaultClientIPServiceAffinitySeconds))
+	endpointsv1 := &v1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{Name: service.Name, Namespace: service.Namespace},
+		Subsets: []v1.EndpointSubset{
 			{
-				Addresses: []api.EndpointAddress{{IP: "endpoint"}},
-				Ports:     []api.EndpointPort{{Port: 1}, {Port: 2}, {Port: 3}},
+				Addresses: []v1.EndpointAddress{{IP: "endpoint"}},
+				Ports:     []v1.EndpointPort{{Port: 1}, {Port: 2}, {Port: 3}},
 			},
 		},
 	}
-	loadBalancer.OnEndpointsUpdate(endpoints)
+	loadBalancer.OnEndpointsAdd(endpointsv1)
 	shuffledEndpoints := loadBalancer.services[service].endpoints
 	expectEndpoint(t, loadBalancer, service, shuffledEndpoints[0], client1)
 	client1Endpoint := shuffledEndpoints[0]
@@ -502,16 +494,16 @@ func TestStickyLoadBalanaceWorksWithMultipleEndpointsRemoveOne(t *testing.T) {
 	expectEndpoint(t, loadBalancer, service, shuffledEndpoints[2], client3)
 	client3Endpoint := shuffledEndpoints[2]
 
-	endpoints[0] = api.Endpoints{
-		ObjectMeta: api.ObjectMeta{Name: service.Name, Namespace: service.Namespace},
-		Subsets: []api.EndpointSubset{
+	endpointsv2 := &v1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{Name: service.Name, Namespace: service.Namespace},
+		Subsets: []v1.EndpointSubset{
 			{
-				Addresses: []api.EndpointAddress{{IP: "endpoint"}},
-				Ports:     []api.EndpointPort{{Port: 1}, {Port: 2}},
+				Addresses: []v1.EndpointAddress{{IP: "endpoint"}},
+				Ports:     []v1.EndpointPort{{Port: 1}, {Port: 2}},
 			},
 		},
 	}
-	loadBalancer.OnEndpointsUpdate(endpoints)
+	loadBalancer.OnEndpointsUpdate(endpointsv1, endpointsv2)
 	shuffledEndpoints = loadBalancer.services[service].endpoints
 	if client1Endpoint == "endpoint:3" {
 		client1Endpoint = shuffledEndpoints[0]
@@ -524,16 +516,16 @@ func TestStickyLoadBalanaceWorksWithMultipleEndpointsRemoveOne(t *testing.T) {
 	expectEndpoint(t, loadBalancer, service, client2Endpoint, client2)
 	expectEndpoint(t, loadBalancer, service, client3Endpoint, client3)
 
-	endpoints[0] = api.Endpoints{
-		ObjectMeta: api.ObjectMeta{Name: service.Name, Namespace: service.Namespace},
-		Subsets: []api.EndpointSubset{
+	endpointsv3 := &v1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{Name: service.Name, Namespace: service.Namespace},
+		Subsets: []v1.EndpointSubset{
 			{
-				Addresses: []api.EndpointAddress{{IP: "endpoint"}},
-				Ports:     []api.EndpointPort{{Port: 1}, {Port: 2}, {Port: 4}},
+				Addresses: []v1.EndpointAddress{{IP: "endpoint"}},
+				Ports:     []v1.EndpointPort{{Port: 1}, {Port: 2}, {Port: 4}},
 			},
 		},
 	}
-	loadBalancer.OnEndpointsUpdate(endpoints)
+	loadBalancer.OnEndpointsUpdate(endpointsv2, endpointsv3)
 	shuffledEndpoints = loadBalancer.services[service].endpoints
 	expectEndpoint(t, loadBalancer, service, client1Endpoint, client1)
 	expectEndpoint(t, loadBalancer, service, client2Endpoint, client2)
@@ -554,18 +546,17 @@ func TestStickyLoadBalanceWorksWithMultipleEndpointsAndUpdates(t *testing.T) {
 		t.Errorf("Didn't fail with non-existent service")
 	}
 
-	loadBalancer.NewService(service, api.ServiceAffinityClientIP, 0)
-	endpoints := make([]api.Endpoints, 1)
-	endpoints[0] = api.Endpoints{
-		ObjectMeta: api.ObjectMeta{Name: service.Name, Namespace: service.Namespace},
-		Subsets: []api.EndpointSubset{
+	loadBalancer.NewService(service, v1.ServiceAffinityClientIP, int(v1.DefaultClientIPServiceAffinitySeconds))
+	endpointsv1 := &v1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{Name: service.Name, Namespace: service.Namespace},
+		Subsets: []v1.EndpointSubset{
 			{
-				Addresses: []api.EndpointAddress{{IP: "endpoint"}},
-				Ports:     []api.EndpointPort{{Port: 1}, {Port: 2}, {Port: 3}},
+				Addresses: []v1.EndpointAddress{{IP: "endpoint"}},
+				Ports:     []v1.EndpointPort{{Port: 1}, {Port: 2}, {Port: 3}},
 			},
 		},
 	}
-	loadBalancer.OnEndpointsUpdate(endpoints)
+	loadBalancer.OnEndpointsAdd(endpointsv1)
 	shuffledEndpoints := loadBalancer.services[service].endpoints
 	expectEndpoint(t, loadBalancer, service, shuffledEndpoints[0], client1)
 	expectEndpoint(t, loadBalancer, service, shuffledEndpoints[0], client1)
@@ -576,16 +567,16 @@ func TestStickyLoadBalanceWorksWithMultipleEndpointsAndUpdates(t *testing.T) {
 	expectEndpoint(t, loadBalancer, service, shuffledEndpoints[1], client2)
 	// Then update the configuration with one fewer endpoints, make sure
 	// we start in the beginning again
-	endpoints[0] = api.Endpoints{
-		ObjectMeta: api.ObjectMeta{Name: service.Name, Namespace: service.Namespace},
-		Subsets: []api.EndpointSubset{
+	endpointsv2 := &v1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{Name: service.Name, Namespace: service.Namespace},
+		Subsets: []v1.EndpointSubset{
 			{
-				Addresses: []api.EndpointAddress{{IP: "endpoint"}},
-				Ports:     []api.EndpointPort{{Port: 4}, {Port: 5}},
+				Addresses: []v1.EndpointAddress{{IP: "endpoint"}},
+				Ports:     []v1.EndpointPort{{Port: 4}, {Port: 5}},
 			},
 		},
 	}
-	loadBalancer.OnEndpointsUpdate(endpoints)
+	loadBalancer.OnEndpointsUpdate(endpointsv1, endpointsv2)
 	shuffledEndpoints = loadBalancer.services[service].endpoints
 	expectEndpoint(t, loadBalancer, service, shuffledEndpoints[0], client1)
 	expectEndpoint(t, loadBalancer, service, shuffledEndpoints[1], client2)
@@ -595,8 +586,8 @@ func TestStickyLoadBalanceWorksWithMultipleEndpointsAndUpdates(t *testing.T) {
 	expectEndpoint(t, loadBalancer, service, shuffledEndpoints[1], client2)
 
 	// Clear endpoints
-	endpoints[0] = api.Endpoints{ObjectMeta: api.ObjectMeta{Name: service.Name, Namespace: service.Namespace}, Subsets: nil}
-	loadBalancer.OnEndpointsUpdate(endpoints)
+	endpointsv3 := &v1.Endpoints{ObjectMeta: metav1.ObjectMeta{Name: service.Name, Namespace: service.Namespace}, Subsets: nil}
+	loadBalancer.OnEndpointsUpdate(endpointsv2, endpointsv3)
 
 	endpoint, err = loadBalancer.NextEndpoint(service, nil, false)
 	if err == nil || len(endpoint) != 0 {
@@ -614,29 +605,29 @@ func TestStickyLoadBalanceWorksWithServiceRemoval(t *testing.T) {
 	if err == nil || len(endpoint) != 0 {
 		t.Errorf("Didn't fail with non-existent service")
 	}
-	loadBalancer.NewService(fooService, api.ServiceAffinityClientIP, 0)
-	endpoints := make([]api.Endpoints, 2)
-	endpoints[0] = api.Endpoints{
-		ObjectMeta: api.ObjectMeta{Name: fooService.Name, Namespace: fooService.Namespace},
-		Subsets: []api.EndpointSubset{
+	loadBalancer.NewService(fooService, v1.ServiceAffinityClientIP, int(v1.DefaultClientIPServiceAffinitySeconds))
+	endpoints1 := &v1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{Name: fooService.Name, Namespace: fooService.Namespace},
+		Subsets: []v1.EndpointSubset{
 			{
-				Addresses: []api.EndpointAddress{{IP: "endpoint"}},
-				Ports:     []api.EndpointPort{{Port: 1}, {Port: 2}, {Port: 3}},
+				Addresses: []v1.EndpointAddress{{IP: "endpoint"}},
+				Ports:     []v1.EndpointPort{{Port: 1}, {Port: 2}, {Port: 3}},
 			},
 		},
 	}
 	barService := proxy.ServicePortName{NamespacedName: types.NamespacedName{Namespace: "testnamespace", Name: "bar"}, Port: ""}
-	loadBalancer.NewService(barService, api.ServiceAffinityClientIP, 0)
-	endpoints[1] = api.Endpoints{
-		ObjectMeta: api.ObjectMeta{Name: barService.Name, Namespace: barService.Namespace},
-		Subsets: []api.EndpointSubset{
+	loadBalancer.NewService(barService, v1.ServiceAffinityClientIP, int(v1.DefaultClientIPServiceAffinitySeconds))
+	endpoints2 := &v1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{Name: barService.Name, Namespace: barService.Namespace},
+		Subsets: []v1.EndpointSubset{
 			{
-				Addresses: []api.EndpointAddress{{IP: "endpoint"}},
-				Ports:     []api.EndpointPort{{Port: 4}, {Port: 5}},
+				Addresses: []v1.EndpointAddress{{IP: "endpoint"}},
+				Ports:     []v1.EndpointPort{{Port: 4}, {Port: 5}},
 			},
 		},
 	}
-	loadBalancer.OnEndpointsUpdate(endpoints)
+	loadBalancer.OnEndpointsAdd(endpoints1)
+	loadBalancer.OnEndpointsAdd(endpoints2)
 
 	shuffledFooEndpoints := loadBalancer.services[fooService].endpoints
 	expectEndpoint(t, loadBalancer, fooService, shuffledFooEndpoints[0], client1)
@@ -658,7 +649,7 @@ func TestStickyLoadBalanceWorksWithServiceRemoval(t *testing.T) {
 	expectEndpoint(t, loadBalancer, barService, shuffledBarEndpoints[1], client2)
 
 	// Then update the configuration by removing foo
-	loadBalancer.OnEndpointsUpdate(endpoints[1:])
+	loadBalancer.OnEndpointsDelete(endpoints1)
 	endpoint, err = loadBalancer.NextEndpoint(fooService, nil, false)
 	if err == nil || len(endpoint) != 0 {
 		t.Errorf("Didn't fail with non-existent service")
@@ -683,17 +674,16 @@ func TestStickyLoadBalanceWorksWithEndpointFails(t *testing.T) {
 	}
 
 	// Call NewService() before OnEndpointsUpdate()
-	loadBalancer.NewService(service, api.ServiceAffinityClientIP, 0)
-	endpoints := make([]api.Endpoints, 1)
-	endpoints[0] = api.Endpoints{
-		ObjectMeta: api.ObjectMeta{Name: service.Name, Namespace: service.Namespace},
-		Subsets: []api.EndpointSubset{
-			{Addresses: []api.EndpointAddress{{IP: "endpoint1"}}, Ports: []api.EndpointPort{{Port: 1}}},
-			{Addresses: []api.EndpointAddress{{IP: "endpoint2"}}, Ports: []api.EndpointPort{{Port: 2}}},
-			{Addresses: []api.EndpointAddress{{IP: "endpoint3"}}, Ports: []api.EndpointPort{{Port: 3}}},
+	loadBalancer.NewService(service, v1.ServiceAffinityClientIP, int(v1.DefaultClientIPServiceAffinitySeconds))
+	endpoints := &v1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{Name: service.Name, Namespace: service.Namespace},
+		Subsets: []v1.EndpointSubset{
+			{Addresses: []v1.EndpointAddress{{IP: "endpoint1"}}, Ports: []v1.EndpointPort{{Port: 1}}},
+			{Addresses: []v1.EndpointAddress{{IP: "endpoint2"}}, Ports: []v1.EndpointPort{{Port: 2}}},
+			{Addresses: []v1.EndpointAddress{{IP: "endpoint3"}}, Ports: []v1.EndpointPort{{Port: 3}}},
 		},
 	}
-	loadBalancer.OnEndpointsUpdate(endpoints)
+	loadBalancer.OnEndpointsAdd(endpoints)
 
 	client1 := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0}
 	client2 := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 2), Port: 0}

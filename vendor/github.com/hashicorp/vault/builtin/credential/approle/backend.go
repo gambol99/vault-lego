@@ -1,9 +1,10 @@
 package approle
 
 import (
-	"fmt"
+	"context"
 	"sync"
 
+	"github.com/hashicorp/vault/helper/consts"
 	"github.com/hashicorp/vault/helper/locksutil"
 	"github.com/hashicorp/vault/helper/salt"
 	"github.com/hashicorp/vault/logical"
@@ -15,97 +16,69 @@ type backend struct {
 
 	// The salt value to be used by the information to be accessed only
 	// by this backend.
-	salt *salt.Salt
+	salt      *salt.Salt
+	saltMutex sync.RWMutex
+
+	// The view to use when creating the salt
+	view logical.Storage
 
 	// Guard to clean-up the expired SecretID entries
 	tidySecretIDCASGuard uint32
 
-	// Map of locks to make changes to role entries. These will be
-	// initialized to a predefined number of locks when the backend is
-	// created, and will be indexed based on salted role names.
-	roleLocksMap map[string]*sync.RWMutex
-
-	// Map of locks to make changes to the storage entries of RoleIDs
-	// generated. These will be initialized to a predefined number of locks
-	// when the backend is created, and will be indexed based on the salted
-	// RoleIDs.
-	roleIDLocksMap map[string]*sync.RWMutex
-
-	// Map of locks to make changes to the storage entries of SecretIDs
-	// generated. These will be initialized to a predefined number of locks
-	// when the backend is created, and will be indexed based on the HMAC-ed
-	// SecretIDs.
-	secretIDLocksMap map[string]*sync.RWMutex
-
-	// Map of locks to make changes to the storage entries of
-	// SecretIDAccessors generated. These will be initialized to a
+	// Locks to make changes to role entries. These will be initialized to a
 	// predefined number of locks when the backend is created, and will be
-	// indexed based on the SecretIDAccessors itself.
-	secretIDAccessorLocksMap map[string]*sync.RWMutex
+	// indexed based on salted role names.
+	roleLocks []*locksutil.LockEntry
+
+	// Locks to make changes to the storage entries of RoleIDs generated. These
+	// will be initialized to a predefined number of locks when the backend is
+	// created, and will be indexed based on the salted RoleIDs.
+	roleIDLocks []*locksutil.LockEntry
+
+	// Locks to make changes to the storage entries of SecretIDs generated.
+	// These will be initialized to a predefined number of locks when the
+	// backend is created, and will be indexed based on the HMAC-ed SecretIDs.
+	secretIDLocks []*locksutil.LockEntry
+
+	// Locks to make changes to the storage entries of SecretIDAccessors
+	// generated. These will be initialized to a predefined number of locks
+	// when the backend is created, and will be indexed based on the
+	// SecretIDAccessors itself.
+	secretIDAccessorLocks []*locksutil.LockEntry
+
+	// secretIDListingLock is a dedicated lock for listing SecretIDAccessors
+	// for all the SecretIDs issued against an approle
+	secretIDListingLock sync.RWMutex
 }
 
-func Factory(conf *logical.BackendConfig) (logical.Backend, error) {
+func Factory(ctx context.Context, conf *logical.BackendConfig) (logical.Backend, error) {
 	b, err := Backend(conf)
 	if err != nil {
 		return nil, err
 	}
-	return b.Setup(conf)
+	if err := b.Setup(ctx, conf); err != nil {
+		return nil, err
+	}
+	return b, nil
 }
 
 func Backend(conf *logical.BackendConfig) (*backend, error) {
-	// Initialize the salt
-	salt, err := salt.NewSalt(conf.StorageView, &salt.Config{
-		HashFunc: salt.SHA256Hash,
-	})
-	if err != nil {
-		return nil, err
-	}
-
 	// Create a backend object
 	b := &backend{
-		// Set the salt object for the backend
-		salt: salt,
+		view: conf.StorageView,
 
-		// Create the map of locks to modify the registered roles
-		roleLocksMap: make(map[string]*sync.RWMutex, 257),
+		// Create locks to modify the registered roles
+		roleLocks: locksutil.CreateLocks(),
 
-		// Create the map of locks to modify the generated RoleIDs
-		roleIDLocksMap: make(map[string]*sync.RWMutex, 257),
+		// Create locks to modify the generated RoleIDs
+		roleIDLocks: locksutil.CreateLocks(),
 
-		// Create the map of locks to modify the generated SecretIDs
-		secretIDLocksMap: make(map[string]*sync.RWMutex, 257),
+		// Create locks to modify the generated SecretIDs
+		secretIDLocks: locksutil.CreateLocks(),
 
-		// Create the map of locks to modify the generated SecretIDAccessors
-		secretIDAccessorLocksMap: make(map[string]*sync.RWMutex, 257),
+		// Create locks to modify the generated SecretIDAccessors
+		secretIDAccessorLocks: locksutil.CreateLocks(),
 	}
-
-	// Create 256 locks each for managing RoleID and SecretIDs. This will avoid
-	// a superfluous number of locks directly proportional to the number of RoleID
-	// and SecretIDs. These locks can be accessed by indexing based on the first two
-	// characters of a randomly generated UUID.
-	if err = locksutil.CreateLocks(b.roleLocksMap, 256); err != nil {
-		return nil, fmt.Errorf("failed to create role locks: %v", err)
-	}
-
-	if err = locksutil.CreateLocks(b.roleIDLocksMap, 256); err != nil {
-		return nil, fmt.Errorf("failed to create role ID locks: %v", err)
-	}
-
-	if err = locksutil.CreateLocks(b.secretIDLocksMap, 256); err != nil {
-		return nil, fmt.Errorf("failed to create secret ID locks: %v", err)
-	}
-
-	if err = locksutil.CreateLocks(b.secretIDAccessorLocksMap, 256); err != nil {
-		return nil, fmt.Errorf("failed to create secret ID accessor locks: %v", err)
-	}
-
-	// Have an extra lock to use in case the indexing does not result in a lock.
-	// This happens if the indexing value is not beginning with hex characters.
-	// These locks can be used for listing purposes as well.
-	b.roleLocksMap["custom"] = &sync.RWMutex{}
-	b.roleIDLocksMap["custom"] = &sync.RWMutex{}
-	b.secretIDLocksMap["custom"] = &sync.RWMutex{}
-	b.secretIDAccessorLocksMap["custom"] = &sync.RWMutex{}
 
 	// Attach the paths and secrets that are to be handled by the backend
 	b.Backend = &framework.Backend{
@@ -125,8 +98,42 @@ func Backend(conf *logical.BackendConfig) (*backend, error) {
 				pathTidySecretID(b),
 			},
 		),
+		Invalidate:  b.invalidate,
+		BackendType: logical.TypeCredential,
 	}
 	return b, nil
+}
+
+func (b *backend) Salt(ctx context.Context) (*salt.Salt, error) {
+	b.saltMutex.RLock()
+	if b.salt != nil {
+		defer b.saltMutex.RUnlock()
+		return b.salt, nil
+	}
+	b.saltMutex.RUnlock()
+	b.saltMutex.Lock()
+	defer b.saltMutex.Unlock()
+	if b.salt != nil {
+		return b.salt, nil
+	}
+	salt, err := salt.NewSalt(ctx, b.view, &salt.Config{
+		HashFunc: salt.SHA256Hash,
+		Location: salt.DefaultLocation,
+	})
+	if err != nil {
+		return nil, err
+	}
+	b.salt = salt
+	return salt, nil
+}
+
+func (b *backend) invalidate(_ context.Context, key string) {
+	switch key {
+	case salt.DefaultLocation:
+		b.saltMutex.Lock()
+		defer b.saltMutex.Unlock()
+		b.salt = nil
+	}
 }
 
 // periodicFunc of the backend will be invoked once a minute by the RollbackManager.
@@ -134,9 +141,11 @@ func Backend(conf *logical.BackendConfig) (*backend, error) {
 // This could mean that the SecretID may live in the backend upto 1 min after its
 // expiration. The deletion of SecretIDs are not security sensitive and it is okay
 // to delay the removal of SecretIDs by a minute.
-func (b *backend) periodicFunc(req *logical.Request) error {
+func (b *backend) periodicFunc(ctx context.Context, req *logical.Request) error {
 	// Initiate clean-up of expired SecretID entries
-	b.tidySecretID(req.Storage)
+	if b.System().LocalMount() || !b.System().ReplicationState().HasState(consts.ReplicationPerformanceSecondary) {
+		b.tidySecretID(ctx, req.Storage)
+	}
 	return nil
 }
 

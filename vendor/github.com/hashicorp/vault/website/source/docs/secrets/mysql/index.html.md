@@ -1,16 +1,21 @@
 ---
 layout: "docs"
-page_title: "Secret Backend: MySQL"
+page_title: "MySQL - Secrets Engines"
 sidebar_current: "docs-secrets-mysql"
 description: |-
-  The MySQL secret backend for Vault generates database credentials to access MySQL.
+  The MySQL secrets engine for Vault generates database credentials to access MySQL.
 ---
 
-# MySQL Secret Backend
+# MySQL Secrets Engine
 
 Name: `mysql`
 
-The MySQL secret backend for Vault generates database credentials
+~> **Deprecation Note:** This secrets engine is deprecated in favor of the
+combined databases secrets engine added in v0.7.1. See the documentation for
+the new implementation of this secrets engine at
+[MySQL/MariaDB database plugin](/docs/secrets/databases/mysql-maria.html).
+
+The MySQL secrets engine for Vault generates database credentials
 dynamically based on configured roles. This means that services that need
 to access a database no longer need to hardcode credentials: they can request
 them from Vault, and use Vault's leasing mechanism to more easily roll keys.
@@ -23,21 +28,21 @@ instance of a service based on the SQL username.
 Vault makes use of its own internal revocation system to ensure that users
 become invalid within a reasonable time of the lease expiring.
 
-This page will show a quick start for this backend. For detailed documentation
-on every path, use `vault path-help` after mounting the backend.
+This page will show a quick start for this secrets engine. For detailed documentation
+on every path, use `vault path-help` after mounting the secrets engine.
 
 ## Quick Start
 
-The first step to using the mysql backend is to mount it.
-Unlike the `generic` backend, the `mysql` backend is not mounted by default.
+The first step to using the mysql secrets engine is to mount it. Unlike the `kv`
+secrets engine, the `mysql` secrets engine is not mounted by default.
 
 ```
-$ vault mount mysql
-Successfully mounted 'mysql' at 'mysql'!
+$ vault secrets enable mysql
+Success! Enabled the mysql secrets engine at: mysql/
 ```
 
 Next, we must configure Vault to know how to connect to the MySQL
-instance. This is done by providing a DSN (Data Source Name):
+instance. This is done by providing a [DSN (Data Source Name)](https://github.com/go-sql-driver/mysql#dsn-data-source-name):
 
 ```
 $ vault write mysql/config/connection \
@@ -49,6 +54,8 @@ In this case, we've configured Vault with the user "root" and password "root,
 connecting to an instance at "192.168.33.10" on port 3306. It is not necessary
 that Vault has the root user, but the user must have privileges to create
 other users, namely the `GRANT OPTION` privilege.
+
+For using UNIX socket use: `root:root@unix(/path/to/socket)/`.
 
 Optionally, we can configure the lease settings for credentials generated
 by Vault. This is done by writing to the `config/lease` key:
@@ -88,11 +95,12 @@ To generate a new set of credentials, we simply read from that role:
 
 ```
 $ vault read mysql/creds/readonly
-Key           	Value
-lease_id      	mysql/creds/readonly/bd404e98-0f35-b378-269a-b7770ef01897
-lease_duration	3600
-password      	132ae3ef-5a64-7499-351e-bfe59f3a2a21
-username      	readonly-aefa635a-18
+Key               Value
+---               -----
+lease_id          mysql/creds/readonly/bd404e98-0f35-b378-269a-b7770ef01897
+lease_duration    3600
+password          132ae3ef-5a64-7499-351e-bfe59f3a2a21
+username          readonly-aefa635a-18
 ```
 
 By reading from the `creds/readonly` path, Vault has generated a new
@@ -100,326 +108,23 @@ set of credentials using the `readonly` role configuration. Here we
 see the dynamically generated username and password, along with a one
 hour lease.
 
-Using ACLs, it is possible to restrict using the mysql backend such
+Using ACLs, it is possible to restrict using the mysql secrets engine such
 that trusted operators can manage the role definitions, and both
 users and applications are restricted in the credentials they are
 allowed to read.
 
 Optionally, you may configure both the number of characters from the role name
 that are truncated to form the display name portion of the mysql username
-interpolated into the `{{name}}` field: the default is 10. 
+interpolated into the `{{name}}` field: the default is 10.
 
 You may also configure the total number of characters allowed in the entire
-generated username (the sum of the display name and uuid poritions); the
+generated username (the sum of the display name and uuid portions); the
 default is 16. Note that versions of MySQL prior to 5.8 have a 16 character
 total limit on user names, so it is probably not safe to increase this above
 the default on versions prior to that.
 
 ## API
 
-### /mysql/config/connection
-#### POST
-
-<dl class="api">
-  <dt>Description</dt>
-  <dd>
-    Configures the connection DSN used to communicate with MySQL.
-  </dd>
-
-  <dt>Method</dt>
-  <dd>POST</dd>
-
-  <dt>URL</dt>
-  <dd>`/mysql/config/connection`</dd>
-
-  <dt>Parameters</dt>
-  <dd>
-    <ul>
-      <li>
-        <span class="param">connection_url</span>
-        <span class="param-flags">required</span>
-        The MySQL DSN
-      </li>
-    </ul>
-  </dd>
-  <dd>
-    <ul>
-      <li>
-        <span class="param">value</span>
-        <span class="param-flags">optional</span>
-      </li>
-    </ul>
-  </dd>
-  <dd>
-    <ul>
-      <li>
-        <span class="param">max_open_connections</span>
-        <span class="param-flags">optional</span>
-        Maximum number of open connections to the database.
-	Defaults to 2.
-      </li>
-    </ul>
-  </dd>
-  <dd>
-    <ul>
-      <li>
-        <span class="param">max_idle_connections</span>
-        <span class="param-flags">optional</span>
-        Maximum number of idle connections to the database. A zero uses the value of `max_open_connections` and a negative value disables idle connections. If larger than `max_open_connections` it will be reduced to be equal.
-      </li>
-    </ul>
-  </dd>
-  <dd>
-    <ul>
-      <li>
-        <span class="param">verify_connection</span>
-        <span class="param-flags">optional</span>
-	If set, connection_url is verified by actually connecting to the database.
-	Defaults to true.
-      </li>
-    </ul>
-  </dd>
-
-  <dt>Returns</dt>
-  <dd>
-    A `204` response code.
-  </dd>
-</dl>
-
-### /mysql/config/lease
-#### POST
-
-<dl class="api">
-  <dt>Description</dt>
-  <dd>
-    Configures the lease settings for generated credentials.
-    If not configured, leases default to 1 hour. This is a root
-    protected endpoint.
-  </dd>
-
-  <dt>Method</dt>
-  <dd>POST</dd>
-
-  <dt>URL</dt>
-  <dd>`/mysql/config/lease`</dd>
-
-  <dt>Parameters</dt>
-  <dd>
-    <ul>
-      <li>
-        <span class="param">lease</span>
-        <span class="param-flags">required</span>
-        The lease value provided as a string duration
-        with time suffix. Hour is the largest suffix.
-      </li>
-      <li>
-        <span class="param">lease_max</span>
-        <span class="param-flags">required</span>
-        The maximum lease value provided as a string duration
-        with time suffix. Hour is the largest suffix.
-      </li>
-    </ul>
-  </dd>
-
-  <dt>Returns</dt>
-  <dd>
-    A `204` response code.
-  </dd>
-</dl>
-
-### /mysql/roles/
-#### POST
-
-<dl class="api">
-  <dt>Description</dt>
-  <dd>
-    Creates or updates the role definition.
-  </dd>
-
-  <dt>Method</dt>
-  <dd>POST</dd>
-
-  <dt>URL</dt>
-  <dd>`/mysql/roles/<name>`</dd>
-
-  <dt>Parameters</dt>
-  <dd>
-    <ul>
-      <li>
-        <span class="param">sql</span>
-        <span class="param-flags">required</span>
-        The SQL statements executed to create and configure a user. Must be a
-        semicolon-separated string, a base64-encoded semicolon-separated
-        string, a serialized JSON string array, or a base64-encoded serialized
-        JSON string array.  The '{{name}}' and '{{password}}' values will be
-        substituted.
-      </li>
-      <li>
-        <span class="param">revocation_sql</span>
-        <span class="param-flags">optional</span>
-        The SQL statements executed to revoke a user. Must be a
-        semicolon-separated string, a base64-encoded semicolon-separated
-        string, a serialized JSON string array, or a base64-encoded serialized
-        JSON string array. The '{{name}}' value will be substituted.
-      </li>
-      <li>
-        <span class="param">rolename_length</span>
-        <span class="param-flags">optional</span>
-        Determines how many characters from the role name will be used
-        to form the mysql username interpolated into the '{{name}}' field
-        of the sql parameter.  The default is 4.
-      </li>
-      <li>
-        <span class="param">displayname_length</span>
-        <span class="param-flags">optional</span>
-        Determines how many characters from the token display name will be used
-        to form the mysql username interpolated into the '{{name}}' field
-        of the sql parameter.  The default is 4.
-      </li>
-      <li>
-        <span class="param">username_length</span>
-        <span class="param-flags">optional</span>
-        Determines the maximum total length in characters of the
-        mysql username interpolated into the '{{name}}' field
-        of the sql parameter.  The default is 16.
-      </li>
-    </ul>
-  </dd>
-
-  <dt>Returns</dt>
-  <dd>
-    A `204` response code.
-  </dd>
-</dl>
-
-#### GET
-
-<dl class="api">
-  <dt>Description</dt>
-  <dd>
-    Queries the role definition.
-  </dd>
-
-  <dt>Method</dt>
-  <dd>GET</dd>
-
-  <dt>URL</dt>
-  <dd>`/mysql/roles/<name>`</dd>
-
-  <dt>Parameters</dt>
-  <dd>
-     None
-  </dd>
-
-  <dt>Returns</dt>
-  <dd>
-
-    ```javascript
-    {
-      "data": {
-        "sql": "CREATE USER..."
-      }
-    }
-    ```
-
-  </dd>
-</dl>
-
-#### LIST
-
-<dl class="api">
-  <dt>Description</dt>
-  <dd>
-    Returns a list of available roles. Only the role names are returned, not
-    any values.
-  </dd>
-
-  <dt>Method</dt>
-  <dd>LIST/GET</dd>
-
-  <dt>URL</dt>
-  <dd>`/mysql/roles` (LIST) or `/mysql/roles/?list=true` (GET)</dd>
-
-  <dt>Parameters</dt>
-  <dd>
-     None
-  </dd>
-
-  <dt>Returns</dt>
-  <dd>
-
-  ```javascript
-  {
-    "auth": null,
-    "data": {
-      "keys": ["dev", "prod"]
-    },
-    "lease_duration": 2764800,
-    "lease_id": "",
-    "renewable": false
-  }
-  ```
-
-  </dd>
-</dl>
-
-#### DELETE
-
-<dl class="api">
-  <dt>Description</dt>
-  <dd>
-    Deletes the role definition.
-  </dd>
-
-  <dt>Method</dt>
-  <dd>DELETE</dd>
-
-  <dt>URL</dt>
-  <dd>`/mysql/roles/<name>`</dd>
-
-  <dt>Parameters</dt>
-  <dd>
-     None
-  </dd>
-
-  <dt>Returns</dt>
-  <dd>
-    A `204` response code.
-  </dd>
-</dl>
-
-### /mysql/creds/
-#### GET
-
-<dl class="api">
-  <dt>Description</dt>
-  <dd>
-    Generates a new set of dynamic credentials based on the named role.
-  </dd>
-
-  <dt>Method</dt>
-  <dd>GET</dd>
-
-  <dt>URL</dt>
-  <dd>`/mysql/creds/<name>`</dd>
-
-  <dt>Parameters</dt>
-  <dd>
-     None
-  </dd>
-
-  <dt>Returns</dt>
-  <dd>
-
-    ```javascript
-    {
-      "data": {
-        "username": "user-role-aefa63",
-        "password": "132ae3ef-5a64-7499-351e-bfe59f3a2a21"
-      }
-    }
-    ```
-
-  </dd>
-</dl>
-
+The MySQL secrets engine has a full HTTP API. Please see the
+[MySQL secrets engine API](/api/secret/mysql/index.html) for more
+details.

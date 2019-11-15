@@ -25,12 +25,12 @@ import (
 	"fmt"
 	"sync"
 
-	"k8s.io/kubernetes/pkg/api"
-	k8stypes "k8s.io/kubernetes/pkg/types"
+	"k8s.io/api/core/v1"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/kubernetes/pkg/volume"
+	"k8s.io/kubernetes/pkg/volume/util"
 	"k8s.io/kubernetes/pkg/volume/util/operationexecutor"
 	"k8s.io/kubernetes/pkg/volume/util/types"
-	"k8s.io/kubernetes/pkg/volume/util/volumehelper"
 )
 
 // DesiredStateOfWorld defines a set of thread-safe operations supported on
@@ -40,13 +40,15 @@ import (
 // should be attached to the specified node, and pods are the pods that
 // reference the volume and are scheduled to that node.
 // Note: This is distinct from the DesiredStateOfWorld implemented by the
-// kubelet volume manager. The both keep track of different objects. This
+// kubelet volume manager. They both keep track of different objects. This
 // contains attach/detach controller specific state.
 type DesiredStateOfWorld interface {
 	// AddNode adds the given node to the list of nodes managed by the attach/
 	// detach controller.
 	// If the node already exists this is a no-op.
-	AddNode(nodeName k8stypes.NodeName)
+	// keepTerminatedPodVolumes is a property of the node that determines
+	// if volumes should be mounted and attached for terminated pods.
+	AddNode(nodeName k8stypes.NodeName, keepTerminatedPodVolumes bool)
 
 	// AddPod adds the given pod to the list of pods that reference the
 	// specified volume and is scheduled to the specified node.
@@ -58,7 +60,7 @@ type DesiredStateOfWorld interface {
 	// should be attached to the specified node, the volume is implicitly added.
 	// If no node with the name nodeName exists in list of nodes managed by the
 	// attach/detach attached controller, an error is returned.
-	AddPod(podName types.UniquePodName, pod *api.Pod, volumeSpec *volume.Spec, nodeName k8stypes.NodeName) (api.UniqueVolumeName, error)
+	AddPod(podName types.UniquePodName, pod *v1.Pod, volumeSpec *volume.Spec, nodeName k8stypes.NodeName) (v1.UniqueVolumeName, error)
 
 	// DeleteNode removes the given node from the list of nodes managed by the
 	// attach/detach controller.
@@ -76,7 +78,7 @@ type DesiredStateOfWorld interface {
 	// volumes under the specified node, this is a no-op.
 	// If after deleting the pod, the specified volume contains no other child
 	// pods, the volume is also deleted.
-	DeletePod(podName types.UniquePodName, volumeName api.UniqueVolumeName, nodeName k8stypes.NodeName)
+	DeletePod(podName types.UniquePodName, volumeName v1.UniqueVolumeName, nodeName k8stypes.NodeName)
 
 	// NodeExists returns true if the node with the specified name exists in
 	// the list of nodes managed by the attach/detach controller.
@@ -85,7 +87,7 @@ type DesiredStateOfWorld interface {
 	// VolumeExists returns true if the volume with the specified name exists
 	// in the list of volumes that should be attached to the specified node by
 	// the attach detach controller.
-	VolumeExists(volumeName api.UniqueVolumeName, nodeName k8stypes.NodeName) bool
+	VolumeExists(volumeName v1.UniqueVolumeName, nodeName k8stypes.NodeName) bool
 
 	// GetVolumesToAttach generates and returns a list of volumes to attach
 	// and the nodes they should be attached to based on the current desired
@@ -95,6 +97,18 @@ type DesiredStateOfWorld interface {
 	// GetPodToAdd generates and returns a map of pods based on the current desired
 	// state of world
 	GetPodToAdd() map[types.UniquePodName]PodToAdd
+
+	// GetKeepTerminatedPodVolumesForNode determines if node wants volumes to be
+	// mounted and attached for terminated pods
+	GetKeepTerminatedPodVolumesForNode(k8stypes.NodeName) bool
+
+	// Mark multiattach error as reported to prevent spamming multiple
+	// events for same error
+	SetMultiAttachError(v1.UniqueVolumeName, k8stypes.NodeName)
+
+	// GetPodsOnNodes returns list of pods ("namespace/name") that require
+	// given volume on given nodes.
+	GetVolumePodsOnNodes(nodes []k8stypes.NodeName, volumeName v1.UniqueVolumeName) []*v1.Pod
 }
 
 // VolumeToAttach represents a volume that should be attached to a node.
@@ -106,10 +120,10 @@ type VolumeToAttach struct {
 // scheduled to the underlying node.
 type PodToAdd struct {
 	// pod contains the api object of pod
-	Pod *api.Pod
+	Pod *v1.Pod
 
 	// volumeName contains the unique identifier for this volume.
-	VolumeName api.UniqueVolumeName
+	VolumeName v1.UniqueVolumeName
 
 	// nodeName contains the name of this node.
 	NodeName k8stypes.NodeName
@@ -142,14 +156,22 @@ type nodeManaged struct {
 
 	// volumesToAttach is a map containing the set of volumes that should be
 	// attached to this node. The key in the map is the name of the volume and
-	// the value is a pod object containing more information about the volume.
-	volumesToAttach map[api.UniqueVolumeName]volumeToAttach
+	// the value is a volumeToAttach object containing more information about the volume.
+	volumesToAttach map[v1.UniqueVolumeName]volumeToAttach
+
+	// keepTerminatedPodVolumes determines if for terminated pods(on this node) - volumes
+	// should be kept mounted and attached.
+	keepTerminatedPodVolumes bool
 }
 
-// The volume object represents a volume that should be attached to a node.
+// The volumeToAttach object represents a volume that should be attached to a node.
 type volumeToAttach struct {
+	// multiAttachErrorReported indicates whether the multi-attach error has been reported for the given volume.
+	// It is used to prevent reporting the error from being reported more than once for a given volume.
+	multiAttachErrorReported bool
+
 	// volumeName contains the unique identifier for this volume.
-	volumeName api.UniqueVolumeName
+	volumeName v1.UniqueVolumeName
 
 	// spec is the volume spec containing the specification for this volume.
 	// Used to generate the volume plugin object, and passed to attach/detach
@@ -170,26 +192,27 @@ type pod struct {
 	podName types.UniquePodName
 
 	// pod object contains the api object of pod
-	podObj *api.Pod
+	podObj *v1.Pod
 }
 
-func (dsw *desiredStateOfWorld) AddNode(nodeName k8stypes.NodeName) {
+func (dsw *desiredStateOfWorld) AddNode(nodeName k8stypes.NodeName, keepTerminatedPodVolumes bool) {
 	dsw.Lock()
 	defer dsw.Unlock()
 
 	if _, nodeExists := dsw.nodesManaged[nodeName]; !nodeExists {
 		dsw.nodesManaged[nodeName] = nodeManaged{
-			nodeName:        nodeName,
-			volumesToAttach: make(map[api.UniqueVolumeName]volumeToAttach),
+			nodeName:                 nodeName,
+			volumesToAttach:          make(map[v1.UniqueVolumeName]volumeToAttach),
+			keepTerminatedPodVolumes: keepTerminatedPodVolumes,
 		}
 	}
 }
 
 func (dsw *desiredStateOfWorld) AddPod(
 	podName types.UniquePodName,
-	podToAdd *api.Pod,
+	podToAdd *v1.Pod,
 	volumeSpec *volume.Spec,
-	nodeName k8stypes.NodeName) (api.UniqueVolumeName, error) {
+	nodeName k8stypes.NodeName) (v1.UniqueVolumeName, error) {
 	dsw.Lock()
 	defer dsw.Unlock()
 
@@ -208,11 +231,12 @@ func (dsw *desiredStateOfWorld) AddPod(
 			err)
 	}
 
-	volumeName, err := volumehelper.GetUniqueVolumeNameFromSpec(
+	volumeName, err := util.GetUniqueVolumeNameFromSpec(
 		attachableVolumePlugin, volumeSpec)
 	if err != nil {
 		return "", fmt.Errorf(
-			"failed to GetUniqueVolumeNameFromSpec for volumeSpec %q err=%v",
+			"failed to get UniqueVolumeName from volumeSpec for plugin=%q and volume=%q err=%v",
+			attachableVolumePlugin.GetPluginName(),
 			volumeSpec.Name(),
 			err)
 	}
@@ -220,9 +244,10 @@ func (dsw *desiredStateOfWorld) AddPod(
 	volumeObj, volumeExists := nodeObj.volumesToAttach[volumeName]
 	if !volumeExists {
 		volumeObj = volumeToAttach{
-			volumeName:    volumeName,
-			spec:          volumeSpec,
-			scheduledPods: make(map[types.UniquePodName]pod),
+			multiAttachErrorReported: false,
+			volumeName:               volumeName,
+			spec:                     volumeSpec,
+			scheduledPods:            make(map[types.UniquePodName]pod),
 		}
 		dsw.nodesManaged[nodeName].volumesToAttach[volumeName] = volumeObj
 	}
@@ -261,7 +286,7 @@ func (dsw *desiredStateOfWorld) DeleteNode(nodeName k8stypes.NodeName) error {
 
 func (dsw *desiredStateOfWorld) DeletePod(
 	podName types.UniquePodName,
-	volumeName api.UniqueVolumeName,
+	volumeName v1.UniqueVolumeName,
 	nodeName k8stypes.NodeName) {
 	dsw.Lock()
 	defer dsw.Unlock()
@@ -299,7 +324,7 @@ func (dsw *desiredStateOfWorld) NodeExists(nodeName k8stypes.NodeName) bool {
 }
 
 func (dsw *desiredStateOfWorld) VolumeExists(
-	volumeName api.UniqueVolumeName, nodeName k8stypes.NodeName) bool {
+	volumeName v1.UniqueVolumeName, nodeName k8stypes.NodeName) bool {
 	dsw.RLock()
 	defer dsw.RUnlock()
 
@@ -313,6 +338,36 @@ func (dsw *desiredStateOfWorld) VolumeExists(
 	return false
 }
 
+func (dsw *desiredStateOfWorld) SetMultiAttachError(
+	volumeName v1.UniqueVolumeName,
+	nodeName k8stypes.NodeName) {
+	dsw.Lock()
+	defer dsw.Unlock()
+
+	nodeObj, nodeExists := dsw.nodesManaged[nodeName]
+	if nodeExists {
+		if volumeObj, volumeExists := nodeObj.volumesToAttach[volumeName]; volumeExists {
+			volumeObj.multiAttachErrorReported = true
+			dsw.nodesManaged[nodeName].volumesToAttach[volumeName] = volumeObj
+		}
+	}
+}
+
+// GetKeepTerminatedPodVolumesForNode determines if node wants volumes to be
+// mounted and attached for terminated pods
+func (dsw *desiredStateOfWorld) GetKeepTerminatedPodVolumesForNode(nodeName k8stypes.NodeName) bool {
+	dsw.RLock()
+	defer dsw.RUnlock()
+
+	if nodeName == "" {
+		return false
+	}
+	if node, ok := dsw.nodesManaged[nodeName]; ok {
+		return node.keepTerminatedPodVolumes
+	}
+	return false
+}
+
 func (dsw *desiredStateOfWorld) GetVolumesToAttach() []VolumeToAttach {
 	dsw.RLock()
 	defer dsw.RUnlock()
@@ -323,10 +378,11 @@ func (dsw *desiredStateOfWorld) GetVolumesToAttach() []VolumeToAttach {
 			volumesToAttach = append(volumesToAttach,
 				VolumeToAttach{
 					VolumeToAttach: operationexecutor.VolumeToAttach{
-						VolumeName:    volumeName,
-						VolumeSpec:    volumeObj.spec,
-						NodeName:      nodeName,
-						ScheduledPods: getPodsFromMap(volumeObj.scheduledPods),
+						MultiAttachErrorReported: volumeObj.multiAttachErrorReported,
+						VolumeName:               volumeName,
+						VolumeSpec:               volumeObj.spec,
+						NodeName:                 nodeName,
+						ScheduledPods:            getPodsFromMap(volumeObj.scheduledPods),
 					}})
 		}
 	}
@@ -334,9 +390,9 @@ func (dsw *desiredStateOfWorld) GetVolumesToAttach() []VolumeToAttach {
 	return volumesToAttach
 }
 
-// Construct a list of api.Pod objects from the given pod map
-func getPodsFromMap(podMap map[types.UniquePodName]pod) []*api.Pod {
-	pods := make([]*api.Pod, 0, len(podMap))
+// Construct a list of v1.Pod objects from the given pod map
+func getPodsFromMap(podMap map[types.UniquePodName]pod) []*v1.Pod {
+	pods := make([]*v1.Pod, 0, len(podMap))
 	for _, pod := range podMap {
 		pods = append(pods, pod.podObj)
 	}
@@ -357,6 +413,27 @@ func (dsw *desiredStateOfWorld) GetPodToAdd() map[types.UniquePodName]PodToAdd {
 					NodeName:   nodeName,
 				}
 			}
+		}
+	}
+	return pods
+}
+
+func (dsw *desiredStateOfWorld) GetVolumePodsOnNodes(nodes []k8stypes.NodeName, volumeName v1.UniqueVolumeName) []*v1.Pod {
+	dsw.RLock()
+	defer dsw.RUnlock()
+
+	pods := []*v1.Pod{}
+	for _, nodeName := range nodes {
+		node, ok := dsw.nodesManaged[nodeName]
+		if !ok {
+			continue
+		}
+		volume, ok := node.volumesToAttach[volumeName]
+		if !ok {
+			continue
+		}
+		for _, pod := range volume.scheduledPods {
+			pods = append(pods, pod.podObj)
 		}
 	}
 	return pods

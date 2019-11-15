@@ -1,5 +1,5 @@
 /*
-Copyright 2016 The Kubernetes Authors.
+Copyright 2017 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,36 +20,46 @@ import (
 	"reflect"
 	"testing"
 
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/unversioned"
-	"k8s.io/kubernetes/pkg/apis/extensions"
+	appsv1 "k8s.io/api/apps/v1"
+	"k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func TestDeploymentGenerate(t *testing.T) {
+func TestDeploymentBasicGenerate(t *testing.T) {
+	one := int32(1)
 	tests := []struct {
-		params    map[string]interface{}
-		expected  *extensions.Deployment
-		expectErr bool
+		name           string
+		deploymentName string
+		images         []string
+		expected       *appsv1.Deployment
+		expectErr      bool
 	}{
 		{
-			params: map[string]interface{}{
-				"name":  "foo",
-				"image": []string{"abc/app:v4"},
-			},
-			expected: &extensions.Deployment{
-				ObjectMeta: api.ObjectMeta{
-					Name:   "foo",
-					Labels: map[string]string{"app": "foo"},
+			name:           "deployment name and images ok",
+			deploymentName: "images-name-ok",
+			images:         []string{"nn/image1", "registry/nn/image2", "nn/image3:tag", "nn/image4@digest", "nn/image5@sha256:digest"},
+			expected: &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:   "images-name-ok",
+					Labels: map[string]string{"app": "images-name-ok"},
 				},
-				Spec: extensions.DeploymentSpec{
-					Replicas: 1,
-					Selector: &unversioned.LabelSelector{MatchLabels: map[string]string{"app": "foo"}},
-					Template: api.PodTemplateSpec{
-						ObjectMeta: api.ObjectMeta{
-							Labels: map[string]string{"app": "foo"},
+				Spec: appsv1.DeploymentSpec{
+					Replicas: &one,
+					Selector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{"app": "images-name-ok"},
+					},
+					Template: v1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Labels: map[string]string{"app": "images-name-ok"},
 						},
-						Spec: api.PodSpec{
-							Containers: []api.Container{{Name: "app:v4", Image: "abc/app:v4"}},
+						Spec: v1.PodSpec{
+							Containers: []v1.Container{
+								{Name: "image1", Image: "nn/image1"},
+								{Name: "image2", Image: "registry/nn/image2"},
+								{Name: "image3", Image: "nn/image3:tag"},
+								{Name: "image4", Image: "nn/image4@digest"},
+								{Name: "image5", Image: "nn/image5@sha256:digest"},
+							},
 						},
 					},
 				},
@@ -57,78 +67,39 @@ func TestDeploymentGenerate(t *testing.T) {
 			expectErr: false,
 		},
 		{
-			params: map[string]interface{}{
-				"name":  "foo",
-				"image": []string{"abc/app:v4", "zyx/ape"},
-			},
-			expected: &extensions.Deployment{
-				ObjectMeta: api.ObjectMeta{
-					Name:   "foo",
-					Labels: map[string]string{"app": "foo"},
-				},
-				Spec: extensions.DeploymentSpec{
-					Replicas: 1,
-					Selector: &unversioned.LabelSelector{MatchLabels: map[string]string{"app": "foo"}},
-					Template: api.PodTemplateSpec{
-						ObjectMeta: api.ObjectMeta{
-							Labels: map[string]string{"app": "foo"},
-						},
-						Spec: api.PodSpec{
-							Containers: []api.Container{{Name: "app:v4", Image: "abc/app:v4"},
-								{Name: "ape", Image: "zyx/ape"}},
-						},
-					},
-				},
-			},
-			expectErr: false,
+			name:           "empty images",
+			deploymentName: "images-empty",
+			images:         []string{},
+			expectErr:      true,
 		},
 		{
-			params:    map[string]interface{}{},
-			expectErr: true,
+			name:           "no images",
+			deploymentName: "images-missing",
+			expectErr:      true,
 		},
 		{
-			params: map[string]interface{}{
-				"name": 1,
-			},
-			expectErr: true,
-		},
-		{
-			params: map[string]interface{}{
-				"name": nil,
-			},
-			expectErr: true,
-		},
-		{
-			params: map[string]interface{}{
-				"name":  "foo",
-				"image": []string{},
-			},
-			expectErr: true,
-		},
-		{
-			params: map[string]interface{}{
-				"NAME": "some_value",
-			},
+			name:      "no deployment name and images",
 			expectErr: true,
 		},
 	}
-	generator := DeploymentBasicGeneratorV1{}
-	for index, test := range tests {
-		obj, err := generator.Generate(test.params)
-		switch {
-		case test.expectErr && err != nil:
-			continue // loop, since there's no output to check
-		case test.expectErr && err == nil:
-			t.Errorf("%v: expected error and didn't get one", index)
-			continue // loop, no expected output object
-		case !test.expectErr && err != nil:
-			t.Errorf("%v: unexpected error %v", index, err)
-			continue // loop, no output object
-		case !test.expectErr && err == nil:
-			// do nothing and drop through
-		}
-		if !reflect.DeepEqual(obj.(*extensions.Deployment), test.expected) {
-			t.Errorf("%v\nexpected:\n%#v\nsaw:\n%#v", index, test.expected, obj.(*extensions.Deployment))
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			generator := &DeploymentBasicAppsGeneratorV1{
+				BaseDeploymentGenerator{
+					Name:   tt.deploymentName,
+					Images: tt.images,
+				},
+			}
+			obj, err := generator.StructuredGenerate()
+			if !tt.expectErr && err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+			if tt.expectErr && err != nil {
+				return
+			}
+			if !reflect.DeepEqual(obj.(*appsv1.Deployment), tt.expected) {
+				t.Errorf("test: %v\nexpected:\n%#v\nsaw:\n%#v", tt.name, tt.expected, obj.(*appsv1.Deployment))
+			}
+		})
 	}
 }

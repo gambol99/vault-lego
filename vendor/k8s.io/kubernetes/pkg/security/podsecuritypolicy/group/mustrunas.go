@@ -19,40 +19,38 @@ package group
 import (
 	"fmt"
 
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/apis/extensions"
+	"k8s.io/apimachinery/pkg/util/validation/field"
+	api "k8s.io/kubernetes/pkg/apis/core"
+	"k8s.io/kubernetes/pkg/apis/policy"
 	psputil "k8s.io/kubernetes/pkg/security/podsecuritypolicy/util"
-	"k8s.io/kubernetes/pkg/util/validation/field"
 )
 
 // mustRunAs implements the GroupStrategy interface
 type mustRunAs struct {
-	ranges []extensions.IDRange
-	field  string
+	ranges []policy.IDRange
 }
 
 var _ GroupStrategy = &mustRunAs{}
 
 // NewMustRunAs provides a new MustRunAs strategy based on ranges.
-func NewMustRunAs(ranges []extensions.IDRange, field string) (GroupStrategy, error) {
+func NewMustRunAs(ranges []policy.IDRange) (GroupStrategy, error) {
 	if len(ranges) == 0 {
 		return nil, fmt.Errorf("ranges must be supplied for MustRunAs")
 	}
 	return &mustRunAs{
 		ranges: ranges,
-		field:  field,
 	}, nil
 }
 
 // Generate creates the group based on policy rules.  By default this returns the first group of the
 // first range (min val).
-func (s *mustRunAs) Generate(pod *api.Pod) ([]int64, error) {
+func (s *mustRunAs) Generate(_ *api.Pod) ([]int64, error) {
 	return []int64{s.ranges[0].Min}, nil
 }
 
 // Generate a single value to be applied.  This is used for FSGroup.  This strategy will return
 // the first group of the first range (min val).
-func (s *mustRunAs) GenerateSingle(pod *api.Pod) (*int64, error) {
+func (s *mustRunAs) GenerateSingle(_ *api.Pod) (*int64, error) {
 	single := new(int64)
 	*single = s.ranges[0].Min
 	return single, nil
@@ -61,22 +59,17 @@ func (s *mustRunAs) GenerateSingle(pod *api.Pod) (*int64, error) {
 // Validate ensures that the specified values fall within the range of the strategy.
 // Groups are passed in here to allow this strategy to support multiple group fields (fsgroup and
 // supplemental groups).
-func (s *mustRunAs) Validate(pod *api.Pod, groups []int64) field.ErrorList {
+func (s *mustRunAs) Validate(fldPath *field.Path, _ *api.Pod, groups []int64) field.ErrorList {
 	allErrs := field.ErrorList{}
 
-	if pod.Spec.SecurityContext == nil {
-		allErrs = append(allErrs, field.Invalid(field.NewPath("securityContext"), pod.Spec.SecurityContext, "unable to validate nil security context"))
-		return allErrs
-	}
-
 	if len(groups) == 0 && len(s.ranges) > 0 {
-		allErrs = append(allErrs, field.Invalid(field.NewPath(s.field), groups, "unable to validate empty groups against required ranges"))
+		allErrs = append(allErrs, field.Invalid(fldPath, groups, "unable to validate empty groups against required ranges"))
 	}
 
 	for _, group := range groups {
 		if !s.isGroupValid(group) {
-			detail := fmt.Sprintf("%d is not an allowed group", group)
-			allErrs = append(allErrs, field.Invalid(field.NewPath(s.field), groups, detail))
+			detail := fmt.Sprintf("group %d must be in the ranges: %v", group, s.ranges)
+			allErrs = append(allErrs, field.Invalid(fldPath, groups, detail))
 		}
 	}
 
@@ -85,7 +78,7 @@ func (s *mustRunAs) Validate(pod *api.Pod, groups []int64) field.ErrorList {
 
 func (s *mustRunAs) isGroupValid(group int64) bool {
 	for _, rng := range s.ranges {
-		if psputil.FallsInRange(group, rng) {
+		if psputil.GroupFallsInRange(group, rng) {
 			return true
 		}
 	}

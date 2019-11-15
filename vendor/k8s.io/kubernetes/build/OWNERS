@@ -1,6 +1,14 @@
-assignees:
-  - ihmccreery
+reviewers:
+  - cblecker
+  - ixdy
+  - jbeda
+  - lavalamp
+  - spiffxp
+  - zmerlynn
+approvers:
+  - cblecker
   - ixdy
   - jbeda
   - lavalamp
   - zmerlynn
+  - mikedanese

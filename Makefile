@@ -1,17 +1,17 @@
 NAME=vault-lego
-AUTHOR ?= gambol99
-AUTHOR_EMAIL=gambol99@gmail.com
-REGISTRY=quay.io
-GOVERSION=1.7.3
+AUTHOR ?= catac
+AUTHOR_EMAIL=catalin.cirstoiu@gmail.com
+REGISTRY=index.docker.io
+GOVERSION=1.13.4
 ROOT_DIR=${PWD}
 HARDWARE=$(shell uname -m)
-GIT_SHA=$(shell git --no-pager describe --always --dirty)
+GIT_SHA=$(shell git describe --tags --dirty --always)
 BUILD_TIME=$(shell date -u '+%Y-%m-%d_%I:%M:%S%p')
 VERSION ?= $(shell awk '/release.*=/ { print $$3 }' doc.go | sed 's/"//g')
 DEPS=$(shell go list -f '{{range .TestImports}}{{.}} {{end}}' ./...)
 PACKAGES=$(shell go list ./...)
 LFLAGS ?= -X main.gitsha=${GIT_SHA}
-VETARGS ?= -asmdecl -atomic -bool -buildtags -copylocks -methods -nilfunc -printf -rangeloops -shift -structtags -unsafeptr
+VETARGS ?= -asmdecl -atomic -bool -buildtags -copylocks -methods -nilfunc -printf -rangeloops -shift -structtag -unsafeptr
 
 .PHONY: test authors changelog build docker static release lint cover vet
 
@@ -36,8 +36,8 @@ static: golang deps
 
 docker-build:
 	@echo "--> Compiling the project"
-	${SUDO} docker run --rm -v ${ROOT_DIR}:/go/src/github.com/gambol99/${NAME} \
-		-w /go/src/github.com/gambol99/${NAME} -e GOOS=linux golang:${GOVERSION} make static
+	${SUDO} docker run --rm -v ${ROOT_DIR}:/go/src/github.com/catac/${NAME} \
+		-w /go/src/github.com/catac/${NAME} -e GOOS=linux golang:${GOVERSION} make static
 
 docker:
 	@echo "--> Building the docker image"
@@ -72,10 +72,10 @@ deps:
 
 vet:
 	@echo "--> Running go vet $(VETARGS) ."
-	@go tool vet 2>/dev/null ; if [ $$? -eq 3 ]; then \
+	@go vet 2>/dev/null ; if [ $$? -eq 3 ]; then \
 		go get golang.org/x/tools/cmd/vet; \
 	fi
-	@go tool vet $(VETARGS) *.go
+	@go vet $(VETARGS) *.go
 
 lint:
 	@echo "--> Running golint"

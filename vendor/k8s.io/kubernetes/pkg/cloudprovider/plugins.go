@@ -33,9 +33,21 @@ type Factory func(config io.Reader) (Interface, error)
 
 // All registered cloud providers.
 var (
-	providersMutex sync.Mutex
-	providers      = make(map[string]Factory)
+	providersMutex           sync.Mutex
+	providers                = make(map[string]Factory)
+	deprecatedCloudProviders = []struct {
+		name     string
+		external bool
+		detail   string
+	}{
+		{"openstack", true, "https://github.com/kubernetes/cloud-provider-openstack"},
+		{"photon", false, "The Photon Controller project is no longer maintained."},
+		{"cloudstack", false, "The CloudStack Controller project is no longer maintained."},
+		{"ovirt", false, "The ovirt Controller project is no longer maintained."},
+	}
 )
+
+const externalCloudProvider = "external"
 
 // RegisterCloudProvider registers a cloudprovider.Factory by name.  This
 // is expected to happen during app startup.
@@ -58,23 +70,11 @@ func IsCloudProvider(name string) bool {
 	return found
 }
 
-// CloudProviders returns the name of all registered cloud providers in a
-// string slice
-func CloudProviders() []string {
-	names := []string{}
-	providersMutex.Lock()
-	defer providersMutex.Unlock()
-	for name := range providers {
-		names = append(names, name)
-	}
-	return names
-}
-
 // GetCloudProvider creates an instance of the named cloud provider, or nil if
-// the name is not known.  The error return is only used if the named provider
+// the name is unknown.  The error return is only used if the named provider
 // was known but failed to initialize. The config parameter specifies the
 // io.Reader handler of the configuration file for the cloud provider, or nil
-// for no configuation.
+// for no configuration.
 func GetCloudProvider(name string, config io.Reader) (Interface, error) {
 	providersMutex.Lock()
 	defer providersMutex.Unlock()
@@ -85,6 +85,11 @@ func GetCloudProvider(name string, config io.Reader) (Interface, error) {
 	return f(config)
 }
 
+// Detects if the string is an external cloud provider
+func IsExternal(name string) bool {
+	return name == externalCloudProvider
+}
+
 // InitCloudProvider creates an instance of the named cloud provider.
 func InitCloudProvider(name string, configFilePath string) (Interface, error) {
 	var cloud Interface
@@ -93,6 +98,23 @@ func InitCloudProvider(name string, configFilePath string) (Interface, error) {
 	if name == "" {
 		glog.Info("No cloud provider specified.")
 		return nil, nil
+	}
+
+	if IsExternal(name) {
+		glog.Info("External cloud provider specified")
+		return nil, nil
+	}
+
+	for _, provider := range deprecatedCloudProviders {
+		if provider.name == name {
+			detail := provider.detail
+			if provider.external {
+				detail = fmt.Sprintf("Please use 'external' cloud provider for %s: %s", name, provider.detail)
+			}
+			glog.Warningf("WARNING: %s built-in cloud provider is now deprecated. %s", name, detail)
+
+			break
+		}
 	}
 
 	if configFilePath != "" {

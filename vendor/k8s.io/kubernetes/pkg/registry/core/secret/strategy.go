@@ -17,29 +17,32 @@ limitations under the License.
 package secret
 
 import (
+	"context"
 	"fmt"
 
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/errors"
-	"k8s.io/kubernetes/pkg/api/rest"
-	"k8s.io/kubernetes/pkg/api/validation"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
-	"k8s.io/kubernetes/pkg/registry/generic"
-	"k8s.io/kubernetes/pkg/runtime"
-	apistorage "k8s.io/kubernetes/pkg/storage"
-	"k8s.io/kubernetes/pkg/util/validation/field"
+	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/apiserver/pkg/registry/generic"
+	"k8s.io/apiserver/pkg/registry/rest"
+	pkgstorage "k8s.io/apiserver/pkg/storage"
+	"k8s.io/apiserver/pkg/storage/names"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
+	api "k8s.io/kubernetes/pkg/apis/core"
+	"k8s.io/kubernetes/pkg/apis/core/validation"
 )
 
 // strategy implements behavior for Secret objects
 type strategy struct {
 	runtime.ObjectTyper
-	api.NameGenerator
+	names.NameGenerator
 }
 
 // Strategy is the default logic that applies when creating and updating Secret
 // objects via the REST API.
-var Strategy = strategy{api.Scheme, api.SimpleNameGenerator}
+var Strategy = strategy{legacyscheme.Scheme, names.SimpleNameGenerator}
 
 var _ = rest.RESTCreateStrategy(Strategy)
 
@@ -49,10 +52,10 @@ func (strategy) NamespaceScoped() bool {
 	return true
 }
 
-func (strategy) PrepareForCreate(ctx api.Context, obj runtime.Object) {
+func (strategy) PrepareForCreate(ctx context.Context, obj runtime.Object) {
 }
 
-func (strategy) Validate(ctx api.Context, obj runtime.Object) field.ErrorList {
+func (strategy) Validate(ctx context.Context, obj runtime.Object) field.ErrorList {
 	return validation.ValidateSecret(obj.(*api.Secret))
 }
 
@@ -63,10 +66,10 @@ func (strategy) AllowCreateOnUpdate() bool {
 	return false
 }
 
-func (strategy) PrepareForUpdate(ctx api.Context, obj, old runtime.Object) {
+func (strategy) PrepareForUpdate(ctx context.Context, obj, old runtime.Object) {
 }
 
-func (strategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) field.ErrorList {
+func (strategy) ValidateUpdate(ctx context.Context, obj, old runtime.Object) field.ErrorList {
 	return validation.ValidateSecretUpdate(obj.(*api.Secret), old.(*api.Secret))
 }
 
@@ -74,7 +77,7 @@ func (strategy) AllowUnconditionalUpdate() bool {
 	return true
 }
 
-func (s strategy) Export(ctx api.Context, obj runtime.Object, exact bool) error {
+func (s strategy) Export(ctx context.Context, obj runtime.Object, exact bool) error {
 	t, ok := obj.(*api.Secret)
 	if !ok {
 		// unexpected programmer error
@@ -94,19 +97,29 @@ func (s strategy) Export(ctx api.Context, obj runtime.Object, exact bool) error 
 	return nil
 }
 
-// Matcher returns a generic matcher for a given label and field selector.
-func Matcher(label labels.Selector, field fields.Selector) apistorage.SelectionPredicate {
-	return apistorage.SelectionPredicate{
-		Label: label,
-		Field: field,
-		GetAttrs: func(obj runtime.Object) (labels.Set, fields.Set, error) {
-			secret, ok := obj.(*api.Secret)
-			if !ok {
-				return nil, nil, fmt.Errorf("not a secret")
-			}
-			return labels.Set(secret.Labels), SelectableFields(secret), nil
-		},
+// GetAttrs returns labels and fields of a given object for filtering purposes.
+func GetAttrs(obj runtime.Object) (labels.Set, fields.Set, bool, error) {
+	secret, ok := obj.(*api.Secret)
+	if !ok {
+		return nil, nil, false, fmt.Errorf("not a secret")
 	}
+	return labels.Set(secret.Labels), SelectableFields(secret), secret.Initializers != nil, nil
+}
+
+// Matcher returns a generic matcher for a given label and field selector.
+func Matcher(label labels.Selector, field fields.Selector) pkgstorage.SelectionPredicate {
+	return pkgstorage.SelectionPredicate{
+		Label:       label,
+		Field:       field,
+		GetAttrs:    GetAttrs,
+		IndexFields: []string{"metadata.name"},
+	}
+}
+
+func SecretNameTriggerFunc(obj runtime.Object) []pkgstorage.MatchValue {
+	secret := obj.(*api.Secret)
+	result := pkgstorage.MatchValue{IndexName: "metadata.name", Value: secret.ObjectMeta.Name}
+	return []pkgstorage.MatchValue{result}
 }
 
 // SelectableFields returns a field set that can be used for filter selection

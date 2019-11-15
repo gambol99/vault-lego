@@ -1,12 +1,14 @@
 package http
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
 
+	"github.com/hashicorp/vault/helper/consts"
 	"github.com/hashicorp/vault/helper/pgpkeys"
 	"github.com/hashicorp/vault/vault"
 )
@@ -19,13 +21,23 @@ func handleSysRekeyInit(core *vault.Core, recovery bool) http.Handler {
 			return
 		}
 
+		repState := core.ReplicationState()
+		if repState.HasState(consts.ReplicationPerformanceSecondary) {
+			respondError(w, http.StatusBadRequest,
+				fmt.Errorf("rekeying can only be performed on the primary cluster when replication is activated"))
+			return
+		}
+
+		ctx, cancel := core.GetContext()
+		defer cancel()
+
 		switch {
 		case recovery && !core.SealAccess().RecoveryKeySupported():
 			respondError(w, http.StatusBadRequest, fmt.Errorf("recovery rekeying not supported"))
 		case r.Method == "GET":
-			handleSysRekeyInitGet(core, recovery, w, r)
+			handleSysRekeyInitGet(ctx, core, recovery, w, r)
 		case r.Method == "POST" || r.Method == "PUT":
-			handleSysRekeyInitPut(core, recovery, w, r)
+			handleSysRekeyInitPut(ctx, core, recovery, w, r)
 		case r.Method == "DELETE":
 			handleSysRekeyInitDelete(core, recovery, w, r)
 		default:
@@ -34,8 +46,8 @@ func handleSysRekeyInit(core *vault.Core, recovery bool) http.Handler {
 	})
 }
 
-func handleSysRekeyInitGet(core *vault.Core, recovery bool, w http.ResponseWriter, r *http.Request) {
-	barrierConfig, err := core.SealAccess().BarrierConfig()
+func handleSysRekeyInitGet(ctx context.Context, core *vault.Core, recovery bool, w http.ResponseWriter, r *http.Request) {
+	barrierConfig, err := core.SealAccess().BarrierConfig(ctx)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, err)
 		return
@@ -60,7 +72,7 @@ func handleSysRekeyInitGet(core *vault.Core, recovery bool, w http.ResponseWrite
 		return
 	}
 
-	sealThreshold, err := core.RekeyThreshold(recovery)
+	sealThreshold, err := core.RekeyThreshold(ctx, recovery)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, err)
 		return
@@ -92,10 +104,10 @@ func handleSysRekeyInitGet(core *vault.Core, recovery bool, w http.ResponseWrite
 	respondOk(w, status)
 }
 
-func handleSysRekeyInitPut(core *vault.Core, recovery bool, w http.ResponseWriter, r *http.Request) {
+func handleSysRekeyInitPut(ctx context.Context, core *vault.Core, recovery bool, w http.ResponseWriter, r *http.Request) {
 	// Parse the request
 	var req RekeyRequest
-	if err := parseRequest(r, &req); err != nil {
+	if err := parseRequest(r, w, &req); err != nil {
 		respondError(w, http.StatusBadRequest, err)
 		return
 	}
@@ -105,11 +117,22 @@ func handleSysRekeyInitPut(core *vault.Core, recovery bool, w http.ResponseWrite
 		return
 	}
 
-	// Right now we don't support this, but the rest of the code is ready for
-	// when we do, hence the check below for this to be false if
-	// StoredShares is greater than zero
-	if core.SealAccess().StoredKeysSupported() {
-		respondError(w, http.StatusBadRequest, fmt.Errorf("rekeying of barrier not supported when stored key support is available"))
+	// If the seal supports stored keys, and we are rekeying the barrier key,
+	// force the shares to 1
+	if !recovery && core.SealAccess().StoredKeysSupported() {
+		req.SecretShares = 1
+		req.SecretThreshold = 1
+		req.StoredShares = 1
+		core.Logger().Warn("rekey: stored keys supported, forcing shares/threshold to 1")
+	} else {
+		if req.StoredShares != 0 {
+			respondError(w, http.StatusBadRequest, fmt.Errorf("stored keys are not supported by the current seal type"))
+			return
+		}
+	}
+
+	if len(req.PGPKeys) > 0 && len(req.PGPKeys) != req.SecretShares {
+		respondError(w, http.StatusBadRequest, fmt.Errorf("incorrect number of PGP keys for rekey"))
 		return
 	}
 
@@ -126,7 +149,7 @@ func handleSysRekeyInitPut(core *vault.Core, recovery bool, w http.ResponseWrite
 		return
 	}
 
-	handleSysRekeyInitGet(core, recovery, w, r)
+	handleSysRekeyInitGet(ctx, core, recovery, w, r)
 }
 
 func handleSysRekeyInitDelete(core *vault.Core, recovery bool, w http.ResponseWriter, r *http.Request) {
@@ -148,14 +171,14 @@ func handleSysRekeyUpdate(core *vault.Core, recovery bool) http.Handler {
 
 		// Parse the request
 		var req RekeyUpdateRequest
-		if err := parseRequest(r, &req); err != nil {
+		if err := parseRequest(r, w, &req); err != nil {
 			respondError(w, http.StatusBadRequest, err)
 			return
 		}
 		if req.Key == "" {
 			respondError(
 				w, http.StatusBadRequest,
-				errors.New("'key' must specified in request body as JSON"))
+				errors.New("'key' must be specified in request body as JSON"))
 			return
 		}
 
@@ -175,8 +198,11 @@ func handleSysRekeyUpdate(core *vault.Core, recovery bool) http.Handler {
 			}
 		}
 
+		ctx, cancel := core.GetContext()
+		defer cancel()
+
 		// Use the key to make progress on rekey
-		result, err := core.RekeyUpdate(key, req.Nonce, recovery)
+		result, err := core.RekeyUpdate(ctx, key, req.Nonce, recovery)
 		if err != nil {
 			respondError(w, http.StatusBadRequest, err)
 			return
@@ -199,8 +225,10 @@ func handleSysRekeyUpdate(core *vault.Core, recovery bool) http.Handler {
 			}
 			resp.Keys = keys
 			resp.KeysB64 = keysB64
+			respondOk(w, resp)
+		} else {
+			handleSysRekeyInitGet(ctx, core, recovery, w, r)
 		}
-		respondOk(w, resp)
 	})
 }
 

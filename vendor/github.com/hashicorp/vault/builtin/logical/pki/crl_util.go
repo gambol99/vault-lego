@@ -1,6 +1,7 @@
 package pki
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -18,7 +19,7 @@ type revocationInfo struct {
 }
 
 // Revokes a cert, and tries to be smart about error recovery
-func revokeCert(b *backend, req *logical.Request, serial string, fromLease bool) (*logical.Response, error) {
+func revokeCert(ctx context.Context, b *backend, req *logical.Request, serial string, fromLease bool) (*logical.Response, error) {
 	// As this backend is self-contained and this function does not hook into
 	// third parties to manage users or resources, if the mount is tainted,
 	// revocation doesn't matter anyways -- the CRL that would be written will
@@ -31,7 +32,7 @@ func revokeCert(b *backend, req *logical.Request, serial string, fromLease bool)
 	alreadyRevoked := false
 	var revInfo revocationInfo
 
-	certEntry, err := fetchCertBySerial(req, "revoked/", serial)
+	revEntry, err := fetchCertBySerial(ctx, req, "revoked/", serial)
 	if err != nil {
 		switch err.(type) {
 		case errutil.UserError:
@@ -40,15 +41,9 @@ func revokeCert(b *backend, req *logical.Request, serial string, fromLease bool)
 			return nil, err
 		}
 	}
-	if certEntry != nil {
+	if revEntry != nil {
 		// Set the revocation info to the existing values
 		alreadyRevoked = true
-
-		revEntry, err := req.Storage.Get("revoked/" + serial)
-		if revEntry == nil || err != nil {
-			return nil, fmt.Errorf("Error getting existing revocation info")
-		}
-
 		err = revEntry.DecodeJSON(&revInfo)
 		if err != nil {
 			return nil, fmt.Errorf("Error decoding existing revocation info")
@@ -56,7 +51,7 @@ func revokeCert(b *backend, req *logical.Request, serial string, fromLease bool)
 	}
 
 	if !alreadyRevoked {
-		certEntry, err = fetchCertBySerial(req, "certs/", serial)
+		certEntry, err := fetchCertBySerial(ctx, req, "certs/", serial)
 		if err != nil {
 			switch err.(type) {
 			case errutil.UserError:
@@ -71,7 +66,7 @@ func revokeCert(b *backend, req *logical.Request, serial string, fromLease bool)
 
 		cert, err := x509.ParseCertificate(certEntry.Value)
 		if err != nil {
-			return nil, fmt.Errorf("Error parsing certificate")
+			return nil, fmt.Errorf("Error parsing certificate: %s", err)
 		}
 		if cert == nil {
 			return nil, fmt.Errorf("Got a nil certificate")
@@ -92,19 +87,19 @@ func revokeCert(b *backend, req *logical.Request, serial string, fromLease bool)
 		revInfo.RevocationTime = currTime.Unix()
 		revInfo.RevocationTimeUTC = currTime.UTC()
 
-		certEntry, err = logical.StorageEntryJSON("revoked/"+serial, revInfo)
+		revEntry, err = logical.StorageEntryJSON("revoked/"+normalizeSerial(serial), revInfo)
 		if err != nil {
 			return nil, fmt.Errorf("Error creating revocation entry")
 		}
 
-		err = req.Storage.Put(certEntry)
+		err = req.Storage.Put(ctx, revEntry)
 		if err != nil {
 			return nil, fmt.Errorf("Error saving revoked certificate to new location")
 		}
 
 	}
 
-	crlErr := buildCRL(b, req)
+	crlErr := buildCRL(ctx, b, req)
 	switch crlErr.(type) {
 	case errutil.UserError:
 		return logical.ErrorResponse(fmt.Sprintf("Error during CRL building: %s", crlErr)), nil
@@ -125,8 +120,8 @@ func revokeCert(b *backend, req *logical.Request, serial string, fromLease bool)
 
 // Builds a CRL by going through the list of revoked certificates and building
 // a new CRL with the stored revocation times and serial numbers.
-func buildCRL(b *backend, req *logical.Request) error {
-	revokedSerials, err := req.Storage.List("revoked/")
+func buildCRL(ctx context.Context, b *backend, req *logical.Request) error {
+	revokedSerials, err := req.Storage.List(ctx, "revoked/")
 	if err != nil {
 		return errutil.InternalError{Err: fmt.Sprintf("Error fetching list of revoked certs: %s", err)}
 	}
@@ -134,7 +129,7 @@ func buildCRL(b *backend, req *logical.Request) error {
 	revokedCerts := []pkix.RevokedCertificate{}
 	var revInfo revocationInfo
 	for _, serial := range revokedSerials {
-		revokedEntry, err := req.Storage.Get("revoked/" + serial)
+		revokedEntry, err := req.Storage.Get(ctx, "revoked/"+serial)
 		if err != nil {
 			return errutil.InternalError{Err: fmt.Sprintf("Unable to fetch revoked cert with serial %s: %s", serial, err)}
 		}
@@ -171,7 +166,7 @@ func buildCRL(b *backend, req *logical.Request) error {
 		revokedCerts = append(revokedCerts, newRevCert)
 	}
 
-	signingBundle, caErr := fetchCAInfo(req)
+	signingBundle, caErr := fetchCAInfo(ctx, req)
 	switch caErr.(type) {
 	case errutil.UserError:
 		return errutil.UserError{Err: fmt.Sprintf("Could not fetch the CA certificate: %s", caErr)}
@@ -180,7 +175,7 @@ func buildCRL(b *backend, req *logical.Request) error {
 	}
 
 	crlLifetime := b.crlLifetime
-	crlInfo, err := b.CRL(req.Storage)
+	crlInfo, err := b.CRL(ctx, req.Storage)
 	if err != nil {
 		return errutil.InternalError{Err: fmt.Sprintf("Error fetching CRL config information: %s", err)}
 	}
@@ -197,7 +192,7 @@ func buildCRL(b *backend, req *logical.Request) error {
 		return errutil.InternalError{Err: fmt.Sprintf("Error creating new CRL: %s", err)}
 	}
 
-	err = req.Storage.Put(&logical.StorageEntry{
+	err = req.Storage.Put(ctx, &logical.StorageEntry{
 		Key:   "crl",
 		Value: crlBytes,
 	})

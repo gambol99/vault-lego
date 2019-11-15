@@ -20,19 +20,20 @@ import (
 	"reflect"
 	"testing"
 
-	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func TestServiceAccountGenerate(t *testing.T) {
 	tests := []struct {
 		name      string
-		expected  *api.ServiceAccount
+		expected  *v1.ServiceAccount
 		expectErr bool
 	}{
 		{
 			name: "foo",
-			expected: &api.ServiceAccount{
-				ObjectMeta: api.ObjectMeta{
+			expected: &v1.ServiceAccount{
+				ObjectMeta: metav1.ObjectMeta{
 					Name: "foo",
 				},
 			},
@@ -42,19 +43,21 @@ func TestServiceAccountGenerate(t *testing.T) {
 			expectErr: true,
 		},
 	}
-	for _, test := range tests {
-		generator := ServiceAccountGeneratorV1{
-			Name: test.name,
-		}
-		obj, err := generator.StructuredGenerate()
-		if !test.expectErr && err != nil {
-			t.Errorf("unexpected error: %v", err)
-		}
-		if test.expectErr && err != nil {
-			continue
-		}
-		if !reflect.DeepEqual(obj.(*api.ServiceAccount), test.expected) {
-			t.Errorf("\nexpected:\n%#v\nsaw:\n%#v", test.expected, obj.(*api.ServiceAccount))
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			generator := ServiceAccountGeneratorV1{
+				Name: tt.name,
+			}
+			obj, err := generator.StructuredGenerate()
+			if !tt.expectErr && err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+			if tt.expectErr && err != nil {
+				return
+			}
+			if !reflect.DeepEqual(obj.(*v1.ServiceAccount), tt.expected) {
+				t.Errorf("\nexpected:\n%#v\nsaw:\n%#v", tt.expected, obj.(*v1.ServiceAccount))
+			}
+		})
 	}
 }

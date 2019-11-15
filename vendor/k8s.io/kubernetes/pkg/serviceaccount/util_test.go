@@ -1,5 +1,5 @@
 /*
-Copyright 2014 The Kubernetes Authors.
+Copyright 2018 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,67 +16,88 @@ limitations under the License.
 
 package serviceaccount
 
-import "testing"
+import (
+	"testing"
 
-func TestMakeUsername(t *testing.T) {
+	"k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
 
-	testCases := map[string]struct {
-		Namespace   string
-		Name        string
-		ExpectedErr bool
+func TestIsServiceAccountToken(t *testing.T) {
+
+	secretIns := &v1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "token-secret-1",
+			Namespace:       "default",
+			UID:             "23456",
+			ResourceVersion: "1",
+			Annotations: map[string]string{
+				v1.ServiceAccountNameKey: "default",
+				v1.ServiceAccountUIDKey:  "12345",
+			},
+		},
+		Type: v1.SecretTypeServiceAccountToken,
+		Data: map[string][]byte{
+			"token":     []byte("ABC"),
+			"ca.crt":    []byte("CA Data"),
+			"namespace": []byte("default"),
+		},
+	}
+
+	saIns := &v1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "default",
+			UID:             "12345",
+			Namespace:       "default",
+			ResourceVersion: "1",
+		},
+	}
+
+	saInsNameNotEqual := &v1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "non-default",
+			UID:             "12345",
+			Namespace:       "default",
+			ResourceVersion: "1",
+		},
+	}
+
+	saInsUIDNotEqual := &v1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "default",
+			UID:             "67890",
+			Namespace:       "default",
+			ResourceVersion: "1",
+		},
+	}
+
+	tests := map[string]struct {
+		secret *v1.Secret
+		sa     *v1.ServiceAccount
+		expect bool
 	}{
-		"valid": {
-			Namespace:   "foo",
-			Name:        "bar",
-			ExpectedErr: false,
+		"correct service account": {
+			secret: secretIns,
+			sa:     saIns,
+			expect: true,
 		},
-		"empty": {
-			ExpectedErr: true,
+		"service account name not equal": {
+			secret: secretIns,
+			sa:     saInsNameNotEqual,
+			expect: false,
 		},
-		"empty namespace": {
-			Namespace:   "",
-			Name:        "foo",
-			ExpectedErr: true,
-		},
-		"empty name": {
-			Namespace:   "foo",
-			Name:        "",
-			ExpectedErr: true,
-		},
-		"extra segments": {
-			Namespace:   "foo",
-			Name:        "bar:baz",
-			ExpectedErr: true,
-		},
-		"invalid chars in namespace": {
-			Namespace:   "foo ",
-			Name:        "bar",
-			ExpectedErr: true,
-		},
-		"invalid chars in name": {
-			Namespace:   "foo",
-			Name:        "bar ",
-			ExpectedErr: true,
+		"service account uid not equal": {
+			secret: secretIns,
+			sa:     saInsUIDNotEqual,
+			expect: false,
 		},
 	}
 
-	for k, tc := range testCases {
-		username := MakeUsername(tc.Namespace, tc.Name)
-
-		namespace, name, err := SplitUsername(username)
-		if (err != nil) != tc.ExpectedErr {
-			t.Errorf("%s: Expected error=%v, got %v", k, tc.ExpectedErr, err)
-			continue
-		}
-		if err != nil {
-			continue
-		}
-
-		if namespace != tc.Namespace {
-			t.Errorf("%s: Expected namespace %q, got %q", k, tc.Namespace, namespace)
-		}
-		if name != tc.Name {
-			t.Errorf("%s: Expected name %q, got %q", k, tc.Name, name)
+	for k, v := range tests {
+		actual := IsServiceAccountToken(v.secret, v.sa)
+		if actual != v.expect {
+			t.Errorf("%s failed, expected %t but received %t", k, v.expect, actual)
 		}
 	}
+
 }

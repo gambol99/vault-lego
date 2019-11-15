@@ -1,6 +1,6 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-# Copyright 2014 The Kubernetes Authors.
+# Copyright 2018 The Kubernetes Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,71 +14,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# A single script that runs a predefined set of update-* scripts, as they often go together.
+# This script is a vestigial redirection.  Please do not add "real" logic.
+# The "true" target of this makerule is `hack/make-rules/update.sh`.
+
 set -o errexit
 set -o nounset
 set -o pipefail
 
 KUBE_ROOT=$(dirname "${BASH_SOURCE}")/..
-source "${KUBE_ROOT}/cluster/lib/util.sh"
 
-SILENT=true
-ALL=false
-
-while getopts ":va" opt; do
-	case $opt in
-		a)
-			ALL=true
-			;;
-		v)
-			SILENT=false
-			;;
-		\?)
-			echo "Invalid flag: -$OPTARG" >&2
-			exit 1
-			;;
-	esac
-done
-
-trap 'exit 1' SIGINT
-
-if $SILENT ; then
-	echo "Running in the silent mode, run with -v if you want to see script logs."
-fi
-
-if ! $ALL ; then
-	echo "Running in short-circuit mode; run with -a to force all scripts to run."
-fi
-
-BASH_TARGETS="
-	generated-protobuf
-	codegen
-	codecgen
-	generated-docs
-	generated-swagger-docs
-	swagger-spec
-	openapi-spec
-	api-reference-docs"
-
-
-for t in $BASH_TARGETS
-do
-	echo -e "${color_yellow}Updating $t${color_norm}"
-	if $SILENT ; then
-		if ! bash "$KUBE_ROOT/hack/update-$t.sh" 1> /dev/null; then
-			echo -e "${color_red}Updating $t FAILED${color_norm}"
-			if ! $ALL; then
-				exit 1
-			fi
-		fi
-	else
-		if ! bash "$KUBE_ROOT/hack/update-$t.sh"; then
-			echo -e "${color_red}Updating $t FAILED${color_norm}"
-			if ! $ALL; then
-				exit 1
-			fi
-		fi
-	fi
-done
-
-echo -e "${color_green}Update scripts completed successfully${color_norm}"
+echo "NOTE: $0 has been replaced by 'make update'"
+echo
+echo "The equivalent of this invocation is: "
+echo "    make update"
+echo
+echo
+make --no-print-directory -C "${KUBE_ROOT}" update

@@ -23,10 +23,9 @@ import (
 	"k8s.io/kubernetes/cmd/kubeadm/app"
 )
 
-// TODO(phase1+): check for root
 func main() {
 	if err := app.Run(); err != nil {
-		fmt.Printf(app.AlphaWarningOnExit)
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 	os.Exit(0)

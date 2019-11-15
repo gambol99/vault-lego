@@ -11,14 +11,16 @@ spec:
     spec:
       containers:
       - name: vault-lego
-        image: quay.io/gambol99/vault-lego:latest
+        image: catac/vault-lego:latest
+        args: ["--verbose"]
+        imagePullPolicy: Always
         resources:
           limits:
             cpu: 100m
             memory: 100Mi
         env:
         - name: VAULT_ADDR
-          value: "https://vault.vault.svc.cluster.local:8200"
+          value: "http://vault.default.svc.cluster.local:8200"
         - name: VAULT_TOKEN
           valueFrom:
             secretKeyRef:

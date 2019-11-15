@@ -19,18 +19,20 @@ package kubelet
 import (
 	"fmt"
 
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/fieldpath"
+	"github.com/golang/glog"
+
+	"k8s.io/api/core/v1"
+	"k8s.io/kubernetes/pkg/api/v1/resource"
 )
 
-// defaultPodLimitsForDownwardApi copies the input pod, and optional container,
+// defaultPodLimitsForDownwardAPI copies the input pod, and optional container,
 // and applies default resource limits. it returns a copy of the input pod,
 // and a copy of the input container (if specified) with default limits
 // applied. if a container has no limit specified, it will default the limit to
 // the node allocatable.
 // TODO: if/when we have pod level resources, we need to update this function
 // to use those limits instead of node allocatable.
-func (kl *Kubelet) defaultPodLimitsForDownwardApi(pod *api.Pod, container *api.Container) (*api.Pod, *api.Container, error) {
+func (kl *Kubelet) defaultPodLimitsForDownwardAPI(pod *v1.Pod, container *v1.Container) (*v1.Pod, *v1.Container, error) {
 	if pod == nil {
 		return nil, nil, fmt.Errorf("invalid input, pod cannot be nil")
 	}
@@ -40,30 +42,16 @@ func (kl *Kubelet) defaultPodLimitsForDownwardApi(pod *api.Pod, container *api.C
 		return nil, nil, fmt.Errorf("failed to find node object, expected a node")
 	}
 	allocatable := node.Status.Allocatable
-
-	podCopy, err := api.Scheme.Copy(pod)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to perform a deep copy of pod object: %v", err)
-	}
-	outputPod, ok := podCopy.(*api.Pod)
-	if !ok {
-		return nil, nil, fmt.Errorf("unexpected type returned from deep copy of pod object")
-	}
+	glog.Infof("allocatable: %v", allocatable)
+	outputPod := pod.DeepCopy()
 	for idx := range outputPod.Spec.Containers {
-		fieldpath.MergeContainerResourceLimits(&outputPod.Spec.Containers[idx], allocatable)
+		resource.MergeContainerResourceLimits(&outputPod.Spec.Containers[idx], allocatable)
 	}
 
-	var outputContainer *api.Container
+	var outputContainer *v1.Container
 	if container != nil {
-		containerCopy, err := api.Scheme.DeepCopy(container)
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to perform a deep copy of container object: %v", err)
-		}
-		outputContainer, ok = containerCopy.(*api.Container)
-		if !ok {
-			return nil, nil, fmt.Errorf("unexpected type returned from deep copy of container object")
-		}
-		fieldpath.MergeContainerResourceLimits(outputContainer, allocatable)
+		outputContainer = container.DeepCopy()
+		resource.MergeContainerResourceLimits(outputContainer, allocatable)
 	}
 	return outputPod, outputContainer, nil
 }

@@ -17,24 +17,31 @@ limitations under the License.
 package metaonly
 
 import (
-	"k8s.io/kubernetes/pkg/api/unversioned"
-	"k8s.io/kubernetes/pkg/api/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // MetadataOnlyObject allows decoding only the apiVersion, kind, and metadata fields of
 // JSON data.
 // TODO: enable meta-only decoding for protobuf.
+//
+// +k8s:deepcopy-gen=true
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 type MetadataOnlyObject struct {
-	unversioned.TypeMeta `json:",inline"`
-	v1.ObjectMeta        `json:"metadata,omitempty"`
+	metav1.TypeMeta `json:",inline"`
+	// +optional
+	metav1.ObjectMeta `json:"metadata,omitempty"`
 }
 
 // MetadataOnlyObjectList allows decoding from JSON data only the typemeta and metadata of
 // a list, and those of the enclosing objects.
 // TODO: enable meta-only decoding for protobuf.
+//
+// +k8s:deepcopy-gen=true
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 type MetadataOnlyObjectList struct {
-	unversioned.TypeMeta `json:",inline"`
-	unversioned.ListMeta `json:"metadata,omitempty"`
+	metav1.TypeMeta `json:",inline"`
+	// +optional
+	metav1.ListMeta `json:"metadata,omitempty"`
 
 	Items []MetadataOnlyObject `json:"items"`
 }

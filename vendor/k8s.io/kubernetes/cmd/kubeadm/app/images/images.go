@@ -18,49 +18,65 @@ package images
 
 import (
 	"fmt"
-	"runtime"
 
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
+	"k8s.io/kubernetes/cmd/kubeadm/app/constants"
+	"k8s.io/kubernetes/cmd/kubeadm/app/features"
+	kubeadmutil "k8s.io/kubernetes/cmd/kubeadm/app/util"
 )
 
-const (
-	KubeEtcdImage = "etcd"
-
-	KubeAPIServerImage         = "apiserver"
-	KubeControllerManagerImage = "controller-manager"
-	KubeSchedulerImage         = "scheduler"
-	KubeProxyImage             = "proxy"
-
-	KubeDNSImage         = "kube-dns"
-	KubeDNSmasqImage     = "dnsmasq"
-	KubeExechealthzImage = "exechealthz"
-
-	gcrPrefix   = "gcr.io/google_containers"
-	etcdVersion = "2.2.5"
-
-	kubeDNSVersion     = "1.7"
-	dnsmasqVersion     = "1.3"
-	exechealthzVersion = "1.1"
-)
-
-func GetCoreImage(image string, cfg *kubeadmapi.MasterConfiguration, overrideImage string) string {
-	if overrideImage != "" {
-		return overrideImage
-	}
-
-	return map[string]string{
-		KubeEtcdImage:              fmt.Sprintf("%s/%s-%s:%s", gcrPrefix, "etcd", runtime.GOARCH, etcdVersion),
-		KubeAPIServerImage:         fmt.Sprintf("%s/%s-%s:%s", gcrPrefix, "kube-apiserver", runtime.GOARCH, cfg.KubernetesVersion),
-		KubeControllerManagerImage: fmt.Sprintf("%s/%s-%s:%s", gcrPrefix, "kube-controller-manager", runtime.GOARCH, cfg.KubernetesVersion),
-		KubeSchedulerImage:         fmt.Sprintf("%s/%s-%s:%s", gcrPrefix, "kube-scheduler", runtime.GOARCH, cfg.KubernetesVersion),
-		KubeProxyImage:             fmt.Sprintf("%s/%s-%s:%s", gcrPrefix, "kube-proxy", runtime.GOARCH, cfg.KubernetesVersion),
-	}[image]
+// GetGenericImage generates and returns a platform agnostic image (backed by manifest list)
+func GetGenericImage(prefix, image, tag string) string {
+	return fmt.Sprintf("%s/%s:%s", prefix, image, tag)
 }
 
-func GetAddonImage(image string) string {
-	return map[string]string{
-		KubeDNSImage:         fmt.Sprintf("%s/%s-%s:%s", gcrPrefix, "kubedns", runtime.GOARCH, kubeDNSVersion),
-		KubeDNSmasqImage:     fmt.Sprintf("%s/%s-%s:%s", gcrPrefix, "kube-dnsmasq", runtime.GOARCH, dnsmasqVersion),
-		KubeExechealthzImage: fmt.Sprintf("%s/%s-%s:%s", gcrPrefix, "exechealthz", runtime.GOARCH, exechealthzVersion),
-	}[image]
+// GetKubeControlPlaneImage generates and returns the image for the core Kubernetes components or returns the unified control plane image if specified
+func GetKubeControlPlaneImage(image string, cfg *kubeadmapi.ClusterConfiguration) string {
+	if cfg.UnifiedControlPlaneImage != "" {
+		return cfg.UnifiedControlPlaneImage
+	}
+	repoPrefix := cfg.GetControlPlaneImageRepository()
+	kubernetesImageTag := kubeadmutil.KubernetesVersionToImageTag(cfg.KubernetesVersion)
+	return GetGenericImage(repoPrefix, image, kubernetesImageTag)
+}
+
+// GetEtcdImage generates and returns the image for etcd or returns cfg.Etcd.Local.Image if specified
+func GetEtcdImage(cfg *kubeadmapi.ClusterConfiguration) string {
+	if cfg.Etcd.Local != nil && cfg.Etcd.Local.Image != "" {
+		return cfg.Etcd.Local.Image
+	}
+	etcdImageTag := constants.DefaultEtcdVersion
+	etcdImageVersion, err := constants.EtcdSupportedVersion(cfg.KubernetesVersion)
+	if err == nil {
+		etcdImageTag = etcdImageVersion.String()
+	}
+	return GetGenericImage(cfg.ImageRepository, constants.Etcd, etcdImageTag)
+}
+
+// GetAllImages returns a list of container images kubeadm expects to use on a control plane node
+func GetAllImages(cfg *kubeadmapi.ClusterConfiguration) []string {
+	imgs := []string{}
+	imgs = append(imgs, GetKubeControlPlaneImage(constants.KubeAPIServer, cfg))
+	imgs = append(imgs, GetKubeControlPlaneImage(constants.KubeControllerManager, cfg))
+	imgs = append(imgs, GetKubeControlPlaneImage(constants.KubeScheduler, cfg))
+	imgs = append(imgs, GetKubeControlPlaneImage(constants.KubeProxy, cfg))
+
+	// pause, etcd and kube-dns are not available on the ci image repository so use the default image repository.
+	imgs = append(imgs, GetGenericImage(cfg.ImageRepository, "pause", "3.1"))
+
+	// if etcd is not external then add the image as it will be required
+	if cfg.Etcd.Local != nil {
+		imgs = append(imgs, GetEtcdImage(cfg))
+	}
+
+	// Append the appropriate DNS images
+	if features.Enabled(cfg.FeatureGates, features.CoreDNS) {
+		imgs = append(imgs, GetGenericImage(cfg.ImageRepository, constants.CoreDNS, constants.CoreDNSVersion))
+	} else {
+		imgs = append(imgs, GetGenericImage(cfg.ImageRepository, "k8s-dns-kube-dns", constants.KubeDNSVersion))
+		imgs = append(imgs, GetGenericImage(cfg.ImageRepository, "k8s-dns-sidecar", constants.KubeDNSVersion))
+		imgs = append(imgs, GetGenericImage(cfg.ImageRepository, "k8s-dns-dnsmasq-nanny", constants.KubeDNSVersion))
+	}
+
+	return imgs
 }

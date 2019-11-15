@@ -18,20 +18,29 @@ package cmd
 
 import (
 	"fmt"
-	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
+	"time"
 
-	"github.com/renstrom/dedent"
 	"github.com/spf13/cobra"
 
-	"k8s.io/kubernetes/pkg/api"
-	coreclient "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/core/unversioned"
-	"k8s.io/kubernetes/pkg/client/restclient"
-	"k8s.io/kubernetes/pkg/client/unversioned/portforward"
-	"k8s.io/kubernetes/pkg/client/unversioned/remotecommand"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/cli-runtime/pkg/genericclioptions"
+	"k8s.io/client-go/kubernetes/scheme"
+	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
+	restclient "k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/portforward"
+	"k8s.io/client-go/transport/spdy"
+	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
 	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
+	"k8s.io/kubernetes/pkg/kubectl/polymorphichelpers"
+	"k8s.io/kubernetes/pkg/kubectl/util"
+	"k8s.io/kubernetes/pkg/kubectl/util/i18n"
 )
 
 // PortForwardOptions contains all the options for running the port-forward cli command.
@@ -40,7 +49,7 @@ type PortForwardOptions struct {
 	PodName       string
 	RESTClient    *restclient.RESTClient
 	Config        *restclient.Config
-	PodClient     coreclient.PodsGetter
+	PodClient     corev1client.PodsGetter
 	Ports         []string
 	PortForwarder portForwarder
 	StopChannel   chan struct{}
@@ -48,45 +57,62 @@ type PortForwardOptions struct {
 }
 
 var (
-	portforward_example = dedent.Dedent(`
+	portforwardLong = templates.LongDesc(i18n.T(`
+                Forward one or more local ports to a pod.
+
+                Use resource type/name such as deployment/mydeployment to select a pod. Resource type defaults to 'pod' if omitted.
+
+                If there are multiple pods matching the criteria, a pod will be selected automatically. The
+                forwarding session ends when the selected pod terminates, and rerun of the command is needed
+                to resume forwarding.`))
+
+	portforwardExample = templates.Examples(i18n.T(`
 		# Listen on ports 5000 and 6000 locally, forwarding data to/from ports 5000 and 6000 in the pod
-		kubectl port-forward mypod 5000 6000
+		kubectl port-forward pod/mypod 5000 6000
+
+		# Listen on ports 5000 and 6000 locally, forwarding data to/from ports 5000 and 6000 in a pod selected by the deployment
+		kubectl port-forward deployment/mydeployment 5000 6000
+
+		# Listen on ports 5000 and 6000 locally, forwarding data to/from ports 5000 and 6000 in a pod selected by the service
+		kubectl port-forward service/myservice 5000 6000
 
 		# Listen on port 8888 locally, forwarding to 5000 in the pod
-		kubectl port-forward mypod 8888:5000
+		kubectl port-forward pod/mypod 8888:5000
 
 		# Listen on a random port locally, forwarding to 5000 in the pod
-		kubectl port-forward mypod :5000
-
-		# Listen on a random port locally, forwarding to 5000 in the pod
-		kubectl port-forward  mypod 0:5000`)
+		kubectl port-forward pod/mypod :5000`))
 )
 
-func NewCmdPortForward(f *cmdutil.Factory, cmdOut, cmdErr io.Writer) *cobra.Command {
+const (
+	// Amount of time to wait until at least one pod is running
+	defaultPodPortForwardWaitTimeout = 60 * time.Second
+)
+
+func NewCmdPortForward(f cmdutil.Factory, streams genericclioptions.IOStreams) *cobra.Command {
 	opts := &PortForwardOptions{
 		PortForwarder: &defaultPortForwarder{
-			cmdOut: cmdOut,
-			cmdErr: cmdErr,
+			IOStreams: streams,
 		},
 	}
 	cmd := &cobra.Command{
-		Use:     "port-forward POD [LOCAL_PORT:]REMOTE_PORT [...[LOCAL_PORT_N:]REMOTE_PORT_N]",
-		Short:   "Forward one or more local ports to a pod",
-		Long:    "Forward one or more local ports to a pod.",
-		Example: portforward_example,
+		Use: "port-forward TYPE/NAME [LOCAL_PORT:]REMOTE_PORT [...[LOCAL_PORT_N:]REMOTE_PORT_N]",
+		DisableFlagsInUseLine: true,
+		Short:   i18n.T("Forward one or more local ports to a pod"),
+		Long:    portforwardLong,
+		Example: portforwardExample,
 		Run: func(cmd *cobra.Command, args []string) {
-			if err := opts.Complete(f, cmd, args, cmdOut, cmdErr); err != nil {
+			if err := opts.Complete(f, cmd, args); err != nil {
 				cmdutil.CheckErr(err)
 			}
 			if err := opts.Validate(); err != nil {
-				cmdutil.CheckErr(cmdutil.UsageError(cmd, err.Error()))
+				cmdutil.CheckErr(cmdutil.UsageErrorf(cmd, "%v", err.Error()))
 			}
 			if err := opts.RunPortForward(); err != nil {
 				cmdutil.CheckErr(err)
 			}
 		},
 	}
-	cmd.Flags().StringP("pod", "p", "", "Pod name")
+	cmdutil.AddPodRunningTimeoutFlag(cmd, defaultPodPortForwardWaitTimeout)
 	// TODO support UID
 	return cmd
 }
@@ -96,49 +122,110 @@ type portForwarder interface {
 }
 
 type defaultPortForwarder struct {
-	cmdOut, cmdErr io.Writer
+	genericclioptions.IOStreams
 }
 
 func (f *defaultPortForwarder) ForwardPorts(method string, url *url.URL, opts PortForwardOptions) error {
-	dialer, err := remotecommand.NewExecutor(opts.Config, method, url)
+	transport, upgrader, err := spdy.RoundTripperFor(opts.Config)
 	if err != nil {
 		return err
 	}
-	fw, err := portforward.New(dialer, opts.Ports, opts.StopChannel, opts.ReadyChannel, f.cmdOut, f.cmdErr)
+	dialer := spdy.NewDialer(upgrader, &http.Client{Transport: transport}, method, url)
+	fw, err := portforward.New(dialer, opts.Ports, opts.StopChannel, opts.ReadyChannel, f.Out, f.ErrOut)
 	if err != nil {
 		return err
 	}
 	return fw.ForwardPorts()
 }
 
+// Translates service port to target port
+// It rewrites ports as needed if the Service port declares targetPort.
+// It returns an error when a named targetPort can't find a match in the pod, or the Service did not declare
+// the port.
+func translateServicePortToTargetPort(ports []string, svc corev1.Service, pod corev1.Pod) ([]string, error) {
+	var translated []string
+	for _, port := range ports {
+		// port is in the form of [LOCAL PORT]:REMOTE PORT
+		parts := strings.Split(port, ":")
+		input := parts[0]
+		if len(parts) == 2 {
+			input = parts[1]
+		}
+		portnum, err := strconv.Atoi(input)
+		if err != nil {
+			return ports, err
+		}
+		containerPort, err := util.LookupContainerPortNumberByServicePort(svc, pod, int32(portnum))
+		if err != nil {
+			// can't resolve a named port, or Service did not declare this port, return an error
+			return nil, err
+		} else {
+			if int32(portnum) != containerPort {
+				translated = append(translated, fmt.Sprintf("%s:%d", parts[0], containerPort))
+			} else {
+				translated = append(translated, port)
+			}
+		}
+	}
+	return translated, nil
+}
+
 // Complete completes all the required options for port-forward cmd.
-func (o *PortForwardOptions) Complete(f *cmdutil.Factory, cmd *cobra.Command, args []string, cmdOut io.Writer, cmdErr io.Writer) error {
+func (o *PortForwardOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args []string) error {
 	var err error
-	o.PodName = cmdutil.GetFlagString(cmd, "pod")
-	if len(o.PodName) == 0 && len(args) == 0 {
-		return cmdutil.UsageError(cmd, "POD is required for port-forward")
+	if len(args) < 2 {
+		return cmdutil.UsageErrorf(cmd, "TYPE/NAME and list of ports are required for port-forward")
 	}
 
-	if len(o.PodName) != 0 {
-		printDeprecationWarning("port-forward POD", "-p POD")
-		o.Ports = args
-	} else {
-		o.PodName = args[0]
+	o.Namespace, _, err = f.ToRawKubeConfigLoader().Namespace()
+	if err != nil {
+		return err
+	}
+
+	builder := f.NewBuilder().
+		WithScheme(scheme.Scheme, scheme.Scheme.PrioritizedVersionsAllGroups()...).
+		ContinueOnError().
+		NamespaceParam(o.Namespace).DefaultNamespace()
+
+	getPodTimeout, err := cmdutil.GetPodRunningTimeoutFlag(cmd)
+	if err != nil {
+		return cmdutil.UsageErrorf(cmd, err.Error())
+	}
+
+	resourceName := args[0]
+	builder.ResourceNames("pods", resourceName)
+
+	obj, err := builder.Do().Object()
+	if err != nil {
+		return err
+	}
+
+	forwardablePod, err := polymorphichelpers.AttachablePodForObjectFn(f, obj, getPodTimeout)
+	if err != nil {
+		return err
+	}
+
+	o.PodName = forwardablePod.Name
+
+	// handle service port mapping to target port if needed
+	switch t := obj.(type) {
+	case *corev1.Service:
+		o.Ports, err = translateServicePortToTargetPort(args[1:], *t, *forwardablePod)
+		if err != nil {
+			return err
+		}
+	default:
 		o.Ports = args[1:]
 	}
 
-	o.Namespace, _, err = f.DefaultNamespace()
+	clientset, err := f.KubernetesClientSet()
 	if err != nil {
 		return err
 	}
 
-	clientset, err := f.ClientSet()
-	if err != nil {
-		return err
-	}
-	o.PodClient = clientset.Core()
+	o.PodClient = clientset.CoreV1()
 
-	o.Config, err = f.ClientConfig()
+	o.Config, err = f.ToRESTConfig()
 	if err != nil {
 		return err
 	}
@@ -155,7 +242,7 @@ func (o *PortForwardOptions) Complete(f *cmdutil.Factory, cmd *cobra.Command, ar
 // Validate validates all the required options for port-forward cmd.
 func (o PortForwardOptions) Validate() error {
 	if len(o.PodName) == 0 {
-		return fmt.Errorf("pod name must be specified")
+		return fmt.Errorf("pod name or resource type/name must be specified")
 	}
 
 	if len(o.Ports) < 1 {
@@ -170,12 +257,12 @@ func (o PortForwardOptions) Validate() error {
 
 // RunPortForward implements all the necessary functionality for port-forward cmd.
 func (o PortForwardOptions) RunPortForward() error {
-	pod, err := o.PodClient.Pods(o.Namespace).Get(o.PodName)
+	pod, err := o.PodClient.Pods(o.Namespace).Get(o.PodName, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
 
-	if pod.Status.Phase != api.PodRunning {
+	if pod.Status.Phase != corev1.PodRunning {
 		return fmt.Errorf("unable to forward port because pod is not running. Current status=%v", pod.Status.Phase)
 	}
 

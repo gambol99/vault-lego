@@ -45,7 +45,7 @@ func main() {
 		},
 		cli.StringFlag{
 			Name:   "default-path, p",
-			Usage:  "the default vault path the pki exists on, e.g. pki/default/issue `PATH`",
+			Usage:  "the default vault path the pki exists on, e.g. pki/issue/default `PATH`",
 			EnvVar: "VAULT_PKI_PATH",
 			Value:  "pki/issue/default",
 		},
@@ -77,6 +77,12 @@ func main() {
 			EnvVar: "VAULT_PKI_MIN_TTL",
 			Value:  24 * time.Hour,
 		},
+		cli.DurationFlag{
+			Name:   "refresh-ttl",
+			Usage:  "refresh certificates when time-to-live goes below this threshold",
+			EnvVar: "VAULT_PKI_REFRESH_TTL",
+			Value:  6 * time.Hour,
+		},
 		cli.BoolTFlag{
 			Name:  "json-logging",
 			Usage: "whether to enable default json logging format, defaults to true",
@@ -99,6 +105,7 @@ func main() {
 			vaultToken:     cx.String("token"),
 			defaultCertTTL: cx.Duration("default-ttl"),
 			minCertTTL:     cx.Duration("minimum-ttl"),
+			refreshCertTTL: cx.Duration("refresh-ttl"),
 			defaultPath:    cx.String("default-path"),
 			kubeconfig:     cx.String("kubeconfig"),
 			kubecontext:    cx.String("kube-context"),

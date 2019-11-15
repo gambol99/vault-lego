@@ -24,30 +24,30 @@ import (
 	"net/http"
 	"time"
 
-	"k8s.io/kubernetes/pkg/api"
-	apierrors "k8s.io/kubernetes/pkg/api/errors"
-	"k8s.io/kubernetes/pkg/api/unversioned"
-	"k8s.io/kubernetes/pkg/util/httpstream"
-	"k8s.io/kubernetes/pkg/util/httpstream/spdy"
-	"k8s.io/kubernetes/pkg/util/runtime"
-	"k8s.io/kubernetes/pkg/util/term"
-	"k8s.io/kubernetes/pkg/util/wsstream"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/httpstream"
+	"k8s.io/apimachinery/pkg/util/httpstream/spdy"
+	remotecommandconsts "k8s.io/apimachinery/pkg/util/remotecommand"
+	"k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apiserver/pkg/util/wsstream"
+	"k8s.io/client-go/tools/remotecommand"
+	api "k8s.io/kubernetes/pkg/apis/core"
 
 	"github.com/golang/glog"
 )
 
-// options contains details about which streams are required for
+// Options contains details about which streams are required for
 // remote command execution.
-type options struct {
-	stdin           bool
-	stdout          bool
-	stderr          bool
-	tty             bool
-	expectedStreams int
+type Options struct {
+	Stdin  bool
+	Stdout bool
+	Stderr bool
+	TTY    bool
 }
 
-// newOptions creates a new options from the Request.
-func newOptions(req *http.Request) (*options, error) {
+// NewOptions creates a new Options from the Request.
+func NewOptions(req *http.Request) (*Options, error) {
 	tty := req.FormValue(api.ExecTTYParam) == "1"
 	stdin := req.FormValue(api.ExecStdinParam) == "1"
 	stdout := req.FormValue(api.ExecStdoutParam) == "1"
@@ -58,28 +58,15 @@ func newOptions(req *http.Request) (*options, error) {
 		stderr = false
 	}
 
-	// count the streams client asked for, starting with 1
-	expectedStreams := 1
-	if stdin {
-		expectedStreams++
-	}
-	if stdout {
-		expectedStreams++
-	}
-	if stderr {
-		expectedStreams++
-	}
-
-	if expectedStreams == 1 {
+	if !stdin && !stdout && !stderr {
 		return nil, fmt.Errorf("you must specify at least 1 of stdin, stdout, stderr")
 	}
 
-	return &options{
-		stdin:           stdin,
-		stdout:          stdout,
-		stderr:          stderr,
-		tty:             tty,
-		expectedStreams: expectedStreams,
+	return &Options{
+		Stdin:  stdin,
+		Stdout: stdout,
+		Stderr: stderr,
+		TTY:    tty,
 	}, nil
 }
 
@@ -92,7 +79,7 @@ type context struct {
 	stderrStream io.WriteCloser
 	writeStatus  func(status *apierrors.StatusError) error
 	resizeStream io.ReadCloser
-	resizeChan   chan term.Size
+	resizeChan   chan remotecommand.TerminalSize
 	tty          bool
 }
 
@@ -115,15 +102,7 @@ func waitStreamReply(replySent <-chan struct{}, notify chan<- struct{}, stop <-c
 	}
 }
 
-func createStreams(req *http.Request, w http.ResponseWriter, supportedStreamProtocols []string, idleTimeout, streamCreationTimeout time.Duration) (*context, bool) {
-	opts, err := newOptions(req)
-	if err != nil {
-		runtime.HandleError(err)
-		w.WriteHeader(http.StatusBadRequest)
-		fmt.Fprint(w, err.Error())
-		return nil, false
-	}
-
+func createStreams(req *http.Request, w http.ResponseWriter, opts *Options, supportedStreamProtocols []string, idleTimeout, streamCreationTimeout time.Duration) (*context, bool) {
 	var ctx *context
 	var ok bool
 	if wsstream.IsWebSocketRequest(req) {
@@ -136,14 +115,14 @@ func createStreams(req *http.Request, w http.ResponseWriter, supportedStreamProt
 	}
 
 	if ctx.resizeStream != nil {
-		ctx.resizeChan = make(chan term.Size)
+		ctx.resizeChan = make(chan remotecommand.TerminalSize)
 		go handleResizeEvents(ctx.resizeStream, ctx.resizeChan)
 	}
 
 	return ctx, true
 }
 
-func createHttpStreamStreams(req *http.Request, w http.ResponseWriter, opts *options, supportedStreamProtocols []string, idleTimeout, streamCreationTimeout time.Duration) (*context, bool) {
+func createHttpStreamStreams(req *http.Request, w http.ResponseWriter, opts *Options, supportedStreamProtocols []string, idleTimeout, streamCreationTimeout time.Duration) (*context, bool) {
 	protocol, err := httpstream.Handshake(req, w, supportedStreamProtocols)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -170,34 +149,45 @@ func createHttpStreamStreams(req *http.Request, w http.ResponseWriter, opts *opt
 
 	var handler protocolHandler
 	switch protocol {
-	case StreamProtocolV4Name:
+	case remotecommandconsts.StreamProtocolV4Name:
 		handler = &v4ProtocolHandler{}
-	case StreamProtocolV3Name:
+	case remotecommandconsts.StreamProtocolV3Name:
 		handler = &v3ProtocolHandler{}
-	case StreamProtocolV2Name:
+	case remotecommandconsts.StreamProtocolV2Name:
 		handler = &v2ProtocolHandler{}
 	case "":
-		glog.V(4).Infof("Client did not request protocol negotiaion. Falling back to %q", StreamProtocolV1Name)
+		glog.V(4).Infof("Client did not request protocol negotiation. Falling back to %q", remotecommandconsts.StreamProtocolV1Name)
 		fallthrough
-	case StreamProtocolV1Name:
+	case remotecommandconsts.StreamProtocolV1Name:
 		handler = &v1ProtocolHandler{}
 	}
 
-	if opts.tty && handler.supportsTerminalResizing() {
-		opts.expectedStreams++
+	// count the streams client asked for, starting with 1
+	expectedStreams := 1
+	if opts.Stdin {
+		expectedStreams++
+	}
+	if opts.Stdout {
+		expectedStreams++
+	}
+	if opts.Stderr {
+		expectedStreams++
+	}
+	if opts.TTY && handler.supportsTerminalResizing() {
+		expectedStreams++
 	}
 
 	expired := time.NewTimer(streamCreationTimeout)
 	defer expired.Stop()
 
-	ctx, err := handler.waitForStreams(streamCh, opts.expectedStreams, expired.C)
+	ctx, err := handler.waitForStreams(streamCh, expectedStreams, expired.C)
 	if err != nil {
 		runtime.HandleError(err)
 		return nil, false
 	}
 
 	ctx.conn = conn
-	ctx.tty = opts.tty
+	ctx.tty = opts.TTY
 
 	return ctx, true
 }
@@ -211,7 +201,7 @@ type protocolHandler interface {
 }
 
 // v4ProtocolHandler implements the V4 protocol version for streaming command execution. It only differs
-// in from v3 in the error stream format using an json-marshaled unversioned.Status which carries
+// in from v3 in the error stream format using an json-marshaled metav1.Status which carries
 // the process' exit code.
 type v4ProtocolHandler struct{}
 
@@ -420,12 +410,12 @@ WaitForStreams:
 // supportsTerminalResizing returns false because v1ProtocolHandler doesn't support it.
 func (*v1ProtocolHandler) supportsTerminalResizing() bool { return false }
 
-func handleResizeEvents(stream io.Reader, channel chan<- term.Size) {
+func handleResizeEvents(stream io.Reader, channel chan<- remotecommand.TerminalSize) {
 	defer runtime.HandleCrash()
 
 	decoder := json.NewDecoder(stream)
 	for {
-		size := term.Size{}
+		size := remotecommand.TerminalSize{}
 		if err := decoder.Decode(&size); err != nil {
 			break
 		}
@@ -433,9 +423,9 @@ func handleResizeEvents(stream io.Reader, channel chan<- term.Size) {
 	}
 }
 
-func v1WriteStatusFunc(stream io.WriteCloser) func(status *apierrors.StatusError) error {
+func v1WriteStatusFunc(stream io.Writer) func(status *apierrors.StatusError) error {
 	return func(status *apierrors.StatusError) error {
-		if status.Status().Status == unversioned.StatusSuccess {
+		if status.Status().Status == metav1.StatusSuccess {
 			return nil // send error messages
 		}
 		_, err := stream.Write([]byte(status.Error()))
@@ -445,7 +435,7 @@ func v1WriteStatusFunc(stream io.WriteCloser) func(status *apierrors.StatusError
 
 // v4WriteStatusFunc returns a WriteStatusFunc that marshals a given api Status
 // as json in the error channel.
-func v4WriteStatusFunc(stream io.WriteCloser) func(status *apierrors.StatusError) error {
+func v4WriteStatusFunc(stream io.Writer) func(status *apierrors.StatusError) error {
 	return func(status *apierrors.StatusError) error {
 		bs, err := json.Marshal(status.Status())
 		if err != nil {

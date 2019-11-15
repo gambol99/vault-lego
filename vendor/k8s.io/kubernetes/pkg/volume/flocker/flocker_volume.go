@@ -19,9 +19,11 @@ package flocker
 import (
 	"fmt"
 
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/resource"
+	"k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/kubernetes/pkg/volume"
+	"k8s.io/kubernetes/pkg/volume/util"
 )
 
 type volumeManager interface {
@@ -52,14 +54,21 @@ type flockerVolumeProvisioner struct {
 
 var _ volume.Provisioner = &flockerVolumeProvisioner{}
 
-func (c *flockerVolumeProvisioner) Provision() (*api.PersistentVolume, error) {
+func (c *flockerVolumeProvisioner) Provision(selectedNode *v1.Node, allowedTopologies []v1.TopologySelectorTerm) (*v1.PersistentVolume, error) {
+	if !util.AccessModesContainedInAll(c.plugin.GetAccessModes(), c.options.PVC.Spec.AccessModes) {
+		return nil, fmt.Errorf("invalid AccessModes %v: only AccessModes %v are supported", c.options.PVC.Spec.AccessModes, c.plugin.GetAccessModes())
+	}
 
 	if len(c.options.Parameters) > 0 {
 		return nil, fmt.Errorf("Provisioning failed: Specified at least one unsupported parameter")
 	}
 
-	if c.options.Selector != nil {
+	if c.options.PVC.Spec.Selector != nil {
 		return nil, fmt.Errorf("Provisioning failed: Specified unsupported selector")
+	}
+
+	if util.CheckPersistentVolumeClaimModeBlock(c.options.PVC) {
+		return nil, fmt.Errorf("%s does not support block volume provisioning", c.plugin.GetPluginName())
 	}
 
 	datasetUUID, sizeGB, labels, err := c.manager.CreateVolume(c)
@@ -67,26 +76,29 @@ func (c *flockerVolumeProvisioner) Provision() (*api.PersistentVolume, error) {
 		return nil, err
 	}
 
-	pv := &api.PersistentVolume{
-		ObjectMeta: api.ObjectMeta{
+	pv := &v1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{
 			Name:   c.options.PVName,
 			Labels: map[string]string{},
 			Annotations: map[string]string{
-				"kubernetes.io/createdby": "flocker-dynamic-provisioner",
+				util.VolumeDynamicallyCreatedByKey: "flocker-dynamic-provisioner",
 			},
 		},
-		Spec: api.PersistentVolumeSpec{
+		Spec: v1.PersistentVolumeSpec{
 			PersistentVolumeReclaimPolicy: c.options.PersistentVolumeReclaimPolicy,
-			AccessModes:                   c.options.AccessModes,
-			Capacity: api.ResourceList{
-				api.ResourceName(api.ResourceStorage): resource.MustParse(fmt.Sprintf("%dGi", sizeGB)),
+			AccessModes:                   c.options.PVC.Spec.AccessModes,
+			Capacity: v1.ResourceList{
+				v1.ResourceName(v1.ResourceStorage): resource.MustParse(fmt.Sprintf("%dGi", sizeGB)),
 			},
-			PersistentVolumeSource: api.PersistentVolumeSource{
-				Flocker: &api.FlockerVolumeSource{
+			PersistentVolumeSource: v1.PersistentVolumeSource{
+				Flocker: &v1.FlockerVolumeSource{
 					DatasetUUID: datasetUUID,
 				},
 			},
 		},
+	}
+	if len(c.options.PVC.Spec.AccessModes) == 0 {
+		pv.Spec.AccessModes = c.plugin.GetAccessModes()
 	}
 
 	if len(labels) != 0 {

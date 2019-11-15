@@ -7,26 +7,42 @@ description: |-
 ---
 
 # Using the HTTP APIs with Authentication
-All of Vault's capabilities are accessible via the HTTP API in addition to the CLI. In fact, most calls from the CLI actually invoke the HTTP API. In some cases, Vault features are not available via the CLI and can only be accessed via the HTTP API.
 
-Once you have started the Vault server, you can use `curl` or any other http client to make API calls. For example, if you started the Vault server in [development mode](/docs/concepts/dev-server.html), you could validate the initialization status like this:
+All of Vault's capabilities are accessible via the HTTP API in addition to the
+CLI. In fact, most calls from the CLI actually invoke the HTTP API. In some
+cases, Vault features are not available via the CLI and can only be accessed
+via the HTTP API.
 
-```
+Once you have started the Vault server, you can use `curl` or any other http
+client to make API calls. For example, if you started the Vault server in
+[dev mode](/docs/concepts/dev-server.html), you could validate the
+initialization status like this:
+
+```text
 $ curl http://127.0.0.1:8200/v1/sys/init
 ```
 
 This will return a JSON response:
 
-```javascript
-{ "initialized": true }
+```json
+{
+  "initialized": true
+}
 ```
 
 ## Accessing Secrets via the REST APIs
-Machines that need access to information stored in Vault will most likely access Vault via its REST API. For example, if a machine were using [app-id](/docs/auth/app-id.html) for authentication, the application would first authenticate to Vault which would return a Vault API token. The application would use that token for future communication with Vault.
 
-For the purpose of this guide, we will use the following configuration which disables TLS and uses a file-based backend. You should never disable TLS in production, but it is okay for the purposes of this tutorial.
+Machines that need access to information stored in Vault will most likely
+access Vault via its REST API. For example, if a machine were using
+[AppRole](/docs/auth/approle.html) for authentication, the application would
+first authenticate to Vault which would return a Vault API token. The
+application would use that token for future communication with Vault.
 
-```javascript
+For the purpose of this guide, we will use the following configuration which
+disables TLS and uses a file-based backend. TLS is disabled here only for
+exemplary purposes; it should never be disabled in production.
+
+```hcl
 backend "file" {
   path = "vault"
 }
@@ -36,173 +52,225 @@ listener "tcp" {
 }
 ```
 
-Save this file on disk and then start the Vault server with this command:
+Save this file on disk as `config.hcl` and then start the Vault server:
 
-```
-$ vault server -config=/etc/vault.conf
+```text
+$ vault server -config=config.hcl
 ```
 
-At this point, we can use Vault's API for all our interactions. For example, we can initialize Vault like this:
+At this point, we can use Vault's API for all our interactions. For example, we
+can initialize Vault like this:
 
-```
+```text
 $ curl \
-  -X PUT \
-  -d "{\"secret_shares\":1, \"secret_threshold\":1}" \
-  http://localhost:8200/v1/sys/init
+    --request POST \
+    --data '{"secret_shares": 1, "secret_threshold": 1}' \
+    http://127.0.0.1:8200/v1/sys/init
 ```
 
-The response should be JSON and look something like this:
+The response should be JSON and looks something like this:
 
-```javascript
+```json
 {
-  "keys": ["69cf1c12a1f65dddd19472330b28cf4e95c657dfbe545877e5765d25d0592b16"],
-  "root_token": "0e2ede5a-6664-a49e-ca33-8f204d1cdb95"
+  "keys": [
+    "373d500274dd8eb95271cb0f868e4ded27d9afa205d1741d60bb97cd7ce2fe41"
+  ],
+  "keys_base64": [
+    "Nz1QAnTdjrlSccsPho5N7SfZr6IF0XQdYLuXzXzi/kE="
+  ],
+  "root_token": "6fa4128e-8bd2-fd02-0ea8-a5e020d9b766"
 }
 ```
 
-This response contains our initial root token. It also includes the unseal key. You can use the unseal key to unseal the Vault and use the root token perform other requests in Vault that require authentication.
+This response contains our initial root token. It also includes the unseal key.
+You can use the unseal key to unseal the Vault and use the root token perform
+other requests in Vault that require authentication.
 
-To make this guide easy to copy-and-paste, we will be using the environment variable `$VAULT_TOKEN` to store the root token. You can export this Vault token in your current shell like this:
+To make this guide easy to copy-and-paste, we will be using the environment
+variable `$VAULT_TOKEN` to store the root token. You can export this Vault
+token in your current shell like this:
 
+```sh
+$ export VAULT_TOKEN=6fa4128e-8bd2-fd02-0ea8-a5e020d9b766
 ```
-$ export VAULT_TOKEN=0e2ede5a-6664-a49e-ca33-8f204d1cdb95
-```
 
-Using the unseal key (not the root token) from above, you can unseal the Vault via the HTTP API:
+Using the unseal key (not the root token) from above, you can unseal the Vault
+via the HTTP API:
 
-```
+```text
 $ curl \
-    -X PUT \
-    -d '{"key": "69cf1c12a1f65dddd19472330b28cf4e95c657dfbe545877e5765d25d0592b16"}' \
+    --request POST \
+    --data '{"key": "Nz1QAnTdjrlSccsPho5N7SfZr6IF0XQdYLuXzXzi/kE="}' \
     http://127.0.0.1:8200/v1/sys/unseal
 ```
 
-Note that you should replace `69cf1c1...` with the generated key from your output. This will return a JSON response:
+Note that you should replace `Nz1QAnT...` with the generated key from your
+output. This will return a JSON response:
 
-```javascript
+```json
 {
   "sealed": false,
   "t": 1,
   "n": 1,
-  "progress": 0
+  "progress": 0,
+  "nonce": "",
+  "version": "1.2.3",
+  "cluster_name": "vault-cluster-9d524900",
+  "cluster_id": "d69ab1b0-7e9a-2523-0d05-b0bfd09caeea"
 }
 ```
 
-Now we can enable an authentication backend such as [GitHub authentication](/docs/auth/github.html) or [App ID](/docs/auth/app-id.html). For the purposes of this guide, we will enable App ID authentication.
+Now any of the available auth methods can be enabled and configured.
+For the purposes of this guide lets enable [AppRole](/docs/auth/approle.html)
+authentication.
 
-We can enable an authentication backend with the following `curl` command:
+Start by enabling the AppRole authentication.
 
-```
+```text
 $ curl \
-    -X POST \
-    -H "X-Vault-Token:$VAULT_TOKEN" \
-    -d '{"type":"app-id"}' \
-    http://127.0.0.1:8200/v1/sys/auth/app-id
+    --header "X-Vault-Token: $VAULT_TOKEN" \
+    --request POST \
+    --data '{"type": "approle"}' \
+    http://127.0.0.1:8200/v1/sys/auth/approle
 ```
 
-Notice that the request to the app-id endpoint needed an authentication token. In this case we are passing the root token generated when we started the Vault server. We could also generate tokens using any other authentication mechanisms, but we will use the root token for simplicity.
+Notice that the request to enable the AppRole endpoint needed an authentication
+token. In this case we are passing the root token generated when we started
+the Vault server. We could also generate tokens using any other authentication
+mechanisms, but we will use the root token for simplicity.
 
-The last thing we need to do before using our App ID endpoint is writing the data to the store to associate an app id with a user id. For more information on this process, see the documentation on the [app-id auth backend](/docs/auth/app-id.html).
+Now create an AppRole with desired set of [ACL
+policies](/docs/concepts/policies.html). In the following command, it is being
+specified that the tokens issued under the AppRole `my-role`, should be
+associated with `dev-policy` and the `my-policy`.
 
-First, we need to associate the application with a particular [ACL policy](/docs/concepts/policies.html) in Vault. In the following command, we are going to associate the created tokens with the `root` policy. You would not want to do this in a real production scenario because the root policy allows complete read, write, and administrator access to Vault. For a production application, you should create an ACL policy (which is also possible via the HTTP API), but is not covered in this guide for simplicity.
-
-```
+```text
 $ curl \
-    -X POST \
-    -H "X-Vault-Token:$VAULT_TOKEN" \
-    -d '{"value":"root", "display_name":"demo"}' \
-    http://localhost:8200/v1/auth/app-id/map/app-id/152AEA38-85FB-47A8-9CBD-612D645BFACA
+    --header "X-Vault-Token: $VAULT_TOKEN" \
+    --request POST \
+    --data '{"policies": ["dev-policy", "my-policy"]}' \
+    http://127.0.0.1:8200/v1/auth/approle/role/my-role
 ```
 
-Note that `152AEA38-85FB-47A8-9CBD-612D645BFACA` is a randomly generated UUID. You can use any tool to generate a UUID, but make sure it is unique.
+The AppRole backend, in its default configuration expects two hard to guess
+credentials, a role ID and a secret ID. This command fetches the role ID of the
+`my-role`.
 
-Next we need to map the application to a particular "user". In Vault, this is actually a particular application:
-
-```
+```text
 $ curl \
-    -X POST \
-    -H "X-Vault-Token:$VAULT_TOKEN" \
-    -d '{"value":"152AEA38-85FB-47A8-9CBD-612D645BFACA"}' \
-    http://localhost:8200/v1/auth/app-id/map/user-id/5ADF8218-D7FB-4089-9E38-287465DBF37E
+    --header "X-Vault-Token: $VAULT_TOKEN" \
+     http://127.0.0.1:8200/v1/auth/approle/role/my-role/role-id
 ```
 
-Now your app can identify itself via the app-id and user-id and get access to Vault. The first step is to authenticate:
+The response will include a `data` key with the `role_id`:
 
-```
-$ curl \
-    -X POST \
-    -d '{"app_id":"152AEA38-85FB-47A8-9CBD-612D645BFACA", "user_id": "5ADF8218-D7FB-4089-9E38-287465DBF37E"}' \
-    "http://127.0.0.1:8200/v1/auth/app-id/login"
-```
-
-This will return a response that looks like the following:
-
-```javascript
+```json
 {
-  "lease_id": "",
-  "renewable": false,
-  "lease_duration": 0,
-  "data": null,
-  "auth": {
-    "client_token": "7a25c58b-9bad-5750-b579-edbb9f10a5ef",
-    "policies": ["root"],
-    "lease_duration": 0,
-    "renewable": false,
-    "metadata": {
-      "app-id": "sha1:1c0401b419280b0771d006bcdae683989086a00e",
-      "user-id": "sha1:4dbf74fce71648d54c42e28ad193253600853ca6"
-    }
+  "data": {
+    "role_id": "86a32a73-1f2b-05e0-113a-dfa930145d72"
   }
 }
 ```
 
-The returned client token (`7a25c58b-9bad-5750-b579-edbb9f10a5ef`) can now be used to authenticate with Vault. As you can see from the returned payload, the App ID backend does not currently support lease expiration or renewal. If you authenticate with backend that does support leases, your application will have to track expiration and handle renewal, but that is a topic for another guide.
+This command creates a new secret ID under the `my-role`.
 
-We can export this new token as our new `VAULT_TOKEN`:
-
-```
-$ export VAULT_TOKEN="7a25c58b-9bad-5750-b579-edbb9f10a5ef"
-```
-
-Be sure to replace this with the value returned from your API response. We can now use this token to authentication requests to Vault:
-
-```
+```text
 $ curl \
-    -X POST \
-    -H "X-Vault-Token:$VAULT_TOKEN" \
-    -H 'Content-type: application/json' \
-    -d '{"bar":"baz"}' \
+    --header "X-Vault-Token: $VAULT_TOKEN" \
+    --request POST \
+    http://127.0.0.1:8200/v1/auth/approle/role/my-role/secret-id
+```
+
+The response will include the `secret_id` in the `data` key:
+
+```json
+{
+  "data": {
+    "secret_id": "cd4b2002-3e3b-aceb-378d-5caa84dffd14",
+    "secret_id_accessor": "6b9b58f6-d11a-c73c-ffa8-04a47d42716b"
+  }
+}
+```
+
+These two credentials can be supplied to the login endpoint to fetch a new
+Vault token.
+
+```text
+$ curl \
+    --request POST \
+    --data '{"role_id": "86a32a73-1f2b-05e0-113a-dfa930145d72", "secret_id": "cd4b2002-3e3b-aceb-378d-5caa84dffd14"}' \
+    http://127.0.0.1:8200/v1/auth/approle/login
+```
+
+The response will be JSON, under the key `auth`:
+
+```json
+{
+  "auth": {
+    "client_token": "50617721-dfb5-1916-7b13-4091e169d28c",
+    "accessor": "ada8d354-47c0-5d9e-50f9-d74e6de2df9b",
+    "policies": [
+      "default",
+      "dev-policy",
+      "my-policy"
+    ],
+    "metadata": {
+      "role_name": "my-role"
+    },
+    "lease_duration": 2764800,
+    "renewable": true
+  }
+}
+```
+
+The returned client token (`50617721...`) can be used to authenticate with
+Vault. This token will be authorized with specific capabilities on all the
+resources encompassed by the policies `default`, `dev-policy` and `my-policy`.
+
+The newly acquired token can be exported as a new `VAULT_TOKEN` and use it to
+authenticate Vault requests.
+
+```sh
+$ export VAULT_TOKEN="50617721-dfb5-1916-7b13-4091e169d28c"
+```
+
+```text
+$ curl \
+    --header "X-Vault-Token: $VAULT_TOKEN" \
+    --request POST \
+    --data '{"bar": "baz"}' \
     http://127.0.0.1:8200/v1/secret/foo
 ```
 
-This will create a new secret named "foo" with the given JSON contents. We can read this value back with the same token:
+This will create a new secret named "foo" with the given JSON contents. We can
+read this value back with the same token:
 
-```
+```text
 $ curl \
-    -H "X-Vault-Token:$VAULT_TOKEN" \
+    --header "X-Vault-Token: $VAULT_TOKEN" \
     http://127.0.0.1:8200/v1/secret/foo
 ```
 
 This should return a response like this:
 
-```javascript
+```json
 {
-  "lease_id": "secret/foo/cc529d06-36c8-be27-31f5-2390e1f6e2ae",
-  "renewable": false,
-  "lease_duration": 2764800,
   "data": {
     "bar": "baz"
   },
-  "auth": null
+  "lease_duration": 2764800,
+  "renewable": false,
+  "request_id": "5e246671-ec05-6fc8-9f93-4fe4512f34ab"
 }
 ```
 
-You can see the documentation on the [HTTP APIs](/docs/http/index.html) for more details on other available endpoints.
+You can see the documentation on the [HTTP APIs](/api/index.html) for
+more details on other available endpoints.
 
 Congratulations! You now know all the basics to get started with Vault.
 
 ## Next
 
-Next, we have a page dedicated to
-[next steps](/intro/getting-started/next-steps.html) depending on
-what you would like to achieve.
+Next, we have a page dedicated to [next
+steps](/intro/getting-started/next-steps.html) depending on what you would like
+to achieve.

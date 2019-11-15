@@ -1,2 +1,11 @@
-assignees:
+approvers:
 - rootfs
+- jsafrane
+- saad-ali
+reviewers:
+- rootfs
+- saad-ali
+- jsafrane
+- jingxu97
+- msau42
+- cofyc

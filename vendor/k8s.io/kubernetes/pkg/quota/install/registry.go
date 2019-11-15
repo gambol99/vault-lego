@@ -17,14 +17,31 @@ limitations under the License.
 package install
 
 import (
-	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/kubernetes/pkg/quota"
 	"k8s.io/kubernetes/pkg/quota/evaluator/core"
+	"k8s.io/kubernetes/pkg/quota/generic"
 )
 
-// NewRegistry returns a registry that knows how to deal kubernetes resources
-// across API groups
-func NewRegistry(kubeClient clientset.Interface) quota.Registry {
-	// TODO: when quota supports resources in other api groups, we will need to merge
-	return core.NewRegistry(kubeClient)
+// NewQuotaConfigurationForAdmission returns a quota configuration for admission control.
+func NewQuotaConfigurationForAdmission() quota.Configuration {
+	evaluators := core.NewEvaluators(nil)
+	return generic.NewConfiguration(evaluators, DefaultIgnoredResources())
+}
+
+// NewQuotaConfigurationForControllers returns a quota configuration for controllers.
+func NewQuotaConfigurationForControllers(f quota.ListerForResourceFunc) quota.Configuration {
+	evaluators := core.NewEvaluators(f)
+	return generic.NewConfiguration(evaluators, DefaultIgnoredResources())
+}
+
+// ignoredResources are ignored by quota by default
+var ignoredResources = map[schema.GroupResource]struct{}{
+	{Group: "", Resource: "events"}: {},
+}
+
+// DefaultIgnoredResources returns the default set of resources that quota system
+// should ignore. This is exposed so downstream integrators can have access to them.
+func DefaultIgnoredResources() map[schema.GroupResource]struct{} {
+	return ignoredResources
 }

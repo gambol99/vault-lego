@@ -21,27 +21,32 @@ import (
 	"os"
 	"path"
 
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/unversioned"
-	"k8s.io/kubernetes/pkg/apimachinery/registered"
+	"k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/kubernetes/test/e2e/framework"
+	imageutils "k8s.io/kubernetes/test/utils/image"
 
 	. "github.com/onsi/ginkgo"
 )
 
 //TODO : Consolidate this code with the code for emptyDir.
 //This will require some smart.
-var _ = framework.KubeDescribe("HostPath", func() {
+var _ = Describe("[sig-storage] HostPath", func() {
 	f := framework.NewDefaultFramework("hostpath")
 
 	BeforeEach(func() {
+		// TODO permission denied cleanup failures
 		//cleanup before running the test.
 		_ = os.Remove("/tmp/test-file")
 	})
 
-	It("should give a volume the correct mode [Conformance]", func() {
-		volumePath := "/test-volume"
-		source := &api.HostPathVolumeSource{
+	/*
+	   Release : v1.9
+	   Testname: Host path, volume mode default
+	   Description: Create a Pod with host volume mounted. The volume mounted MUST be a directory with permissions mode -rwxrwxrwx and that is has the sticky bit (mode flag t) set.
+	*/
+	framework.ConformanceIt("should give a volume the correct mode [NodeConformance]", func() {
+		source := &v1.HostPathVolumeSource{
 			Path: "/tmp",
 		}
 		pod := testPodWithHostVol(volumePath, source)
@@ -51,16 +56,15 @@ var _ = framework.KubeDescribe("HostPath", func() {
 			fmt.Sprintf("--file_mode=%v", volumePath),
 		}
 		f.TestContainerOutput("hostPath mode", pod, 0, []string{
-			"mode of file \"/test-volume\": dtrwxrwxrwx", // we expect the sticky bit (mode flag t) to be set for the dir
+			"mode of file \"/test-volume\": dtrwxrwx", // we expect the sticky bit (mode flag t) to be set for the dir
 		})
 	})
 
 	// This test requires mounting a folder into a container with write privileges.
-	It("should support r/w", func() {
-		volumePath := "/test-volume"
+	It("should support r/w [NodeConformance]", func() {
 		filePath := path.Join(volumePath, "test-file")
 		retryDuration := 180
-		source := &api.HostPathVolumeSource{
+		source := &v1.HostPathVolumeSource{
 			Path: "/tmp",
 		}
 		pod := testPodWithHostVol(volumePath, source)
@@ -81,8 +85,7 @@ var _ = framework.KubeDescribe("HostPath", func() {
 		})
 	})
 
-	It("should support subPath [Conformance]", func() {
-		volumePath := "/test-volume"
+	It("should support subPath [NodeConformance]", func() {
 		subPath := "sub-path"
 		fileName := "test-file"
 		retryDuration := 180
@@ -90,10 +93,11 @@ var _ = framework.KubeDescribe("HostPath", func() {
 		filePathInWriter := path.Join(volumePath, fileName)
 		filePathInReader := path.Join(volumePath, subPath, fileName)
 
-		source := &api.HostPathVolumeSource{
+		source := &v1.HostPathVolumeSource{
 			Path: "/tmp",
 		}
 		pod := testPodWithHostVol(volumePath, source)
+
 		// Write the file in the subPath from container 0
 		container := &pod.Spec.Containers[0]
 		container.VolumeMounts[0].SubPath = subPath
@@ -101,6 +105,96 @@ var _ = framework.KubeDescribe("HostPath", func() {
 			fmt.Sprintf("--new_file_0644=%v", filePathInWriter),
 			fmt.Sprintf("--file_mode=%v", filePathInWriter),
 		}
+
+		// Read it from outside the subPath from container 1
+		pod.Spec.Containers[1].Args = []string{
+			fmt.Sprintf("--file_content_in_loop=%v", filePathInReader),
+			fmt.Sprintf("--retry_time=%d", retryDuration),
+		}
+
+		f.TestContainerOutput("hostPath subPath", pod, 1, []string{
+			"content of file \"" + filePathInReader + "\": mount-tester new file",
+		})
+	})
+
+	It("should support existing directory subPath", func() {
+		framework.SkipUnlessSSHKeyPresent()
+
+		subPath := "sub-path"
+		fileName := "test-file"
+		retryDuration := 180
+
+		filePathInWriter := path.Join(volumePath, fileName)
+		filePathInReader := path.Join(volumePath, subPath, fileName)
+
+		source := &v1.HostPathVolumeSource{
+			Path: "/tmp",
+		}
+		pod := testPodWithHostVol(volumePath, source)
+		nodeList := framework.GetReadySchedulableNodesOrDie(f.ClientSet)
+		pod.Spec.NodeName = nodeList.Items[0].Name
+
+		// Create the subPath directory on the host
+		existing := path.Join(source.Path, subPath)
+		externalIP, err := framework.GetNodeExternalIP(&nodeList.Items[0])
+		framework.ExpectNoError(err)
+		result, err := framework.SSH(fmt.Sprintf("mkdir -p %s", existing), externalIP, framework.TestContext.Provider)
+		framework.LogSSHResult(result)
+		framework.ExpectNoError(err)
+		if result.Code != 0 {
+			framework.Failf("mkdir returned non-zero")
+		}
+
+		// Write the file in the subPath from container 0
+		container := &pod.Spec.Containers[0]
+		container.VolumeMounts[0].SubPath = subPath
+		container.Args = []string{
+			fmt.Sprintf("--new_file_0644=%v", filePathInWriter),
+			fmt.Sprintf("--file_mode=%v", filePathInWriter),
+		}
+
+		// Read it from outside the subPath from container 1
+		pod.Spec.Containers[1].Args = []string{
+			fmt.Sprintf("--file_content_in_loop=%v", filePathInReader),
+			fmt.Sprintf("--retry_time=%d", retryDuration),
+		}
+
+		f.TestContainerOutput("hostPath subPath", pod, 1, []string{
+			"content of file \"" + filePathInReader + "\": mount-tester new file",
+		})
+	})
+
+	// TODO consolidate common code of this test and above
+	It("should support existing single file subPath", func() {
+		framework.SkipUnlessSSHKeyPresent()
+
+		subPath := "sub-path-test-file"
+		retryDuration := 180
+
+		filePathInReader := path.Join(volumePath, subPath)
+
+		source := &v1.HostPathVolumeSource{
+			Path: "/tmp",
+		}
+		pod := testPodWithHostVol(volumePath, source)
+		nodeList := framework.GetReadySchedulableNodesOrDie(f.ClientSet)
+		pod.Spec.NodeName = nodeList.Items[0].Name
+
+		// Create the subPath file on the host
+		existing := path.Join(source.Path, subPath)
+		externalIP, err := framework.GetNodeExternalIP(&nodeList.Items[0])
+		framework.ExpectNoError(err)
+		result, err := framework.SSH(fmt.Sprintf("echo \"mount-tester new file\" > %s", existing), externalIP, framework.TestContext.Provider)
+		framework.LogSSHResult(result)
+		framework.ExpectNoError(err)
+		if result.Code != 0 {
+			framework.Failf("echo returned non-zero")
+		}
+
+		// Mount the file to the subPath in container 0
+		container := &pod.Spec.Containers[0]
+		container.VolumeMounts[0].SubPath = subPath
+
 		// Read it from outside the subPath from container 1
 		pod.Spec.Containers[1].Args = []string{
 			fmt.Sprintf("--file_content_in_loop=%v", filePathInReader),
@@ -118,11 +212,11 @@ var _ = framework.KubeDescribe("HostPath", func() {
 const containerName1 = "test-container-1"
 const containerName2 = "test-container-2"
 
-func mount(source *api.HostPathVolumeSource) []api.Volume {
-	return []api.Volume{
+func mount(source *v1.HostPathVolumeSource) []v1.Volume {
+	return []v1.Volume{
 		{
 			Name: volumeName,
-			VolumeSource: api.VolumeSource{
+			VolumeSource: v1.VolumeSource{
 				HostPath: source,
 			},
 		},
@@ -130,41 +224,48 @@ func mount(source *api.HostPathVolumeSource) []api.Volume {
 }
 
 //TODO: To merge this with the emptyDir tests, we can make source a lambda.
-func testPodWithHostVol(path string, source *api.HostPathVolumeSource) *api.Pod {
+func testPodWithHostVol(path string, source *v1.HostPathVolumeSource) *v1.Pod {
 	podName := "pod-host-path-test"
+	privileged := true
 
-	return &api.Pod{
-		TypeMeta: unversioned.TypeMeta{
+	return &v1.Pod{
+		TypeMeta: metav1.TypeMeta{
 			Kind:       "Pod",
-			APIVersion: registered.GroupOrDie(api.GroupName).GroupVersion.String(),
+			APIVersion: "v1",
 		},
-		ObjectMeta: api.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name: podName,
 		},
-		Spec: api.PodSpec{
-			Containers: []api.Container{
+		Spec: v1.PodSpec{
+			Containers: []v1.Container{
 				{
 					Name:  containerName1,
-					Image: "gcr.io/google_containers/mounttest:0.7",
-					VolumeMounts: []api.VolumeMount{
+					Image: imageutils.GetE2EImage(imageutils.Mounttest),
+					VolumeMounts: []v1.VolumeMount{
 						{
 							Name:      volumeName,
 							MountPath: path,
 						},
+					},
+					SecurityContext: &v1.SecurityContext{
+						Privileged: &privileged,
 					},
 				},
 				{
 					Name:  containerName2,
-					Image: "gcr.io/google_containers/mounttest:0.7",
-					VolumeMounts: []api.VolumeMount{
+					Image: imageutils.GetE2EImage(imageutils.Mounttest),
+					VolumeMounts: []v1.VolumeMount{
 						{
 							Name:      volumeName,
 							MountPath: path,
 						},
 					},
+					SecurityContext: &v1.SecurityContext{
+						Privileged: &privileged,
+					},
 				},
 			},
-			RestartPolicy: api.RestartPolicyNever,
+			RestartPolicy: v1.RestartPolicyNever,
 			Volumes:       mount(source),
 		},
 	}

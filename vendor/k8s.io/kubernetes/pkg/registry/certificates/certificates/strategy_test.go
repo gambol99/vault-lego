@@ -17,32 +17,33 @@ limitations under the License.
 package certificates
 
 import (
+	"context"
 	"reflect"
 	"testing"
 
-	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/diff"
+	"k8s.io/apiserver/pkg/authentication/user"
+	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
 	certapi "k8s.io/kubernetes/pkg/apis/certificates"
-	"k8s.io/kubernetes/pkg/auth/user"
-	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/util/diff"
 )
 
 func TestStrategyCreate(t *testing.T) {
 	tests := map[string]struct {
-		ctx         api.Context
+		ctx         context.Context
 		obj         runtime.Object
 		expectedObj runtime.Object
 	}{
 		"no user in context, no user in obj": {
-			ctx: api.NewContext(),
+			ctx: genericapirequest.NewContext(),
 			obj: &certapi.CertificateSigningRequest{},
 			expectedObj: &certapi.CertificateSigningRequest{
 				Status: certapi.CertificateSigningRequestStatus{Conditions: []certapi.CertificateSigningRequestCondition{}},
 			},
 		},
 		"user in context, no user in obj": {
-			ctx: api.WithUser(
-				api.NewContext(),
+			ctx: genericapirequest.WithUser(
+				genericapirequest.NewContext(),
 				&user.DefaultInfo{
 					Name:   "bob",
 					UID:    "123",
@@ -56,12 +57,13 @@ func TestStrategyCreate(t *testing.T) {
 					Username: "bob",
 					UID:      "123",
 					Groups:   []string{"group1"},
+					Extra:    map[string]certapi.ExtraValue{"foo": {"bar"}},
 				},
 				Status: certapi.CertificateSigningRequestStatus{Conditions: []certapi.CertificateSigningRequestCondition{}},
 			},
 		},
 		"no user in context, user in obj": {
-			ctx: api.NewContext(),
+			ctx: genericapirequest.NewContext(),
 			obj: &certapi.CertificateSigningRequest{
 				Spec: certapi.CertificateSigningRequestSpec{
 					Username: "bob",
@@ -74,8 +76,8 @@ func TestStrategyCreate(t *testing.T) {
 			},
 		},
 		"user in context, user in obj": {
-			ctx: api.WithUser(
-				api.NewContext(),
+			ctx: genericapirequest.WithUser(
+				genericapirequest.NewContext(),
 				&user.DefaultInfo{
 					Name: "alice",
 					UID:  "234",
@@ -98,7 +100,7 @@ func TestStrategyCreate(t *testing.T) {
 			},
 		},
 		"pre-approved status": {
-			ctx: api.NewContext(),
+			ctx: genericapirequest.NewContext(),
 			obj: &certapi.CertificateSigningRequest{
 				Status: certapi.CertificateSigningRequestStatus{
 					Conditions: []certapi.CertificateSigningRequestCondition{

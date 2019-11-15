@@ -21,27 +21,32 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/renstrom/dedent"
 	"github.com/spf13/cobra"
 
-	"k8s.io/kubernetes/pkg/client/unversioned/clientcmd"
-	clientcmdapi "k8s.io/kubernetes/pkg/client/unversioned/clientcmd/api"
-	"k8s.io/kubernetes/pkg/util"
+	"k8s.io/apiserver/pkg/util/flag"
+	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
+	"k8s.io/kubernetes/pkg/kubectl/cmd/templates"
+	cmdutil "k8s.io/kubernetes/pkg/kubectl/cmd/util"
+	"k8s.io/kubernetes/pkg/kubectl/util/i18n"
 )
 
 type createContextOptions struct {
 	configAccess clientcmd.ConfigAccess
 	name         string
-	cluster      util.StringFlag
-	authInfo     util.StringFlag
-	namespace    util.StringFlag
+	currContext  bool
+	cluster      flag.StringFlag
+	authInfo     flag.StringFlag
+	namespace    flag.StringFlag
 }
 
 var (
-	create_context_long = dedent.Dedent(`
+	create_context_long = templates.LongDesc(`
 		Sets a context entry in kubeconfig
+
 		Specifying a name that already exists will merge new fields on top of existing values for those fields.`)
-	create_context_example = dedent.Dedent(`
+
+	create_context_example = templates.Examples(`
 		# Set the user field on the gce context entry without touching other values
 		kubectl config set-context gce --user=cluster-admin`)
 )
@@ -50,24 +55,24 @@ func NewCmdConfigSetContext(out io.Writer, configAccess clientcmd.ConfigAccess) 
 	options := &createContextOptions{configAccess: configAccess}
 
 	cmd := &cobra.Command{
-		Use:     fmt.Sprintf("set-context NAME [--%v=cluster_nickname] [--%v=user_nickname] [--%v=namespace]", clientcmd.FlagClusterName, clientcmd.FlagAuthInfoName, clientcmd.FlagNamespace),
-		Short:   "Sets a context entry in kubeconfig",
+		Use: fmt.Sprintf("set-context [NAME | --current] [--%v=cluster_nickname] [--%v=user_nickname] [--%v=namespace]", clientcmd.FlagClusterName, clientcmd.FlagAuthInfoName, clientcmd.FlagNamespace),
+		DisableFlagsInUseLine: true,
+		Short:   i18n.T("Sets a context entry in kubeconfig"),
 		Long:    create_context_long,
 		Example: create_context_example,
 		Run: func(cmd *cobra.Command, args []string) {
-			if !options.complete(cmd) {
-				return
-			}
-
-			err := options.run()
-			if err != nil {
-				fmt.Fprintf(out, "%v\n", err)
+			cmdutil.CheckErr(options.complete(cmd))
+			name, exists, err := options.run()
+			cmdutil.CheckErr(err)
+			if exists {
+				fmt.Fprintf(out, "Context %q modified.\n", name)
 			} else {
-				fmt.Fprintf(out, "context %q set.\n", options.name)
+				fmt.Fprintf(out, "Context %q created.\n", name)
 			}
 		},
 	}
 
+	cmd.Flags().BoolVar(&options.currContext, "current", options.currContext, "Modify the current context")
 	cmd.Flags().Var(&options.cluster, clientcmd.FlagClusterName, clientcmd.FlagClusterName+" for the context entry in kubeconfig")
 	cmd.Flags().Var(&options.authInfo, clientcmd.FlagAuthInfoName, clientcmd.FlagAuthInfoName+" for the context entry in kubeconfig")
 	cmd.Flags().Var(&options.namespace, clientcmd.FlagNamespace, clientcmd.FlagNamespace+" for the context entry in kubeconfig")
@@ -75,29 +80,37 @@ func NewCmdConfigSetContext(out io.Writer, configAccess clientcmd.ConfigAccess) 
 	return cmd
 }
 
-func (o createContextOptions) run() error {
+func (o createContextOptions) run() (string, bool, error) {
 	err := o.validate()
 	if err != nil {
-		return err
+		return "", false, err
 	}
 
 	config, err := o.configAccess.GetStartingConfig()
 	if err != nil {
-		return err
+		return "", false, err
 	}
 
-	startingStanza, exists := config.Contexts[o.name]
+	name := o.name
+	if o.currContext {
+		if len(config.CurrentContext) == 0 {
+			return "", false, errors.New("no current context is set")
+		}
+		name = config.CurrentContext
+	}
+
+	startingStanza, exists := config.Contexts[name]
 	if !exists {
 		startingStanza = clientcmdapi.NewContext()
 	}
 	context := o.modifyContext(*startingStanza)
-	config.Contexts[o.name] = &context
+	config.Contexts[name] = &context
 
 	if err := clientcmd.ModifyConfig(o.configAccess, *config, true); err != nil {
-		return err
+		return name, exists, err
 	}
 
-	return nil
+	return name, exists, nil
 }
 
 func (o *createContextOptions) modifyContext(existingContext clientcmdapi.Context) clientcmdapi.Context {
@@ -116,20 +129,23 @@ func (o *createContextOptions) modifyContext(existingContext clientcmdapi.Contex
 	return modifiedContext
 }
 
-func (o *createContextOptions) complete(cmd *cobra.Command) bool {
+func (o *createContextOptions) complete(cmd *cobra.Command) error {
 	args := cmd.Flags().Args()
-	if len(args) != 1 {
-		cmd.Help()
-		return false
+	if len(args) > 1 {
+		return helpErrorf(cmd, "Unexpected args: %v", args)
 	}
-
-	o.name = args[0]
-	return true
+	if len(args) == 1 {
+		o.name = args[0]
+	}
+	return nil
 }
 
 func (o createContextOptions) validate() error {
-	if len(o.name) == 0 {
-		return errors.New("you must specify a non-empty context name")
+	if len(o.name) == 0 && !o.currContext {
+		return errors.New("you must specify a non-empty context name or --current-context")
+	}
+	if len(o.name) > 0 && o.currContext {
+		return errors.New("you cannot specify a context name and --current-context")
 	}
 
 	return nil

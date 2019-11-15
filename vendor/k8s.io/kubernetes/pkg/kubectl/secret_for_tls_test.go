@@ -23,8 +23,9 @@ import (
 	"reflect"
 	"testing"
 
-	"k8s.io/kubernetes/pkg/api"
-	utiltesting "k8s.io/kubernetes/pkg/util/testing"
+	"k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utiltesting "k8s.io/client-go/util/testing"
 )
 
 var rsaCertPEM = `-----BEGIN CERTIFICATE-----
@@ -121,66 +122,91 @@ func TestSecretForTLSGenerate(t *testing.T) {
 	defer tearDown(mismatchCertTmpDir)
 	mismatchKeyPath, mismatchCertPath := writeKeyPair(mismatchCertTmpDir, mismatchRSAKeyPEM, rsaCertPEM, t)
 
-	tests := map[string]struct {
+	tests := []struct {
+		name      string
 		params    map[string]interface{}
-		expected  *api.Secret
+		expected  *v1.Secret
 		expectErr bool
 	}{
-		"test-valid-tls-secret": {
+		{
+			name: "test-valid-tls-secret",
 			params: map[string]interface{}{
 				"name": "foo",
 				"key":  validKeyPath,
 				"cert": validCertPath,
 			},
-			expected: &api.Secret{
-				ObjectMeta: api.ObjectMeta{
+			expected: &v1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
 					Name: "foo",
 				},
 				Data: map[string][]byte{
-					api.TLSCertKey:       []byte(rsaCertPEM),
-					api.TLSPrivateKeyKey: []byte(rsaKeyPEM),
+					v1.TLSCertKey:       []byte(rsaCertPEM),
+					v1.TLSPrivateKeyKey: []byte(rsaKeyPEM),
 				},
-				Type: api.SecretTypeTLS,
+				Type: v1.SecretTypeTLS,
 			},
 			expectErr: false,
 		},
-		"test-invalid-key-pair": {
+		{
+			name: "test-valid-tls-secret-append-hash",
+			params: map[string]interface{}{
+				"name":        "foo",
+				"key":         validKeyPath,
+				"cert":        validCertPath,
+				"append-hash": true,
+			},
+			expected: &v1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "foo-272h6tt825",
+				},
+				Data: map[string][]byte{
+					v1.TLSCertKey:       []byte(rsaCertPEM),
+					v1.TLSPrivateKeyKey: []byte(rsaKeyPEM),
+				},
+				Type: v1.SecretTypeTLS,
+			},
+			expectErr: false,
+		},
+		{
+			name: "test-invalid-key-pair",
 			params: map[string]interface{}{
 				"name": "foo",
 				"key":  invalidKeyPath,
 				"cert": invalidCertPath,
 			},
-			expected: &api.Secret{
-				ObjectMeta: api.ObjectMeta{
+			expected: &v1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
 					Name: "foo",
 				},
 				Data: map[string][]byte{
-					api.TLSCertKey:       []byte("test"),
-					api.TLSPrivateKeyKey: []byte("test"),
+					v1.TLSCertKey:       []byte("test"),
+					v1.TLSPrivateKeyKey: []byte("test"),
 				},
-				Type: api.SecretTypeTLS,
+				Type: v1.SecretTypeTLS,
 			},
 			expectErr: true,
 		},
-		"test-mismatched-key-pair": {
+		{
+			name: "test-mismatched-key-pair",
 			params: map[string]interface{}{
 				"name": "foo",
 				"key":  mismatchKeyPath,
 				"cert": mismatchCertPath,
 			},
-			expected: &api.Secret{
-				ObjectMeta: api.ObjectMeta{
+			expected: &v1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
 					Name: "foo",
 				},
 				Data: map[string][]byte{
-					api.TLSCertKey:       []byte(rsaCertPEM),
-					api.TLSPrivateKeyKey: []byte(mismatchRSAKeyPEM),
+					v1.TLSCertKey:       []byte(rsaCertPEM),
+					v1.TLSPrivateKeyKey: []byte(mismatchRSAKeyPEM),
 				},
-				Type: api.SecretTypeTLS,
+				Type: v1.SecretTypeTLS,
 			},
 			expectErr: true,
 		},
-		"test-missing-required-param": {
+		{
+			name: "test-missing-required-param",
 			params: map[string]interface{}{
 				"name": "foo",
 				"key":  "/tmp/foo.key",
@@ -190,16 +216,18 @@ func TestSecretForTLSGenerate(t *testing.T) {
 	}
 
 	generator := SecretForTLSGeneratorV1{}
-	for _, test := range tests {
-		obj, err := generator.Generate(test.params)
-		if !test.expectErr && err != nil {
-			t.Errorf("unexpected error: %v", err)
-		}
-		if test.expectErr && err != nil {
-			continue
-		}
-		if !reflect.DeepEqual(obj.(*api.Secret), test.expected) {
-			t.Errorf("\nexpected:\n%#v\nsaw:\n%#v", test.expected, obj.(*api.Secret))
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			obj, err := generator.Generate(tt.params)
+			if !tt.expectErr && err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+			if tt.expectErr && err != nil {
+				return
+			}
+			if !reflect.DeepEqual(obj.(*v1.Secret), tt.expected) {
+				t.Errorf("\nexpected:\n%#v\nsaw:\n%#v", tt.expected, obj.(*v1.Secret))
+			}
+		})
 	}
 }

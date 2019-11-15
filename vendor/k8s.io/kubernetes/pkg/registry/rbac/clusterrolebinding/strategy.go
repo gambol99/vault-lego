@@ -17,28 +17,26 @@ limitations under the License.
 package clusterrolebinding
 
 import (
-	"fmt"
+	"context"
 
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/rest"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/apiserver/pkg/registry/rest"
+	"k8s.io/apiserver/pkg/storage/names"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	"k8s.io/kubernetes/pkg/apis/rbac"
 	"k8s.io/kubernetes/pkg/apis/rbac/validation"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
-	"k8s.io/kubernetes/pkg/runtime"
-	apistorage "k8s.io/kubernetes/pkg/storage"
-	"k8s.io/kubernetes/pkg/util/validation/field"
 )
 
 // strategy implements behavior for ClusterRoleBindings
 type strategy struct {
 	runtime.ObjectTyper
-	api.NameGenerator
+	names.NameGenerator
 }
 
 // strategy is the default logic that applies when creating and updating
 // ClusterRoleBinding objects.
-var Strategy = strategy{api.Scheme, api.SimpleNameGenerator}
+var Strategy = strategy{legacyscheme.Scheme, names.SimpleNameGenerator}
 
 // Strategy should implement rest.RESTCreateStrategy
 var _ rest.RESTCreateStrategy = Strategy
@@ -58,12 +56,12 @@ func (strategy) AllowCreateOnUpdate() bool {
 
 // PrepareForCreate clears fields that are not allowed to be set by end users
 // on creation.
-func (strategy) PrepareForCreate(ctx api.Context, obj runtime.Object) {
+func (strategy) PrepareForCreate(ctx context.Context, obj runtime.Object) {
 	_ = obj.(*rbac.ClusterRoleBinding)
 }
 
 // PrepareForUpdate clears fields that are not allowed to be set by end users on update.
-func (strategy) PrepareForUpdate(ctx api.Context, obj, old runtime.Object) {
+func (strategy) PrepareForUpdate(ctx context.Context, obj, old runtime.Object) {
 	newClusterRoleBinding := obj.(*rbac.ClusterRoleBinding)
 	oldClusterRoleBinding := old.(*rbac.ClusterRoleBinding)
 
@@ -71,7 +69,7 @@ func (strategy) PrepareForUpdate(ctx api.Context, obj, old runtime.Object) {
 }
 
 // Validate validates a new ClusterRoleBinding. Validation must check for a correct signature.
-func (strategy) Validate(ctx api.Context, obj runtime.Object) field.ErrorList {
+func (strategy) Validate(ctx context.Context, obj runtime.Object) field.ErrorList {
 	clusterRoleBinding := obj.(*rbac.ClusterRoleBinding)
 	return validation.ValidateClusterRoleBinding(clusterRoleBinding)
 }
@@ -82,7 +80,7 @@ func (strategy) Canonicalize(obj runtime.Object) {
 }
 
 // ValidateUpdate is the default update validation for an end user.
-func (strategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) field.ErrorList {
+func (strategy) ValidateUpdate(ctx context.Context, obj, old runtime.Object) field.ErrorList {
 	newObj := obj.(*rbac.ClusterRoleBinding)
 	errorList := validation.ValidateClusterRoleBinding(newObj)
 	return append(errorList, validation.ValidateClusterRoleBindingUpdate(newObj, old.(*rbac.ClusterRoleBinding))...)
@@ -95,28 +93,4 @@ func (strategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) field.E
 // object.
 func (strategy) AllowUnconditionalUpdate() bool {
 	return true
-}
-
-func (s strategy) Export(ctx api.Context, obj runtime.Object, exact bool) error {
-	return nil
-}
-
-// Matcher returns a generic matcher for a given label and field selector.
-func Matcher(label labels.Selector, field fields.Selector) apistorage.SelectionPredicate {
-	return apistorage.SelectionPredicate{
-		Label: label,
-		Field: field,
-		GetAttrs: func(obj runtime.Object) (labels.Set, fields.Set, error) {
-			roleBinding, ok := obj.(*rbac.ClusterRoleBinding)
-			if !ok {
-				return nil, nil, fmt.Errorf("not a ClusterRoleBinding")
-			}
-			return labels.Set(roleBinding.Labels), SelectableFields(roleBinding), nil
-		},
-	}
-}
-
-// SelectableFields returns a field set that can be used for filter selection
-func SelectableFields(obj *rbac.ClusterRoleBinding) fields.Set {
-	return nil
 }

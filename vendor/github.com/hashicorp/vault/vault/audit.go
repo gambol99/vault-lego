@@ -1,18 +1,12 @@
 package vault
 
 import (
+	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
-	"time"
 
-	log "github.com/mgutz/logxi/v1"
-
-	"github.com/armon/go-metrics"
-	"github.com/hashicorp/go-multierror"
 	"github.com/hashicorp/go-uuid"
 	"github.com/hashicorp/vault/audit"
 	"github.com/hashicorp/vault/helper/jsonutil"
@@ -25,6 +19,10 @@ const (
 	// Audit configuration is protected within the Vault itself, which means it
 	// can only be viewed or modified after an unseal.
 	coreAuditConfigPath = "core/audit"
+
+	// coreLocalAuditConfigPath is used to store audit information for local
+	// (non-replicated) mounts
+	coreLocalAuditConfigPath = "core/local-audit"
 
 	// auditBarrierPrefix is the prefix to the UUID used in the
 	// barrier view for the audit backends.
@@ -41,7 +39,7 @@ var (
 )
 
 // enableAudit is used to enable a new audit backend
-func (c *Core) enableAudit(entry *MountEntry) error {
+func (c *Core) enableAudit(ctx context.Context, entry *MountEntry) error {
 	// Ensure we end the path in a slash
 	if !strings.HasSuffix(entry.Path, "/") {
 		entry.Path += "/"
@@ -69,22 +67,41 @@ func (c *Core) enableAudit(entry *MountEntry) error {
 	}
 
 	// Generate a new UUID and view
-	entryUUID, err := uuid.GenerateUUID()
+	if entry.UUID == "" {
+		entryUUID, err := uuid.GenerateUUID()
+		if err != nil {
+			return err
+		}
+		entry.UUID = entryUUID
+	}
+	if entry.Accessor == "" {
+		accessor, err := c.generateMountAccessor("audit_" + entry.Type)
+		if err != nil {
+			return err
+		}
+		entry.Accessor = accessor
+	}
+	viewPath := auditBarrierPrefix + entry.UUID + "/"
+	view := NewBarrierView(c.barrier, viewPath)
+
+	// Mark the view as read-only until the mounting is complete and
+	// ensure that it is reset after. This ensures that there will be no
+	// writes during the construction of the backend.
+	view.setReadOnlyErr(logical.ErrSetupReadOnly)
+	defer view.setReadOnlyErr(nil)
+
+	// Lookup the new backend
+	backend, err := c.newAuditBackend(ctx, entry, view, entry.Options)
 	if err != nil {
 		return err
 	}
-	entry.UUID = entryUUID
-	view := NewBarrierView(c.barrier, auditBarrierPrefix+entry.UUID+"/")
-
-	// Lookup the new backend
-	backend, err := c.newAuditBackend(entry, view, entry.Options)
-	if err != nil {
-		return err
+	if backend == nil {
+		return fmt.Errorf("nil audit backend of type %q returned from factory", entry.Type)
 	}
 
 	newTable := c.audit.shallowClone()
 	newTable.Entries = append(newTable.Entries, entry)
-	if err := c.persistAudit(newTable); err != nil {
+	if err := c.persistAudit(ctx, newTable, entry.Local); err != nil {
 		return errors.New("failed to update audit table")
 	}
 
@@ -99,7 +116,7 @@ func (c *Core) enableAudit(entry *MountEntry) error {
 }
 
 // disableAudit is used to disable an existing audit backend
-func (c *Core) disableAudit(path string) (bool, error) {
+func (c *Core) disableAudit(ctx context.Context, path string) (bool, error) {
 	// Ensure we end the path in a slash
 	if !strings.HasSuffix(path, "/") {
 		path += "/"
@@ -119,8 +136,14 @@ func (c *Core) disableAudit(path string) (bool, error) {
 
 	c.removeAuditReloadFunc(entry)
 
+	// When unmounting all entries the JSON code will load back up from storage
+	// as a nil slice, which kills tests...just set it nil explicitly
+	if len(newTable.Entries) == 0 {
+		newTable.Entries = nil
+	}
+
 	// Update the audit table
-	if err := c.persistAudit(newTable); err != nil {
+	if err := c.persistAudit(ctx, newTable, entry.Local); err != nil {
 		return true, errors.New("failed to update audit table")
 	}
 
@@ -131,17 +154,24 @@ func (c *Core) disableAudit(path string) (bool, error) {
 	if c.logger.IsInfo() {
 		c.logger.Info("core: disabled audit backend", "path", path)
 	}
+
 	return true, nil
 }
 
 // loadAudits is invoked as part of postUnseal to load the audit table
-func (c *Core) loadAudits() error {
+func (c *Core) loadAudits(ctx context.Context) error {
 	auditTable := &MountTable{}
+	localAuditTable := &MountTable{}
 
 	// Load the existing audit table
-	raw, err := c.barrier.Get(coreAuditConfigPath)
+	raw, err := c.barrier.Get(ctx, coreAuditConfigPath)
 	if err != nil {
 		c.logger.Error("core: failed to read audit table", "error", err)
+		return errLoadAuditFailed
+	}
+	rawLocal, err := c.barrier.Get(ctx, coreLocalAuditConfigPath)
+	if err != nil {
+		c.logger.Error("core: failed to read local audit table", "error", err)
 		return errLoadAuditFailed
 	}
 
@@ -156,41 +186,56 @@ func (c *Core) loadAudits() error {
 		c.audit = auditTable
 	}
 
-	// Done if we have restored the audit table
-	if c.audit != nil {
-		needPersist := false
+	var needPersist bool
+	if c.audit == nil {
+		c.audit = defaultAuditTable()
+		needPersist = true
+	}
 
-		// Upgrade to typed auth table
-		if c.audit.Type == "" {
-			c.audit.Type = auditTableType
+	if rawLocal != nil {
+		if err := jsonutil.DecodeJSON(rawLocal.Value, localAuditTable); err != nil {
+			c.logger.Error("core: failed to decode local audit table", "error", err)
+			return errLoadAuditFailed
+		}
+		if localAuditTable != nil && len(localAuditTable.Entries) > 0 {
+			c.audit.Entries = append(c.audit.Entries, localAuditTable.Entries...)
+		}
+	}
+
+	// Upgrade to typed auth table
+	if c.audit.Type == "" {
+		c.audit.Type = auditTableType
+		needPersist = true
+	}
+
+	// Upgrade to table-scoped entries
+	for _, entry := range c.audit.Entries {
+		if entry.Table == "" {
+			entry.Table = c.audit.Type
 			needPersist = true
 		}
-
-		// Upgrade to table-scoped entries
-		for _, entry := range c.audit.Entries {
-			if entry.Table == "" {
-				entry.Table = c.audit.Type
-				needPersist = true
+		if entry.Accessor == "" {
+			accessor, err := c.generateMountAccessor("audit_" + entry.Type)
+			if err != nil {
+				return err
 			}
+			entry.Accessor = accessor
+			needPersist = true
 		}
+	}
 
-		if needPersist {
-			return c.persistAudit(c.audit)
-		}
-
+	if !needPersist {
 		return nil
 	}
 
-	// Create and persist the default audit table
-	c.audit = defaultAuditTable()
-	if err := c.persistAudit(c.audit); err != nil {
+	if err := c.persistAudit(ctx, c.audit, false); err != nil {
 		return errLoadAuditFailed
 	}
 	return nil
 }
 
 // persistAudit is used to persist the audit table after modification
-func (c *Core) persistAudit(table *MountTable) error {
+func (c *Core) persistAudit(ctx context.Context, table *MountTable, localOnly bool) error {
 	if table.Type != auditTableType {
 		c.logger.Error("core: given table to persist has wrong type", "actual_type", table.Type, "expected_type", auditTableType)
 		return fmt.Errorf("invalid table type given, not persisting")
@@ -203,49 +248,105 @@ func (c *Core) persistAudit(table *MountTable) error {
 		}
 	}
 
-	// Marshal the table
-	raw, err := json.Marshal(table)
+	nonLocalAudit := &MountTable{
+		Type: auditTableType,
+	}
+
+	localAudit := &MountTable{
+		Type: auditTableType,
+	}
+
+	for _, entry := range table.Entries {
+		if entry.Local {
+			localAudit.Entries = append(localAudit.Entries, entry)
+		} else {
+			nonLocalAudit.Entries = append(nonLocalAudit.Entries, entry)
+		}
+	}
+
+	if !localOnly {
+		// Marshal the table
+		compressedBytes, err := jsonutil.EncodeJSONAndCompress(nonLocalAudit, nil)
+		if err != nil {
+			c.logger.Error("core: failed to encode and/or compress audit table", "error", err)
+			return err
+		}
+
+		// Create an entry
+		entry := &Entry{
+			Key:   coreAuditConfigPath,
+			Value: compressedBytes,
+		}
+
+		// Write to the physical backend
+		if err := c.barrier.Put(ctx, entry); err != nil {
+			c.logger.Error("core: failed to persist audit table", "error", err)
+			return err
+		}
+	}
+
+	// Repeat with local audit
+	compressedBytes, err := jsonutil.EncodeJSONAndCompress(localAudit, nil)
 	if err != nil {
-		c.logger.Error("core: failed to encode audit table", "error", err)
+		c.logger.Error("core: failed to encode and/or compress local audit table", "error", err)
 		return err
 	}
 
-	// Create an entry
 	entry := &Entry{
-		Key:   coreAuditConfigPath,
-		Value: raw,
+		Key:   coreLocalAuditConfigPath,
+		Value: compressedBytes,
 	}
 
-	// Write to the physical backend
-	if err := c.barrier.Put(entry); err != nil {
-		c.logger.Error("core: failed to persist audit table", "error", err)
+	if err := c.barrier.Put(ctx, entry); err != nil {
+		c.logger.Error("core: failed to persist local audit table", "error", err)
 		return err
 	}
+
 	return nil
 }
 
 // setupAudit is invoked after we've loaded the audit able to
 // initialize the audit backends
-func (c *Core) setupAudits() error {
+func (c *Core) setupAudits(ctx context.Context) error {
 	broker := NewAuditBroker(c.logger)
 
 	c.auditLock.Lock()
 	defer c.auditLock.Unlock()
 
+	var successCount int
+
 	for _, entry := range c.audit.Entries {
 		// Create a barrier view using the UUID
-		view := NewBarrierView(c.barrier, auditBarrierPrefix+entry.UUID+"/")
+		viewPath := auditBarrierPrefix + entry.UUID + "/"
+		view := NewBarrierView(c.barrier, viewPath)
+
+		// Mark the view as read-only until the mounting is complete and
+		// ensure that it is reset after. This ensures that there will be no
+		// writes during the construction of the backend.
+		view.setReadOnlyErr(logical.ErrSetupReadOnly)
+		defer view.setReadOnlyErr(nil)
 
 		// Initialize the backend
-		audit, err := c.newAuditBackend(entry, view, entry.Options)
+		backend, err := c.newAuditBackend(ctx, entry, view, entry.Options)
 		if err != nil {
 			c.logger.Error("core: failed to create audit entry", "path", entry.Path, "error", err)
-			return errLoadAuditFailed
+			continue
+		}
+		if backend == nil {
+			c.logger.Error("core: created audit entry was nil", "path", entry.Path, "type", entry.Type)
+			continue
 		}
 
 		// Mount the backend
-		broker.Register(entry.Path, audit, view)
+		broker.Register(entry.Path, backend, view)
+
+		successCount += 1
 	}
+
+	if len(c.audit.Entries) > 0 && successCount == 0 {
+		return errLoadAuditFailed
+	}
+
 	c.auditBroker = broker
 	return nil
 }
@@ -256,8 +357,10 @@ func (c *Core) teardownAudits() error {
 	c.auditLock.Lock()
 	defer c.auditLock.Unlock()
 
-	for _, entry := range c.audit.Entries {
-		c.removeAuditReloadFunc(entry)
+	if c.audit != nil {
+		for _, entry := range c.audit.Entries {
+			c.removeAuditReloadFunc(entry)
+		}
 	}
 
 	c.audit = nil
@@ -284,25 +387,27 @@ func (c *Core) removeAuditReloadFunc(entry *MountEntry) {
 }
 
 // newAuditBackend is used to create and configure a new audit backend by name
-func (c *Core) newAuditBackend(entry *MountEntry, view logical.Storage, conf map[string]string) (audit.Backend, error) {
+func (c *Core) newAuditBackend(ctx context.Context, entry *MountEntry, view logical.Storage, conf map[string]string) (audit.Backend, error) {
 	f, ok := c.auditBackends[entry.Type]
 	if !ok {
 		return nil, fmt.Errorf("unknown backend type: %s", entry.Type)
 	}
-	salter, err := salt.NewSalt(view, &salt.Config{
+	saltConfig := &salt.Config{
 		HMAC:     sha256.New,
 		HMACType: "hmac-sha256",
-	})
-	if err != nil {
-		return nil, fmt.Errorf("core: unable to generate salt: %v", err)
+		Location: salt.DefaultLocation,
 	}
 
-	be, err := f(&audit.BackendConfig{
-		Salt:   salter,
-		Config: conf,
+	be, err := f(ctx, &audit.BackendConfig{
+		SaltView:   view,
+		SaltConfig: saltConfig,
+		Config:     conf,
 	})
 	if err != nil {
 		return nil, err
+	}
+	if be == nil {
+		return nil, fmt.Errorf("nil backend returned from %q factory function", entry.Type)
 	}
 
 	switch entry.Type {
@@ -313,16 +418,31 @@ func (c *Core) newAuditBackend(entry *MountEntry, view logical.Storage, conf map
 
 		if c.logger.IsDebug() {
 			c.logger.Debug("audit: adding reload function", "path", entry.Path)
+			if entry.Options != nil {
+				c.logger.Debug("audit: file backend options", "path", entry.Path, "file_path", entry.Options["file_path"])
+			}
 		}
 
-		c.reloadFuncs[key] = append(c.reloadFuncs[key], func(map[string]string) error {
+		c.reloadFuncs[key] = append(c.reloadFuncs[key], func(map[string]interface{}) error {
 			if c.logger.IsInfo() {
 				c.logger.Info("audit: reloading file audit backend", "path", entry.Path)
 			}
-			return be.Reload()
+			return be.Reload(ctx)
 		})
 
 		c.reloadFuncsLock.Unlock()
+	case "socket":
+		if c.logger.IsDebug() {
+			if entry.Options != nil {
+				c.logger.Debug("audit: socket backend options", "path", entry.Path, "address", entry.Options["address"], "socket type", entry.Options["socket_type"])
+			}
+		}
+	case "syslog":
+		if c.logger.IsDebug() {
+			if entry.Options != nil {
+				c.logger.Debug("audit: syslog backend options", "path", entry.Path, "facility", entry.Options["facility"], "tag", entry.Options["tag"])
+			}
+		}
 	}
 
 	return be, err
@@ -334,134 +454,4 @@ func defaultAuditTable() *MountTable {
 		Type: auditTableType,
 	}
 	return table
-}
-
-type backendEntry struct {
-	backend audit.Backend
-	view    *BarrierView
-}
-
-// AuditBroker is used to provide a single ingest interface to auditable
-// events given that multiple backends may be configured.
-type AuditBroker struct {
-	sync.RWMutex
-	backends map[string]backendEntry
-	logger   log.Logger
-}
-
-// NewAuditBroker creates a new audit broker
-func NewAuditBroker(log log.Logger) *AuditBroker {
-	b := &AuditBroker{
-		backends: make(map[string]backendEntry),
-		logger:   log,
-	}
-	return b
-}
-
-// Register is used to add new audit backend to the broker
-func (a *AuditBroker) Register(name string, b audit.Backend, v *BarrierView) {
-	a.Lock()
-	defer a.Unlock()
-	a.backends[name] = backendEntry{
-		backend: b,
-		view:    v,
-	}
-}
-
-// Deregister is used to remove an audit backend from the broker
-func (a *AuditBroker) Deregister(name string) {
-	a.Lock()
-	defer a.Unlock()
-	delete(a.backends, name)
-}
-
-// IsRegistered is used to check if a given audit backend is registered
-func (a *AuditBroker) IsRegistered(name string) bool {
-	a.RLock()
-	defer a.RUnlock()
-	_, ok := a.backends[name]
-	return ok
-}
-
-// GetHash returns a hash using the salt of the given backend
-func (a *AuditBroker) GetHash(name string, input string) (string, error) {
-	a.RLock()
-	defer a.RUnlock()
-	be, ok := a.backends[name]
-	if !ok {
-		return "", fmt.Errorf("unknown audit backend %s", name)
-	}
-
-	return be.backend.GetHash(input), nil
-}
-
-// LogRequest is used to ensure all the audit backends have an opportunity to
-// log the given request and that *at least one* succeeds.
-func (a *AuditBroker) LogRequest(auth *logical.Auth, req *logical.Request, outerErr error) (retErr error) {
-	defer metrics.MeasureSince([]string{"audit", "log_request"}, time.Now())
-	a.RLock()
-	defer a.RUnlock()
-	defer func() {
-		if r := recover(); r != nil {
-			a.logger.Error("audit: panic during logging", "request_path", req.Path, "error", r)
-			retErr = multierror.Append(retErr, fmt.Errorf("panic generating audit log"))
-		}
-	}()
-
-	// All logged requests must have an identifier
-	//if req.ID == "" {
-	//	a.logger.Error("audit: missing identifier in request object", "request_path", req.Path)
-	//	retErr = multierror.Append(retErr, fmt.Errorf("missing identifier in request object: %s", req.Path))
-	//	return
-	//}
-
-	// Ensure at least one backend logs
-	anyLogged := false
-	for name, be := range a.backends {
-		start := time.Now()
-		err := be.backend.LogRequest(auth, req, outerErr)
-		metrics.MeasureSince([]string{"audit", name, "log_request"}, start)
-		if err != nil {
-			a.logger.Error("audit: backend failed to log request", "backend", name, "error", err)
-		} else {
-			anyLogged = true
-		}
-	}
-	if !anyLogged && len(a.backends) > 0 {
-		retErr = multierror.Append(retErr, fmt.Errorf("no audit backend succeeded in logging the request"))
-		return
-	}
-	return nil
-}
-
-// LogResponse is used to ensure all the audit backends have an opportunity to
-// log the given response and that *at least one* succeeds.
-func (a *AuditBroker) LogResponse(auth *logical.Auth, req *logical.Request,
-	resp *logical.Response, err error) (reterr error) {
-	defer metrics.MeasureSince([]string{"audit", "log_response"}, time.Now())
-	a.RLock()
-	defer a.RUnlock()
-	defer func() {
-		if r := recover(); r != nil {
-			a.logger.Error("audit: panic during logging", "request_path", req.Path, "error", r)
-			reterr = fmt.Errorf("panic generating audit log")
-		}
-	}()
-
-	// Ensure at least one backend logs
-	anyLogged := false
-	for name, be := range a.backends {
-		start := time.Now()
-		err := be.backend.LogResponse(auth, req, resp, err)
-		metrics.MeasureSince([]string{"audit", name, "log_response"}, start)
-		if err != nil {
-			a.logger.Error("audit: backend failed to log response", "backend", name, "error", err)
-		} else {
-			anyLogged = true
-		}
-	}
-	if !anyLogged && len(a.backends) > 0 {
-		return fmt.Errorf("no audit backend succeeded in logging the response")
-	}
-	return nil
 }

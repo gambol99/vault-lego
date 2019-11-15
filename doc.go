@@ -22,7 +22,7 @@ import (
 )
 
 var (
-	release = "v0.0.3"
+	release = "v0.0.14"
 	gitsha  = "no gitsha provided"
 	author  = "Rohith Jayawardene"
 	version = release + " (git+sha: " + gitsha + ")"
@@ -53,6 +53,8 @@ type Config struct {
 	minCertTTL time.Duration
 	// the default ttl
 	defaultCertTTL time.Duration
+	// the refresh ttl
+	refreshCertTTL time.Duration
 	// the default path
 	defaultPath string
 	// is the interval between reconcilation

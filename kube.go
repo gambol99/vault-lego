@@ -20,15 +20,17 @@ import (
 	"fmt"
 
 	"github.com/Sirupsen/logrus"
-	"k8s.io/kubernetes/pkg/api"
-	client "k8s.io/kubernetes/pkg/client/unversioned"
-	"k8s.io/kubernetes/pkg/client/unversioned/clientcmd"
+	kc_api "k8s.io/api/core/v1"
+	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 // hasSecret checks if the secret exists for the namespace
 func (c *controller) hasSecret(name, namespace string) (bool, error) {
 	// step: get a list of all secrets
-	list, err := c.kc.Secrets(namespace).List(api.ListOptions{})
+	list, err := c.kc.CoreV1().Secrets(namespace).List(meta_v1.ListOptions{})
 	if err != nil {
 		return false, err
 	}
@@ -37,7 +39,6 @@ func (c *controller) hasSecret(name, namespace string) (bool, error) {
 			return true, nil
 		}
 	}
-
 	return false, nil
 }
 
@@ -50,16 +51,16 @@ func (c *controller) getSecret(name, namespace string) (certificate, error) {
 		"namespace": namespace,
 	}).Debug("retrieving the certificate secret from kubernetes")
 
-	secret, err := c.kc.Secrets(namespace).Get(name)
+	secret, err := c.kc.CoreV1().Secrets(namespace).Get(name, meta_v1.GetOptions{})
 	if err != nil {
 		return cert, err
 	}
 
-	if secret.Type != api.SecretTypeTLS {
-		return cert, fmt.Errorf("invalid secret type, expect: %s but got: %s", api.SecretTypeTLS, secret.Type)
+	if secret.Type != kc_api.SecretTypeTLS {
+		return cert, fmt.Errorf("invalid secret type, expect: %s but got: %s", kc_api.SecretTypeTLS, secret.Type)
 	}
-	cert.cert = []byte(secret.Data[api.TLSCertKey])
-	cert.key = []byte(secret.Data[api.TLSPrivateKeyKey])
+	cert.cert = []byte(secret.Data[kc_api.TLSCertKey])
+	cert.key = []byte(secret.Data[kc_api.TLSPrivateKeyKey])
 
 	return cert, nil
 }
@@ -71,15 +72,15 @@ func (c *controller) addSecret(name, namespace string, cert certificate) error {
 	bundle := fmt.Sprintf("%s\n%s", string(cert.cert), string(cert.ca))
 
 	// step: create the secret
-	secret := &api.Secret{
-		Type: api.SecretTypeTLS,
-		ObjectMeta: api.ObjectMeta{
+	secret := &kc_api.Secret{
+		Type: kc_api.SecretTypeTLS,
+		ObjectMeta: meta_v1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
 		},
 		Data: map[string][]byte{
-			api.TLSCertKey:       []byte(bundle),
-			api.TLSPrivateKeyKey: cert.key,
+			kc_api.TLSCertKey:       []byte(bundle),
+			kc_api.TLSPrivateKeyKey: cert.key,
 		},
 	}
 
@@ -90,18 +91,40 @@ func (c *controller) addSecret(name, namespace string, cert certificate) error {
 	}
 	switch found {
 	case false:
-		_, err = c.kc.Secrets(namespace).Create(secret)
+		_, err = c.kc.CoreV1().Secrets(namespace).Create(secret)
 	default:
-		_, err = c.kc.Secrets(namespace).Update(secret)
+		_, err = c.kc.CoreV1().Secrets(namespace).Update(secret)
 	}
 
 	return err
 }
 
-// createKubeClient is responsible for creating a kubernetes client
-func createKubeClient(path, context string) (*client.Client, error) {
-	var kc *client.Client
+// createKubeClient is responsible for creating a kubernetes clientset
+func createKubeClient(path, context string) (*kubernetes.Clientset, error) {
+	config, err := createKubeConfig(path, context)
+	if err != nil {
+		return nil, err
+	}
 
+	// creates the clientset
+	kc, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return nil, err
+	}
+
+	// step: test by getting the version
+	ksv, err := kc.ServerVersion()
+	if err != nil {
+		return nil, err
+	}
+	logrus.WithFields(logrus.Fields{
+		"version": ksv.Major + "." + ksv.Minor,
+	}).Debug("successfully connected to the api server")
+
+	return kc, nil
+}
+
+func createKubeConfig(path, context string) (*rest.Config, error) {
 	if path != "" && context != "" {
 		// step: load the confiuration file
 		kube, err := clientcmd.LoadFromFile(path)
@@ -109,26 +132,18 @@ func createKubeClient(path, context string) (*client.Client, error) {
 			return nil, err
 		}
 		// step: load the configuration
-		config, err := clientcmd.NewDefaultClientConfig(*kube, &clientcmd.ConfigOverrides{CurrentContext: context}).ClientConfig()
+		config, err := clientcmd.NewDefaultClientConfig(*kube,
+			&clientcmd.ConfigOverrides{CurrentContext: context}).ClientConfig()
 		if err != nil {
 			return nil, err
 		}
-		kc, err = client.New(config)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		// step: create the client
-		ci, err := client.NewInCluster()
-		if err != nil {
-			return nil, err
-		}
-		kc = ci
-	}
-	// step: test by getting the version
-	if _, err := kc.ServerVersion(); err != nil {
-		return nil, err
+		return config, nil
 	}
 
-	return kc, nil
+	// step: create the client
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, err
+	}
+	return config, nil
 }

@@ -19,13 +19,21 @@ package types
 import (
 	"fmt"
 
-	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	kubeapi "k8s.io/kubernetes/pkg/apis/core"
+	"k8s.io/kubernetes/pkg/apis/scheduling"
+	"k8s.io/kubernetes/pkg/features"
 )
 
-const ConfigSourceAnnotationKey = "kubernetes.io/config.source"
-const ConfigMirrorAnnotationKey = "kubernetes.io/config.mirror"
-const ConfigFirstSeenAnnotationKey = "kubernetes.io/config.seen"
-const ConfigHashAnnotationKey = "kubernetes.io/config.hash"
+const (
+	ConfigSourceAnnotationKey    = "kubernetes.io/config.source"
+	ConfigMirrorAnnotationKey    = v1.MirrorPodAnnotationKey
+	ConfigFirstSeenAnnotationKey = "kubernetes.io/config.seen"
+	ConfigHashAnnotationKey      = "kubernetes.io/config.hash"
+	CriticalPodAnnotationKey     = "scheduler.alpha.kubernetes.io/critical-pod"
+)
 
 // PodOperation defines what changes will be made on a pod configuration.
 type PodOperation int
@@ -44,6 +52,8 @@ const (
 	// Pods with the given ids have unexpected status in this source,
 	// kubelet should reconcile status with this source
 	RECONCILE
+	// Pods with the given ids have been restored from a checkpoint.
+	RESTORE
 
 	// These constants identify the sources of pods
 	// Updates from a file
@@ -55,7 +65,7 @@ const (
 	// Updates from all sources
 	AllSource = "*"
 
-	NamespaceDefault = api.NamespaceDefault
+	NamespaceDefault = metav1.NamespaceDefault
 )
 
 // PodUpdate defines an operation sent on the channel. You can add or remove single services by
@@ -68,7 +78,7 @@ const (
 // functionally similar, this helps our unit tests properly check that the correct PodUpdates
 // are generated.
 type PodUpdate struct {
-	Pods   []*api.Pod
+	Pods   []*v1.Pod
 	Op     PodOperation
 	Source string
 }
@@ -93,7 +103,7 @@ func GetValidatedSources(sources []string) ([]string, error) {
 }
 
 // GetPodSource returns the source of the pod based on the annotation.
-func GetPodSource(pod *api.Pod) (string, error) {
+func GetPodSource(pod *v1.Pod) (string, error) {
 	if pod.Annotations != nil {
 		if source, ok := pod.Annotations[ConfigSourceAnnotationKey]; ok {
 			return source, nil
@@ -130,4 +140,60 @@ func (sp SyncPodType) String() string {
 	default:
 		return "unknown"
 	}
+}
+
+// IsCriticalPod returns true if the pod bears the critical pod annotation key or if pod's priority is greater than
+// or equal to SystemCriticalPriority. Both the default scheduler and the kubelet use this function
+// to make admission and scheduling decisions.
+func IsCriticalPod(pod *v1.Pod) bool {
+	if utilfeature.DefaultFeatureGate.Enabled(features.PodPriority) {
+		if pod.Spec.Priority != nil && IsCriticalPodBasedOnPriority(*pod.Spec.Priority) {
+			return true
+		}
+	}
+	if utilfeature.DefaultFeatureGate.Enabled(features.ExperimentalCriticalPodAnnotation) {
+		if IsCritical(pod.Namespace, pod.Annotations) {
+			return true
+		}
+	}
+	return false
+}
+
+// Preemptable returns true if preemptor pod can preempt preemptee pod
+// if preemptee is not critical or if preemptor's priority is greater than preemptee's priority
+func Preemptable(preemptor, preemptee *v1.Pod) bool {
+	if IsCriticalPod(preemptor) && !IsCriticalPod(preemptee) {
+		return true
+	}
+	if utilfeature.DefaultFeatureGate.Enabled(features.PodPriority) {
+		if (preemptor != nil && preemptor.Spec.Priority != nil) &&
+			(preemptee != nil && preemptee.Spec.Priority != nil) {
+			return *(preemptor.Spec.Priority) > *(preemptee.Spec.Priority)
+		}
+	}
+
+	return false
+}
+
+// IsCritical returns true if parameters bear the critical pod annotation
+// key. The DaemonSetController use this key directly to make scheduling decisions.
+// TODO: @ravig - Deprecated. Remove this when we move to resolving critical pods based on priorityClassName.
+func IsCritical(ns string, annotations map[string]string) bool {
+	// Critical pods are restricted to "kube-system" namespace as of now.
+	if ns != kubeapi.NamespaceSystem {
+		return false
+	}
+	val, ok := annotations[CriticalPodAnnotationKey]
+	if ok && val == "" {
+		return true
+	}
+	return false
+}
+
+// IsCriticalPodBasedOnPriority checks if the given pod is a critical pod based on priority resolved from pod Spec.
+func IsCriticalPodBasedOnPriority(priority int32) bool {
+	if priority >= scheduling.SystemCriticalPriority {
+		return true
+	}
+	return false
 }

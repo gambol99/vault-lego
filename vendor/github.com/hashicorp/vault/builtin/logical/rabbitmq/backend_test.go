@@ -1,6 +1,7 @@
 package rabbitmq
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -23,7 +24,7 @@ func TestBackend_basic(t *testing.T) {
 		t.Skip(fmt.Sprintf("Acceptance tests skipped unless env '%s' set", logicaltest.TestEnvVar))
 		return
 	}
-	b, _ := Factory(logical.TestBackendConfig())
+	b, _ := Factory(context.Background(), logical.TestBackendConfig())
 
 	logicaltest.Test(t, logicaltest.TestCase{
 		PreCheck: func() { testAccPreCheck(t) },
@@ -42,7 +43,7 @@ func TestBackend_roleCrud(t *testing.T) {
 		t.Skip(fmt.Sprintf("Acceptance tests skipped unless env '%s' set", logicaltest.TestEnvVar))
 		return
 	}
-	b, _ := Factory(logical.TestBackendConfig())
+	b, _ := Factory(context.Background(), logical.TestBackendConfig())
 
 	logicaltest.Test(t, logicaltest.TestCase{
 		Backend: b,
@@ -64,13 +65,13 @@ const (
 
 func testAccPreCheck(t *testing.T) {
 	if uri := os.Getenv(envRabbitMQConnectionURI); uri == "" {
-		t.Fatal(fmt.Sprintf("%s must be set for acceptance tests", envRabbitMQConnectionURI))
+		t.Fatalf(fmt.Sprintf("%s must be set for acceptance tests", envRabbitMQConnectionURI))
 	}
 	if username := os.Getenv(envRabbitMQUsername); username == "" {
-		t.Fatal(fmt.Sprintf("%s must be set for acceptance tests", envRabbitMQUsername))
+		t.Fatalf(fmt.Sprintf("%s must be set for acceptance tests", envRabbitMQUsername))
 	}
 	if password := os.Getenv(envRabbitMQPassword); password == "" {
-		t.Fatal(fmt.Sprintf("%s must be set for acceptance tests", envRabbitMQPassword))
+		t.Fatalf(fmt.Sprintf("%s must be set for acceptance tests", envRabbitMQPassword))
 	}
 }
 
@@ -130,7 +131,7 @@ func testAccStepReadCreds(t *testing.T, b logical.Backend, name string) logicalt
 				t.Fatalf("unable to list vhosts with generated credentials: %s", err)
 			}
 
-			resp, err = b.HandleRequest(&logical.Request{
+			resp, err = b.HandleRequest(context.Background(), &logical.Request{
 				Operation: logical.RevokeOperation,
 				Secret: &logical.Secret{
 					InternalData: map[string]interface{}{

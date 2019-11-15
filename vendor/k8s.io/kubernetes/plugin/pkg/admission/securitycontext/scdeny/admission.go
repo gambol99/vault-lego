@@ -20,35 +20,37 @@ import (
 	"fmt"
 	"io"
 
-	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
-
-	"k8s.io/kubernetes/pkg/admission"
-	"k8s.io/kubernetes/pkg/api"
-	apierrors "k8s.io/kubernetes/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apiserver/pkg/admission"
+	api "k8s.io/kubernetes/pkg/apis/core"
 )
 
-func init() {
-	admission.RegisterPlugin("SecurityContextDeny", func(client clientset.Interface, config io.Reader) (admission.Interface, error) {
-		return NewSecurityContextDeny(client), nil
+// PluginName indicates name of admission plugin.
+const PluginName = "SecurityContextDeny"
+
+// Register registers a plugin
+func Register(plugins *admission.Plugins) {
+	plugins.Register(PluginName, func(config io.Reader) (admission.Interface, error) {
+		return NewSecurityContextDeny(), nil
 	})
 }
 
-// plugin contains the client used by the SecurityContextDeny admission controller
-type plugin struct {
+// Plugin implements admission.Interface.
+type Plugin struct {
 	*admission.Handler
-	client clientset.Interface
 }
 
+var _ admission.ValidationInterface = &Plugin{}
+
 // NewSecurityContextDeny creates a new instance of the SecurityContextDeny admission controller
-func NewSecurityContextDeny(client clientset.Interface) admission.Interface {
-	return &plugin{
+func NewSecurityContextDeny() *Plugin {
+	return &Plugin{
 		Handler: admission.NewHandler(admission.Create, admission.Update),
-		client:  client,
 	}
 }
 
-// Admit will deny any pod that defines SELinuxOptions or RunAsUser.
-func (p *plugin) Admit(a admission.Attributes) (err error) {
+// Validate will deny any pod that defines SupplementalGroups, SELinuxOptions, RunAsUser or FSGroup
+func (p *Plugin) Validate(a admission.Attributes) (err error) {
 	if a.GetSubresource() != "" || a.GetResource().GroupResource() != api.Resource("pods") {
 		return nil
 	}
@@ -58,20 +60,19 @@ func (p *plugin) Admit(a admission.Attributes) (err error) {
 		return apierrors.NewBadRequest("Resource was marked with kind Pod but was unable to be converted")
 	}
 
-	if pod.Spec.SecurityContext != nil && pod.Spec.SecurityContext.SupplementalGroups != nil {
-		return apierrors.NewForbidden(a.GetResource().GroupResource(), pod.Name, fmt.Errorf("SecurityContext.SupplementalGroups is forbidden"))
-	}
 	if pod.Spec.SecurityContext != nil {
+		if pod.Spec.SecurityContext.SupplementalGroups != nil {
+			return apierrors.NewForbidden(a.GetResource().GroupResource(), pod.Name, fmt.Errorf("pod.Spec.SecurityContext.SupplementalGroups is forbidden"))
+		}
 		if pod.Spec.SecurityContext.SELinuxOptions != nil {
 			return apierrors.NewForbidden(a.GetResource().GroupResource(), pod.Name, fmt.Errorf("pod.Spec.SecurityContext.SELinuxOptions is forbidden"))
 		}
 		if pod.Spec.SecurityContext.RunAsUser != nil {
 			return apierrors.NewForbidden(a.GetResource().GroupResource(), pod.Name, fmt.Errorf("pod.Spec.SecurityContext.RunAsUser is forbidden"))
 		}
-	}
-
-	if pod.Spec.SecurityContext != nil && pod.Spec.SecurityContext.FSGroup != nil {
-		return apierrors.NewForbidden(a.GetResource().GroupResource(), pod.Name, fmt.Errorf("SecurityContext.FSGroup is forbidden"))
+		if pod.Spec.SecurityContext.FSGroup != nil {
+			return apierrors.NewForbidden(a.GetResource().GroupResource(), pod.Name, fmt.Errorf("pod.Spec.SecurityContext.FSGroup is forbidden"))
+		}
 	}
 
 	for _, v := range pod.Spec.InitContainers {

@@ -17,29 +17,31 @@ limitations under the License.
 package cmd
 
 import (
-	"bytes"
 	"net/http"
 	"strings"
 	"testing"
 
-	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/client/typed/dynamic"
-	"k8s.io/kubernetes/pkg/client/unversioned/fake"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/cli-runtime/pkg/genericclioptions"
+	"k8s.io/client-go/rest/fake"
+	cmdtesting "k8s.io/kubernetes/pkg/kubectl/cmd/testing"
+	"k8s.io/kubernetes/pkg/kubectl/scheme"
 )
 
 func TestReplaceObject(t *testing.T) {
 	_, _, rc := testData()
 
-	f, tf, codec, _ := NewAPIFactory()
-	ns := dynamic.ContentConfig().NegotiatedSerializer
-	tf.Printer = &testPrinter{}
+	tf := cmdtesting.NewTestFactory().WithNamespace("test")
+	defer tf.Cleanup()
+	codec := scheme.Codecs.LegacyCodec(scheme.Scheme.PrioritizedVersionsAllGroups()...)
+
 	deleted := false
-	tf.Client = &fake.RESTClient{
-		NegotiatedSerializer: ns,
+	tf.UnstructuredClient = &fake.RESTClient{
+		NegotiatedSerializer: unstructuredSerializer,
 		Client: fake.CreateHTTPClient(func(req *http.Request) (*http.Response, error) {
 			switch p, m := req.URL.Path, req.Method; {
 			case p == "/api/v1/namespaces/test" && m == http.MethodGet:
-				return &http.Response{StatusCode: http.StatusOK, Header: defaultHeader(), Body: objBody(codec, &api.Namespace{})}, nil
+				return &http.Response{StatusCode: http.StatusOK, Header: defaultHeader(), Body: objBody(codec, &corev1.Namespace{})}, nil
 			case p == "/namespaces/test/replicationcontrollers/redis-master" && m == http.MethodDelete:
 				deleted = true
 				fallthrough
@@ -59,11 +61,10 @@ func TestReplaceObject(t *testing.T) {
 			}
 		}),
 	}
-	tf.Namespace = "test"
-	buf := bytes.NewBuffer([]byte{})
+	streams, _, buf, _ := genericclioptions.NewTestIOStreams()
 
-	cmd := NewCmdReplace(f, buf)
-	cmd.Flags().Set("filename", "../../../examples/guestbook/legacy/redis-master-controller.yaml")
+	cmd := NewCmdReplace(tf, streams)
+	cmd.Flags().Set("filename", "../../../test/e2e/testing-manifests/guestbook/legacy/redis-master-controller.yaml")
 	cmd.Flags().Set("output", "name")
 	cmd.Run(cmd, []string{})
 
@@ -86,17 +87,18 @@ func TestReplaceObject(t *testing.T) {
 func TestReplaceMultipleObject(t *testing.T) {
 	_, svc, rc := testData()
 
-	f, tf, codec, _ := NewAPIFactory()
-	ns := dynamic.ContentConfig().NegotiatedSerializer
-	tf.Printer = &testPrinter{}
+	tf := cmdtesting.NewTestFactory().WithNamespace("test")
+	defer tf.Cleanup()
+	codec := scheme.Codecs.LegacyCodec(scheme.Scheme.PrioritizedVersionsAllGroups()...)
+
 	redisMasterDeleted := false
 	frontendDeleted := false
-	tf.Client = &fake.RESTClient{
-		NegotiatedSerializer: ns,
+	tf.UnstructuredClient = &fake.RESTClient{
+		NegotiatedSerializer: unstructuredSerializer,
 		Client: fake.CreateHTTPClient(func(req *http.Request) (*http.Response, error) {
 			switch p, m := req.URL.Path, req.Method; {
 			case p == "/api/v1/namespaces/test" && m == http.MethodGet:
-				return &http.Response{StatusCode: http.StatusOK, Header: defaultHeader(), Body: objBody(codec, &api.Namespace{})}, nil
+				return &http.Response{StatusCode: http.StatusOK, Header: defaultHeader(), Body: objBody(codec, &corev1.Namespace{})}, nil
 			case p == "/namespaces/test/replicationcontrollers/redis-master" && m == http.MethodDelete:
 				redisMasterDeleted = true
 				fallthrough
@@ -129,12 +131,11 @@ func TestReplaceMultipleObject(t *testing.T) {
 			}
 		}),
 	}
-	tf.Namespace = "test"
-	buf := bytes.NewBuffer([]byte{})
+	streams, _, buf, _ := genericclioptions.NewTestIOStreams()
 
-	cmd := NewCmdReplace(f, buf)
-	cmd.Flags().Set("filename", "../../../examples/guestbook/legacy/redis-master-controller.yaml")
-	cmd.Flags().Set("filename", "../../../examples/guestbook/frontend-service.yaml")
+	cmd := NewCmdReplace(tf, streams)
+	cmd.Flags().Set("filename", "../../../test/e2e/testing-manifests/guestbook/legacy/redis-master-controller.yaml")
+	cmd.Flags().Set("filename", "../../../test/e2e/testing-manifests/guestbook/frontend-service.yaml")
 	cmd.Flags().Set("output", "name")
 	cmd.Run(cmd, []string{})
 
@@ -156,16 +157,17 @@ func TestReplaceMultipleObject(t *testing.T) {
 func TestReplaceDirectory(t *testing.T) {
 	_, _, rc := testData()
 
-	f, tf, codec, _ := NewAPIFactory()
-	ns := dynamic.ContentConfig().NegotiatedSerializer
-	tf.Printer = &testPrinter{}
+	tf := cmdtesting.NewTestFactory().WithNamespace("test")
+	defer tf.Cleanup()
+	codec := scheme.Codecs.LegacyCodec(scheme.Scheme.PrioritizedVersionsAllGroups()...)
+
 	created := map[string]bool{}
-	tf.Client = &fake.RESTClient{
-		NegotiatedSerializer: ns,
+	tf.UnstructuredClient = &fake.RESTClient{
+		NegotiatedSerializer: unstructuredSerializer,
 		Client: fake.CreateHTTPClient(func(req *http.Request) (*http.Response, error) {
 			switch p, m := req.URL.Path, req.Method; {
 			case p == "/api/v1/namespaces/test" && m == http.MethodGet:
-				return &http.Response{StatusCode: http.StatusOK, Header: defaultHeader(), Body: objBody(codec, &api.Namespace{})}, nil
+				return &http.Response{StatusCode: http.StatusOK, Header: defaultHeader(), Body: objBody(codec, &corev1.Namespace{})}, nil
 			case strings.HasPrefix(p, "/namespaces/test/replicationcontrollers/") && m == http.MethodPut:
 				created[p] = true
 				return &http.Response{StatusCode: http.StatusOK, Header: defaultHeader(), Body: objBody(codec, &rc.Items[0])}, nil
@@ -186,11 +188,10 @@ func TestReplaceDirectory(t *testing.T) {
 			}
 		}),
 	}
-	tf.Namespace = "test"
-	buf := bytes.NewBuffer([]byte{})
+	streams, _, buf, _ := genericclioptions.NewTestIOStreams()
 
-	cmd := NewCmdReplace(f, buf)
-	cmd.Flags().Set("filename", "../../../examples/guestbook/legacy")
+	cmd := NewCmdReplace(tf, streams)
+	cmd.Flags().Set("filename", "../../../test/e2e/testing-manifests/guestbook/legacy")
 	cmd.Flags().Set("namespace", "test")
 	cmd.Flags().Set("output", "name")
 	cmd.Run(cmd, []string{})
@@ -213,15 +214,16 @@ func TestReplaceDirectory(t *testing.T) {
 func TestForceReplaceObjectNotFound(t *testing.T) {
 	_, _, rc := testData()
 
-	f, tf, codec, _ := NewAPIFactory()
-	ns := dynamic.ContentConfig().NegotiatedSerializer
-	tf.Printer = &testPrinter{}
-	tf.Client = &fake.RESTClient{
-		NegotiatedSerializer: ns,
+	tf := cmdtesting.NewTestFactory().WithNamespace("test")
+	defer tf.Cleanup()
+	codec := scheme.Codecs.LegacyCodec(scheme.Scheme.PrioritizedVersionsAllGroups()...)
+
+	tf.UnstructuredClient = &fake.RESTClient{
+		NegotiatedSerializer: unstructuredSerializer,
 		Client: fake.CreateHTTPClient(func(req *http.Request) (*http.Response, error) {
 			switch p, m := req.URL.Path, req.Method; {
 			case p == "/api/v1/namespaces/test" && m == http.MethodGet:
-				return &http.Response{StatusCode: http.StatusOK, Header: defaultHeader(), Body: objBody(codec, &api.Namespace{})}, nil
+				return &http.Response{StatusCode: http.StatusOK, Header: defaultHeader(), Body: objBody(codec, &corev1.Namespace{})}, nil
 			case p == "/namespaces/test/replicationcontrollers/redis-master" && (m == http.MethodGet || m == http.MethodDelete):
 				return &http.Response{StatusCode: http.StatusNotFound, Header: defaultHeader(), Body: stringBody("")}, nil
 			case p == "/namespaces/test/replicationcontrollers" && m == http.MethodPost:
@@ -232,11 +234,10 @@ func TestForceReplaceObjectNotFound(t *testing.T) {
 			}
 		}),
 	}
-	tf.Namespace = "test"
-	buf := bytes.NewBuffer([]byte{})
+	streams, _, buf, _ := genericclioptions.NewTestIOStreams()
 
-	cmd := NewCmdReplace(f, buf)
-	cmd.Flags().Set("filename", "../../../examples/guestbook/legacy/redis-master-controller.yaml")
+	cmd := NewCmdReplace(tf, streams)
+	cmd.Flags().Set("filename", "../../../test/e2e/testing-manifests/guestbook/legacy/redis-master-controller.yaml")
 	cmd.Flags().Set("force", "true")
 	cmd.Flags().Set("cascade", "false")
 	cmd.Flags().Set("output", "name")

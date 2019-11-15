@@ -17,39 +17,45 @@ limitations under the License.
 package storageclass
 
 import (
-	"fmt"
+	"context"
 
-	"k8s.io/kubernetes/pkg/api"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/apiserver/pkg/storage/names"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	"k8s.io/kubernetes/pkg/apis/storage"
+	storageutil "k8s.io/kubernetes/pkg/apis/storage/util"
 	"k8s.io/kubernetes/pkg/apis/storage/validation"
-	"k8s.io/kubernetes/pkg/fields"
-	"k8s.io/kubernetes/pkg/labels"
-	"k8s.io/kubernetes/pkg/registry/generic"
-	"k8s.io/kubernetes/pkg/runtime"
-	apistorage "k8s.io/kubernetes/pkg/storage"
-	"k8s.io/kubernetes/pkg/util/validation/field"
+	"k8s.io/kubernetes/pkg/features"
 )
 
 // storageClassStrategy implements behavior for StorageClass objects
 type storageClassStrategy struct {
 	runtime.ObjectTyper
-	api.NameGenerator
+	names.NameGenerator
 }
 
 // Strategy is the default logic that applies when creating and updating
 // StorageClass objects via the REST API.
-var Strategy = storageClassStrategy{api.Scheme, api.SimpleNameGenerator}
+var Strategy = storageClassStrategy{legacyscheme.Scheme, names.SimpleNameGenerator}
 
 func (storageClassStrategy) NamespaceScoped() bool {
 	return false
 }
 
 // ResetBeforeCreate clears the Status field which is not allowed to be set by end users on creation.
-func (storageClassStrategy) PrepareForCreate(ctx api.Context, obj runtime.Object) {
-	_ = obj.(*storage.StorageClass)
+func (storageClassStrategy) PrepareForCreate(ctx context.Context, obj runtime.Object) {
+	class := obj.(*storage.StorageClass)
+
+	if !utilfeature.DefaultFeatureGate.Enabled(features.ExpandPersistentVolumes) {
+		class.AllowVolumeExpansion = nil
+	}
+
+	storageutil.DropDisabledAlphaFields(class)
 }
 
-func (storageClassStrategy) Validate(ctx api.Context, obj runtime.Object) field.ErrorList {
+func (storageClassStrategy) Validate(ctx context.Context, obj runtime.Object) field.ErrorList {
 	storageClass := obj.(*storage.StorageClass)
 	return validation.ValidateStorageClass(storageClass)
 }
@@ -63,37 +69,23 @@ func (storageClassStrategy) AllowCreateOnUpdate() bool {
 }
 
 // PrepareForUpdate sets the Status fields which is not allowed to be set by an end user updating a PV
-func (storageClassStrategy) PrepareForUpdate(ctx api.Context, obj, old runtime.Object) {
-	_ = obj.(*storage.StorageClass)
-	_ = old.(*storage.StorageClass)
+func (storageClassStrategy) PrepareForUpdate(ctx context.Context, obj, old runtime.Object) {
+	newClass := obj.(*storage.StorageClass)
+	oldClass := old.(*storage.StorageClass)
+
+	if !utilfeature.DefaultFeatureGate.Enabled(features.ExpandPersistentVolumes) {
+		newClass.AllowVolumeExpansion = nil
+		oldClass.AllowVolumeExpansion = nil
+	}
+	storageutil.DropDisabledAlphaFields(oldClass)
+	storageutil.DropDisabledAlphaFields(newClass)
 }
 
-func (storageClassStrategy) ValidateUpdate(ctx api.Context, obj, old runtime.Object) field.ErrorList {
+func (storageClassStrategy) ValidateUpdate(ctx context.Context, obj, old runtime.Object) field.ErrorList {
 	errorList := validation.ValidateStorageClass(obj.(*storage.StorageClass))
 	return append(errorList, validation.ValidateStorageClassUpdate(obj.(*storage.StorageClass), old.(*storage.StorageClass))...)
 }
 
 func (storageClassStrategy) AllowUnconditionalUpdate() bool {
 	return true
-}
-
-// MatchStorageClass returns a generic matcher for a given label and field selector.
-func MatchStorageClasses(label labels.Selector, field fields.Selector) apistorage.SelectionPredicate {
-	return apistorage.SelectionPredicate{
-		Label: label,
-		Field: field,
-		GetAttrs: func(obj runtime.Object) (labels.Set, fields.Set, error) {
-			cls, ok := obj.(*storage.StorageClass)
-			if !ok {
-				return nil, nil, fmt.Errorf("given object is not of type StorageClass")
-			}
-
-			return labels.Set(cls.ObjectMeta.Labels), StorageClassToSelectableFields(cls), nil
-		},
-	}
-}
-
-// StorageClassToSelectableFields returns a label set that represents the object
-func StorageClassToSelectableFields(storageClass *storage.StorageClass) fields.Set {
-	return generic.ObjectMetaFieldsSet(&storageClass.ObjectMeta, false)
 }

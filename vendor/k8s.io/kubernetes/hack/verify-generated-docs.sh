@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Copyright 2014 The Kubernetes Authors.
 #
@@ -28,7 +28,6 @@ BINS=(
 	cmd/genkubedocs
 	cmd/genman
 	cmd/genyaml
-	federation/cmd/genfeddocs
 )
 make -C "${KUBE_ROOT}" WHAT="${BINS[*]}"
 
@@ -37,7 +36,7 @@ kube::util::ensure-temp-dir
 kube::util::gen-docs "${KUBE_TEMP}"
 
 # Verify the list matches the expected list (diff should be empty)
-if [[ "$(diff ${KUBE_ROOT}/.generated_docs ${KUBE_TEMP}/.generated_docs)" != "" ]]; then
+if ! diff "${KUBE_ROOT}/docs/.generated_docs" "${KUBE_TEMP}/docs/.generated_docs"; then
   echo "List of generated docs doesn't match a freshly built list. Please run hack/update-generated-docs.sh"
   exit 1
 fi
@@ -45,8 +44,8 @@ fi
 # Verify the files in the repo all contain the boilerplate instead of the actual
 # content.
 while read file; do
-  # Ignore .generated_docs-- it should not have the boilerplate!
-  [[ "${file}" == ".generated_docs" ]] && continue
+  # Ignore docs/.generated_docs-- it should not have the boilerplate!
+  [[ "${file}" == "docs/.generated_docs" ]] && continue
 
   # Search for "hack/generate-docs.sh" as a proxy for the boilerplate content,
   # since the munger adds a bunch of other stuff.
@@ -55,4 +54,4 @@ while read file; do
     echo "Please run hack/update-generated-docs.sh"
     exit 1
   fi
-done <"${KUBE_ROOT}/.generated_docs"
+done <"${KUBE_ROOT}/docs/.generated_docs"

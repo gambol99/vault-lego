@@ -17,13 +17,13 @@ limitations under the License.
 package config
 
 import (
-	"bytes"
 	"io/ioutil"
 	"os"
 	"testing"
 
-	"k8s.io/kubernetes/pkg/client/unversioned/clientcmd"
-	clientcmdapi "k8s.io/kubernetes/pkg/client/unversioned/clientcmd/api"
+	"k8s.io/cli-runtime/pkg/genericclioptions"
+	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 )
 
 type getContextsTest struct {
@@ -61,7 +61,28 @@ func TestGetContextsAllNoHeader(t *testing.T) {
 		names:          []string{},
 		noHeader:       true,
 		nameOnly:       false,
-		expectedOut:    "*         shaker-context   big-cluster   blue-user   saw-ns\n",
+		expectedOut:    "*     shaker-context   big-cluster   blue-user   saw-ns\n",
+	}
+	test.run(t)
+}
+
+func TestGetContextsAllSorted(t *testing.T) {
+	tconf := clientcmdapi.Config{
+		CurrentContext: "shaker-context",
+		Contexts: map[string]*clientcmdapi.Context{
+			"shaker-context": {AuthInfo: "blue-user", Cluster: "big-cluster", Namespace: "saw-ns"},
+			"abc":            {AuthInfo: "blue-user", Cluster: "abc-cluster", Namespace: "kube-system"},
+			"xyz":            {AuthInfo: "blue-user", Cluster: "xyz-cluster", Namespace: "default"}}}
+	test := getContextsTest{
+		startingConfig: tconf,
+		names:          []string{},
+		noHeader:       false,
+		nameOnly:       false,
+		expectedOut: `CURRENT   NAME             CLUSTER       AUTHINFO    NAMESPACE
+          abc              abc-cluster   blue-user   kube-system
+*         shaker-context   big-cluster   blue-user   saw-ns
+          xyz              xyz-cluster   blue-user   default
+`,
 	}
 	test.run(t)
 }
@@ -123,9 +144,12 @@ func TestGetContextsSelectOneOfTwo(t *testing.T) {
 }
 
 func (test getContextsTest) run(t *testing.T) {
-	fakeKubeFile, _ := ioutil.TempFile("", "")
+	fakeKubeFile, err := ioutil.TempFile("", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	defer os.Remove(fakeKubeFile.Name())
-	err := clientcmd.WriteToFile(test.startingConfig, fakeKubeFile.Name())
+	err = clientcmd.WriteToFile(test.startingConfig, fakeKubeFile.Name())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -133,11 +157,11 @@ func (test getContextsTest) run(t *testing.T) {
 	pathOptions := clientcmd.NewDefaultPathOptions()
 	pathOptions.GlobalFile = fakeKubeFile.Name()
 	pathOptions.EnvVar = ""
-	buf := bytes.NewBuffer([]byte{})
+	streams, _, buf, _ := genericclioptions.NewTestIOStreams()
 	options := GetContextsOptions{
 		configAccess: pathOptions,
 	}
-	cmd := NewCmdConfigGetContexts(buf, options.configAccess)
+	cmd := NewCmdConfigGetContexts(streams, options.configAccess)
 	if test.nameOnly {
 		cmd.Flags().Set("output", "name")
 	}
@@ -147,12 +171,8 @@ func (test getContextsTest) run(t *testing.T) {
 	cmd.Run(cmd, test.names)
 	if len(test.expectedOut) != 0 {
 		if buf.String() != test.expectedOut {
-			t.Errorf("Expected %v, but got %v", test.expectedOut, buf.String())
+			t.Errorf("Expected\n%s\ngot\n%s", test.expectedOut, buf.String())
 		}
 		return
-	}
-
-	if err != nil {
-		t.Errorf("Unexpected error: %v", err)
 	}
 }
