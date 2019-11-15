@@ -63,7 +63,7 @@ func (c *controller) reconcileIngress() {
 			logrus.WithFields(logrus.Fields{
 				"name":      x.Name,
 				"namespace": x.Namespace,
-			}).Debug("skipping ingress resource, not enabled")
+			}).Debug("vault-lego annotation not enabled; skipping")
 			continue
 		}
 
@@ -73,9 +73,14 @@ func (c *controller) reconcileIngress() {
 				"name":      x.Name,
 				"namespace": x.Namespace,
 				"error":     err.Error(),
-			}).Error("invalid ingress resource")
+			}).Error("invalid ingress resource; skipping")
 			continue
 		}
+
+		logrus.WithFields(logrus.Fields{
+			"name":      x.Name,
+			"namespace": x.Namespace,
+		}).Debug("processing ingress tls config")
 
 		// step: we iterate the tls configs and check the certificate exists
 		for _, tls := range x.Spec.TLS {
